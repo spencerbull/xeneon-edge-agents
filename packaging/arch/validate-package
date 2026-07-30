@@ -125,16 +125,19 @@ if grep -Fq 'EnvironmentFile=' "$portal_unit"; then
 fi
 if command -v systemd-analyze >/dev/null 2>&1; then
   verify_dir=$temp_dir/systemd-verify
+  verify_runtime=$temp_dir/systemd-runtime
   mkdir -p "$verify_dir"
+  install -d -m 0700 "$verify_runtime"
   sed \
     's|^ExecStart=/usr/bin/xeneon-agentd .*$|ExecStart=/usr/bin/true|' \
     "$daemon_unit" >"$verify_dir/xeneon-agentd.service"
   sed \
     's|^ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh$|ExecStart=/usr/bin/true|' \
     "$portal_unit" >"$verify_dir/xeneon-edge-portal.service"
-  systemd-analyze --user verify \
-    "$verify_dir/xeneon-agentd.service" \
-    "$verify_dir/xeneon-edge-portal.service"
+  XDG_RUNTIME_DIR=$verify_runtime \
+    systemd-analyze --user verify \
+      "$verify_dir/xeneon-agentd.service" \
+      "$verify_dir/xeneon-edge-portal.service"
 fi
 
 for command in \
