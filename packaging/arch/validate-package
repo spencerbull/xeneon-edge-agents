@@ -131,7 +131,7 @@ grep -Fqx \
   'unset XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID' \
   "$portal_launcher"
 grep -Fqx \
-  '"$script_dir/check.sh" --package-prefix /usr --require-production' \
+  "\"\$script_dir/check.sh\" --package-prefix /usr --require-production" \
   "$portal_launcher"
 if grep -Fq 'EnvironmentFile=' "$portal_unit"; then
   printf 'error: portal unit loads unvalidated user environment directly\n' >&2
