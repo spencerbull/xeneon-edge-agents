@@ -40,7 +40,7 @@ artifacts.
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Omarchy integration | `main` | `config/`, `scripts/`, services, install tests | Complete at `995d123`; simulator installed |
 | Arch packaging | `agent/arch-packaging-ci` | `packaging/arch/`, package helper and tests | Complete through `cdcd8db` |
-| GitHub automation | `agent/arch-packaging-ci` | `.github/`, CI documentation | Implemented through `76b3df8`; hosted rerun pending |
+| GitHub automation | `agent/arch-packaging-ci` | `.github/`, CI documentation | Implemented on the current branch; hosted rerun pending |
 
 ## Allowed actions
 
