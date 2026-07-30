@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/spencerbull/xeneon-edge-agents/schema/portal-v1.schema.json",
+  "title": "XENEON EDGE portal protocol v1",
+  "oneOf": [
+    { "$ref": "#/$defs/snapshotMessage" },
+    { "$ref": "#/$defs/actionResultMessage" },
+    { "$ref": "#/$defs/noticeMessage" },
+    { "$ref": "#/$defs/commandMessage" }
+  ],
+  "$defs": {
+    "agentStatus": {
+      "enum": ["blocked", "done", "working", "idle", "unknown"]
+    },
+    "actionKind": {
+      "enum": ["open", "zoom", "approve", "interrupt", "restore_focus"]
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "capability_id",
+        "kind",
+        "expires_at_ms",
+        "expected_revision"
+      ],
+      "properties": {
+        "capability_id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/actionKind" },
+        "expires_at_ms": { "type": "integer", "minimum": 0 },
+        "expected_revision": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["available", "unit"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "value": { "type": "number" },
+        "unit": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "available": { "const": false } },
+            "required": ["available"]
+          },
+          "then": { "not": { "required": ["value"] } }
+        }
+      ]
+    },
+    "health": {
+      "type": "object",
+      "required": [
+        "cpu",
+        "cpu_temperature",
+        "gpu",
+        "gpu_temperature",
+        "memory",
+        "network_down",
+        "network_up",
+        "battery"
+      ],
+      "properties": {
+        "cpu": { "$ref": "#/$defs/metric" },
+        "cpu_temperature": { "$ref": "#/$defs/metric" },
+        "gpu": { "$ref": "#/$defs/metric" },
+        "gpu_temperature": { "$ref": "#/$defs/metric" },
+        "memory": { "$ref": "#/$defs/metric" },
+        "network_down": { "$ref": "#/$defs/metric" },
+        "network_up": { "$ref": "#/$defs/metric" },
+        "battery": { "$ref": "#/$defs/metric" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": [
+        "id",
+        "display_name",
+        "agent",
+        "status",
+        "workspace",
+        "session",
+        "focused",
+        "observed_for_seconds",
+        "source_order",
+        "actions"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string" },
+        "agent": { "type": "string" },
+        "status": { "$ref": "#/$defs/agentStatus" },
+        "workspace": { "type": "string" },
+        "repository": { "type": "string" },
+        "worktree": { "type": "string" },
+        "session": { "type": "string" },
+        "focused": { "type": "boolean" },
+        "observed_for_seconds": { "type": "integer", "minimum": 0 },
+        "source_order": { "type": "integer", "minimum": 0 },
+        "actions": {
+          "type": "object",
+          "required": ["open", "zoom"],
+          "properties": {
+            "open": { "type": "boolean" },
+            "zoom": { "type": "boolean" },
+            "approve": { "$ref": "#/$defs/capability" },
+            "interrupt": { "$ref": "#/$defs/capability" }
+          }
+        }
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["name", "state"],
+      "properties": {
+        "name": { "type": "string" },
+        "state": {
+          "enum": ["connected", "stale", "incompatible", "offline"]
+        },
+        "version": { "type": "string" },
+        "protocol": { "type": "integer", "minimum": 0 },
+        "last_sync_ms": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string" }
+      }
+    },
+    "snapshotMessage": {
+      "type": "object",
+      "required": [
+        "type",
+        "schema_version",
+        "sequence",
+        "daemon_epoch",
+        "generated_at_ms",
+        "connection",
+        "sessions",
+        "agents",
+        "health"
+      ],
+      "properties": {
+        "type": { "const": "snapshot" },
+        "schema_version": { "const": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "daemon_epoch": { "type": "string", "minLength": 1 },
+        "generated_at_ms": { "type": "integer", "minimum": 0 },
+        "connection": {
+          "enum": ["connected", "degraded", "reconnecting", "offline"]
+        },
+        "sessions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/session" }
+        },
+        "agents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agent" }
+        },
+        "health": { "$ref": "#/$defs/health" }
+      }
+    },
+    "actionResultMessage": {
+      "type": "object",
+      "required": [
+        "type",
+        "schema_version",
+        "request_id",
+        "ok",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "type": { "const": "action_result" },
+        "schema_version": { "const": 1 },
+        "request_id": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "noticeMessage": {
+      "type": "object",
+      "required": ["type", "schema_version", "level", "code", "message"],
+      "properties": {
+        "type": { "const": "notice" },
+        "schema_version": { "const": 1 },
+        "level": { "type": "string" },
+        "code": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    "commandMessage": {
+      "type": "object",
+      "required": [
+        "type",
+        "schema_version",
+        "request_id",
+        "sequence",
+        "action"
+      ],
+      "properties": {
+        "type": { "const": "command" },
+        "schema_version": { "const": 1 },
+        "request_id": { "type": "string", "minLength": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "agent_id": { "type": "string", "minLength": 1 },
+        "action": { "$ref": "#/$defs/actionKind" },
+        "capability_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
