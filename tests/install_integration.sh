@@ -928,6 +928,7 @@ test_live_production_preflight_changes_nothing_when_edge_absent() {
     XDG_DATA_HOME="$root/data" \
     XDG_STATE_HOME="$root/state" \
     XDG_BIN_HOME="$root/bin" \
+    PATH="$root/bin:/usr/bin" \
     "$install_script" --apply-production \
       --connector DP-99 --edid-sha256 "$sha" \
       --screen-serial CX123456 --screen-model "XENEON EDGE" \
