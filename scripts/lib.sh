@@ -17,6 +17,14 @@ note() {
   printf '%s\n' "$*"
 }
 
+disable_legacy_package_services() {
+  local removable_count=$1
+  local systemctl_command=$2
+  shift 2
+  ((removable_count)) || return 0
+  "$systemctl_command" --user disable --now "$@"
+}
+
 canonical_dir() {
   local value=$1
   realpath -m -- "$value"
@@ -285,6 +293,36 @@ top_level_toml_value() {
         print line
         exit
       }
+    }
+  ' "$file"
+}
+
+validate_portal_env() {
+  local file=$1
+  local connector=$2
+  local serial=$3
+  local model=$4
+
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  awk -v connector="$connector" -v serial="$serial" -v model="$model" '
+    /^[[:space:]]*($|#)/ { next }
+    $0 == "XENEON_EDGE_OUTPUT=\"" connector "\"" { output++; next }
+    $0 == "XENEON_EDGE_SERIAL=\"" serial "\"" { screen_serial++; next }
+    $0 == "XENEON_EDGE_MODEL=\"" model "\"" { screen_model++; next }
+    { invalid=1 }
+    END {
+      exit !(!invalid && output == 1 && screen_serial == 1 && screen_model == 1)
+    }
+  ' "$file"
+}
+
+portal_env_value() {
+  local file=$1
+  local key=$2
+  awk -v key="$key" '
+    index($0, key "=\"") == 1 && substr($0, length($0), 1) == "\"" {
+      print substr($0, length(key) + 3, length($0) - length(key) - 3)
+      exit
     }
   ' "$file"
 }

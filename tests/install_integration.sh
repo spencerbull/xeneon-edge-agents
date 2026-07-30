@@ -7,6 +7,7 @@ install_script=$repo_root/scripts/install.sh
 check_script=$repo_root/scripts/check.sh
 uninstall_script=$repo_root/scripts/uninstall.sh
 detect_script=$repo_root/scripts/detect-hardware.sh
+package_migrate_script=$repo_root/scripts/migrate-package.sh
 production_touch_args=(
   --touch-device corsair-xeneon-edge-touchscreen
   --touch-bustype 0003
@@ -112,6 +113,24 @@ make_runtime_stubs() {
   chmod +x "$root/.local/bin/xeneon-agentd" "$root/.local/bin/xeneon-agentctl"
   printf 'import Quickshell\nShellRoot {}\n' >"$quickshell_source/shell.qml"
   printf 'import QtQuick\nItem {}\n' >"$quickshell_source/components/Stub.qml"
+}
+
+make_package_prefix() {
+  local prefix=$1
+  mkdir -p \
+    "$prefix/bin" \
+    "$prefix/lib/systemd/user" \
+    "$prefix/share/xeneon-edge-agents"
+  install -m 0755 /dev/null "$prefix/bin/xeneon-agentd"
+  install -m 0755 /dev/null "$prefix/bin/xeneon-agentctl"
+  cp -a "$repo_root/config" "$prefix/share/xeneon-edge-agents/config"
+  cp -a "$repo_root/quickshell" "$prefix/share/xeneon-edge-agents/quickshell"
+  install -m 0644 \
+    "$repo_root/packaging/arch/systemd/xeneon-agentd.service" \
+    "$prefix/lib/systemd/user/xeneon-agentd.service"
+  install -m 0644 \
+    "$repo_root/packaging/arch/systemd/xeneon-edge-portal.service" \
+    "$prefix/lib/systemd/user/xeneon-edge-portal.service"
 }
 
 write_hypr_devices() {
@@ -931,6 +950,142 @@ test_read_only_detection_reports_physical_gate() {
   assert_contains "$output" 'No configuration was changed'
 }
 
+test_package_layout_migrates_static_payload() {
+  local root prefix hypr_before config_before
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  write_hyprland "$root"
+  make_package_prefix "$prefix"
+
+  "$install_script" --root "$root" >/dev/null
+  hypr_before=$(sha256sum "$root/.config/hypr/hyprland.lua")
+  config_before=$(sha256sum "$root/.config/xeneon-edge-agents/config.toml")
+
+  "$install_script" \
+    --root "$root" \
+    --package-prefix "$prefix" >/dev/null
+
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+  assert_file "$root/.config/xeneon-edge-agents/portal.env"
+  [[ "$hypr_before" == "$(sha256sum "$root/.config/hypr/hyprland.lua")" ]] ||
+    fail "package migration changed Hyprland"
+  [[ "$config_before" == "$(sha256sum "$root/.config/xeneon-edge-agents/config.toml")" ]] ||
+    fail "package migration changed user config"
+
+  "$check_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  "$uninstall_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  assert_no_file "$root/.config/xeneon-edge-agents/portal.env"
+  assert_file "$root/.config/hypr/hyprland.lua"
+}
+
+test_package_migration_refuses_modified_user_unit() {
+  local root prefix unit log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  unit=$root/.config/systemd/user/xeneon-edge-portal.service
+  log=$root/migrate.log
+  printf '\n# user override\n' >>"$unit"
+
+  if "$package_migrate_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package migration unexpectedly removed a modified user unit"
+  fi
+  assert_contains "$log" 'preserving user service override'
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_contains "$unit" '# user override'
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+}
+
+test_package_migration_preserves_modified_qml() {
+  local root prefix qml log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  qml=$root/.config/quickshell/xeneon-edge-agents/components/AgentCard.qml
+  log=$root/migrate.log
+  printf '\n// user customization\n' >>"$qml"
+
+  "$package_migrate_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1
+  assert_contains "$log" 'preserving modified legacy QML file'
+  assert_contains "$qml" '// user customization'
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+}
+
+test_package_portal_environment_rejects_extra_assignments() {
+  local root prefix portal_env log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  portal_env=$root/.config/xeneon-edge-agents/portal.env
+  log=$root/check.log
+  printf 'PATH="/tmp/untrusted"\n' >>"$portal_env"
+
+  if "$check_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package check accepted an extra portal environment assignment"
+  fi
+  assert_contains "$log" 'simulation portal environment is not fail-closed'
+}
+
+test_idempotent_package_migration_preserves_service_state() {
+  local root prefix stub log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  stub=$root/systemctl
+  log=$root/systemctl.log
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit=${*: -1}
+case "$*" in
+  "--user daemon-reload")
+    ;;
+  "--user show --property=FragmentPath --value "*)
+    printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    ;;
+  "--user is-active xeneon-agentd.service")
+    printf 'active\n'
+    ;;
+  "--user is-active xeneon-edge-portal.service")
+    printf 'inactive\n'
+    ;;
+  "--user is-enabled xeneon-agentd.service")
+    printf 'enabled\n'
+    ;;
+  "--user is-enabled xeneon-edge-portal.service")
+    printf 'disabled\n'
+    ;;
+  "--user disable --now "*)
+    printf '%s\n' "$*" >>"$TEST_SYSTEMCTL_LOG"
+    exit 99
+    ;;
+  *)
+    printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+    exit 98
+    ;;
+esac
+EOF
+  chmod 0755 "$stub"
+
+  TEST_PACKAGE_PREFIX=$prefix \
+    TEST_SYSTEMCTL_LOG=$log \
+    "$package_migrate_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >/dev/null
+  assert_no_file "$log"
+}
+
 printf 'TAP version 13\n'
 run_test 'default install is idempotent and uninstall is reversible' \
   test_default_idempotence_and_uninstall
@@ -978,4 +1133,14 @@ run_test 'absent live EDGE preflight changes no live files' \
   test_live_production_preflight_changes_nothing_when_edge_absent
 run_test 'read-only detection reports the absent-hardware gate' \
   test_read_only_detection_reports_physical_gate
+run_test 'package layout migrates static payload without touching user identity' \
+  test_package_layout_migrates_static_payload
+run_test 'package migration refuses modified masking service units' \
+  test_package_migration_refuses_modified_user_unit
+run_test 'package migration preserves modified legacy QML' \
+  test_package_migration_preserves_modified_qml
+run_test 'package portal environment rejects unvalidated assignments' \
+  test_package_portal_environment_rejects_extra_assignments
+run_test 'idempotent package migration preserves established service state' \
+  test_idempotent_package_migration_preserves_service_state
 printf '1..%d\n' "$tests_run"

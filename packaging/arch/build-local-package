@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+package_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+repo_root=$(cd "$package_dir/../.." && pwd -P)
+ref=HEAD
+ref_set=0
+nodeps=0
+
+usage() {
+  cat <<'EOF'
+Usage: packaging/arch/build-local-package [--nodeps] [GIT_REF]
+
+Build binary and source Arch packages from a clean committed Git snapshot.
+The command never installs the package. Outputs are written to
+packaging/arch/dist together with the checksum-bearing effective .SRCINFO.
+
+  --nodeps  Skip pacman dependency resolution for an already-provisioned CI
+            runner. This does not skip build or package validation.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --nodeps) nodeps=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*)
+      printf 'error: unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      ((ref_set == 0)) || {
+        printf 'error: only one GIT_REF may be provided\n' >&2
+        exit 2
+      }
+      ref=$1
+      ref_set=1
+      shift
+      ;;
+  esac
+done
+
+for command in cargo git gzip makepkg sha256sum; do
+  command -v "$command" >/dev/null 2>&1 || {
+    printf 'error: required build command is unavailable: %s\n' "$command" >&2
+    exit 1
+  }
+done
+
+commit=$(git -C "$repo_root" rev-parse --verify "$ref^{commit}")
+if [[ "$(git -C "$repo_root" rev-parse HEAD)" != "$commit" ]]; then
+  printf 'error: local package builds require GIT_REF to resolve to the checked-out HEAD\n' >&2
+  exit 1
+fi
+if [[ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]]; then
+  printf 'error: commit package changes before building the local Git archive\n' >&2
+  exit 1
+fi
+
+pkgver=$(awk -F= '$1 == "pkgver" { print $2; exit }' "$package_dir/PKGBUILD")
+cargo_version=$(
+  awk '
+    /^\[workspace.package\]$/ { workspace_package=1; next }
+    /^\[/ { workspace_package=0 }
+    workspace_package && /^version = / {
+      gsub(/"/, "", $3)
+      print $3
+      exit
+    }
+  ' "$repo_root/Cargo.toml"
+)
+[[ "$pkgver" == "$cargo_version" ]] || {
+  printf 'error: PKGBUILD pkgver %s does not match Cargo workspace version %s\n' \
+    "$pkgver" "$cargo_version" >&2
+  exit 1
+}
+
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+build_dir=$temp_dir/build
+output_dir=$temp_dir/output
+dist_dir=$package_dir/dist
+source_name=xeneon-edge-agents-$pkgver.tar.gz
+mkdir -p "$build_dir" "$output_dir" "$dist_dir"
+
+git -C "$repo_root" archive \
+  --format=tar \
+  --prefix="xeneon-edge-agents-$pkgver/" \
+  "$commit" |
+  gzip -n >"$build_dir/$source_name"
+cp "$package_dir/PKGBUILD" "$build_dir/PKGBUILD"
+
+source_sha=$(sha256sum "$build_dir/$source_name" | awk '{print $1}')
+sed -i \
+  "s/^sha256sums=('SKIP')$/sha256sums=('$source_sha')/" \
+  "$build_dir/PKGBUILD"
+grep -Fqx "sha256sums=('$source_sha')" "$build_dir/PKGBUILD" || {
+  printf 'error: could not inject the local source checksum\n' >&2
+  exit 1
+}
+
+(
+  cd "$build_dir"
+  makepkg --printsrcinfo >"$output_dir/.SRCINFO"
+  makepkg_flags=(--cleanbuild --clean --force --noconfirm)
+  source_flags=(--source --force --noconfirm)
+  if ((nodeps)); then
+    makepkg_flags+=(--nodeps)
+    source_flags+=(--nodeps)
+  fi
+  PKGDEST="$output_dir" SRCDEST="$build_dir" BUILDDIR="$temp_dir/work" \
+    makepkg "${makepkg_flags[@]}"
+  SRCPKGDEST="$output_dir" SRCDEST="$build_dir" \
+    makepkg "${source_flags[@]}"
+)
+
+mapfile -t binary_packages < <(
+  find "$output_dir" -maxdepth 1 -type f -name '*.pkg.tar.*' -print | sort
+)
+mapfile -t source_packages < <(
+  find "$output_dir" -maxdepth 1 -type f -name '*.src.tar.*' -print | sort
+)
+[[ ${#binary_packages[@]} == 1 ]] || {
+  printf 'error: expected one binary package, found %d\n' \
+    "${#binary_packages[@]}" >&2
+  exit 1
+}
+[[ ${#source_packages[@]} == 1 ]] || {
+  printf 'error: expected one source package, found %d\n' \
+    "${#source_packages[@]}" >&2
+  exit 1
+}
+
+"$package_dir/validate-package" \
+  "${binary_packages[0]}" "${source_packages[0]}"
+
+find "$dist_dir" -maxdepth 1 -type f \
+  \( -name '*.pkg.tar.*' -o -name '*.src.tar.*' -o -name '.SRCINFO' \) \
+  -delete
+install -m 0644 "${binary_packages[0]}" "$dist_dir/"
+install -m 0644 "${source_packages[0]}" "$dist_dir/"
+install -m 0644 "$output_dir/.SRCINFO" "$dist_dir/.SRCINFO"
+
+printf 'Built local Arch artifacts from %s:\n' "$commit"
+printf '  %s\n' \
+  "$dist_dir/$(basename "${binary_packages[0]}")" \
+  "$dist_dir/$(basename "${source_packages[0]}")" \
+  "$dist_dir/.SRCINFO"

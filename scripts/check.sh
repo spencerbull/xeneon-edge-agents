@@ -11,6 +11,8 @@ config_arg=
 data_arg=
 state_arg=
 bin_arg=
+package_prefix=
+require_production=0
 sys_root=/sys
 hypr_devices_json=
 hypr_monitors_json=
@@ -23,6 +25,10 @@ Usage: scripts/check.sh [options]
   --data-home DIR
   --state-home DIR
   --bin-home DIR
+  --package-prefix DIR
+                      Trusted static package prefix (package wrapper only)
+  --require-production
+                      Fail unless exact production commissioning is active
   --sys-root DIR      Alternate read-only sysfs tree for tests
   --hypr-devices-json FILE
                       Alternate `hyprctl -j devices` payload for tests
@@ -38,6 +44,11 @@ while (($#)); do
     --data-home) data_arg=${2:?missing value for --data-home}; shift 2 ;;
     --state-home) state_arg=${2:?missing value for --state-home}; shift 2 ;;
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
+    --package-prefix)
+      package_prefix=${2:?missing value for --package-prefix}
+      shift 2
+      ;;
+    --require-production) require_production=1; shift ;;
     --sys-root) sys_root=${2:?missing value for --sys-root}; shift 2 ;;
     --hypr-devices-json)
       hypr_devices_json=${2:?missing value for --hypr-devices-json}
@@ -53,6 +64,22 @@ while (($#)); do
 done
 
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
+
+package_mode=0
+runtime_bin_home=$bin_home
+package_share=
+package_systemd_dir=
+if [[ -n "$package_prefix" ]]; then
+  validate_path_argument "--package-prefix" "$package_prefix"
+  package_prefix=$(canonical_dir "$package_prefix")
+  if ((!isolated_root)) && [[ "$package_prefix" != /usr ]]; then
+    die "live package checks require the canonical /usr prefix"
+  fi
+  package_mode=1
+  runtime_bin_home=$package_prefix/bin
+  package_share=$package_prefix/share/$project_name
+  package_systemd_dir=$package_prefix/lib/systemd/user
+fi
 
 failures=0
 check_file() {
@@ -71,17 +98,24 @@ commissioning_target=$config_dir/commissioning.toml
 module_target=$hypr_dir/xeneon_edge_agents.lua
 hyprland_target=$hypr_dir/hyprland.lua
 
-check_file "daemon service" "$systemd_dir/xeneon-agentd.service"
-check_file "portal service" "$systemd_dir/xeneon-edge-portal.service"
-check_file "named Quickshell config" "$config_home/quickshell/xeneon-edge-agents/shell.qml"
+if ((package_mode)); then
+  check_file "package daemon service" "$package_systemd_dir/xeneon-agentd.service"
+  check_file "package portal service" "$package_systemd_dir/xeneon-edge-portal.service"
+  check_file "package Quickshell config" "$package_share/quickshell/shell.qml"
+  check_file "portal identity environment" "$config_dir/portal.env"
+else
+  check_file "daemon service" "$systemd_dir/xeneon-agentd.service"
+  check_file "portal service" "$systemd_dir/xeneon-edge-portal.service"
+  check_file "named Quickshell config" "$config_home/quickshell/xeneon-edge-agents/shell.qml"
+fi
 check_file "config" "$config_target"
 check_file "commissioning config" "$commissioning_target"
 
 for executable in xeneon-agentd xeneon-agentctl; do
-  if [[ -x "$bin_home/$executable" ]]; then
-    printf 'ok: executable: %s\n' "$bin_home/$executable"
+  if [[ -x "$runtime_bin_home/$executable" ]]; then
+    printf 'ok: executable: %s\n' "$runtime_bin_home/$executable"
   else
-    printf 'missing: executable: %s\n' "$bin_home/$executable"
+    printf 'missing: executable: %s\n' "$runtime_bin_home/$executable"
     failures=$((failures + 1))
   fi
 done
@@ -102,6 +136,11 @@ if [[ -f "$commissioning_target" ]]; then
   touch_product=$(toml_value "$commissioning_target" touch product)
   touch_uniq=$(toml_value "$commissioning_target" touch uniq)
   touch_phys=$(toml_value "$commissioning_target" touch phys)
+
+  if ((require_production)) && [[ "$mode" != production ]]; then
+    printf 'blocked: production commissioning is required for this launch\n'
+    failures=$((failures + 1))
+  fi
 
   if [[ "$mode" == production ]]; then
     if [[ "$exact" != true || "$fallback" != false ]]; then
@@ -338,8 +377,16 @@ print(sum(1 for device in touch if device.get("name") == wanted))
       fi
     fi
 
-    portal_unit=$systemd_dir/xeneon-edge-portal.service
-    if [[ -f "$portal_unit" ]]; then
+    if ((package_mode)); then
+      if validate_portal_env \
+        "$config_dir/portal.env" "$connector" "$output_serial" "$output_model"; then
+        printf 'ok: package portal environment matches commissioning identity\n'
+      else
+        printf 'unsafe: package portal environment does not exactly match commissioning identity\n'
+        failures=$((failures + 1))
+      fi
+    else
+      portal_unit=$systemd_dir/xeneon-edge-portal.service
       for expected_environment in \
         "Environment=\"XENEON_EDGE_OUTPUT=$connector\"" \
         "Environment=\"XENEON_EDGE_SERIAL=$output_serial\"" \
@@ -392,6 +439,33 @@ print(sum(1 for device in touch if device.get("name") == wanted))
     fi
   else
     printf 'blocked: simulation config matches no production output; physical gate remains closed\n'
+    if ((package_mode)) &&
+      ! validate_portal_env "$config_dir/portal.env" "" "" ""; then
+      printf 'unsafe: simulation portal environment is not fail-closed\n'
+      failures=$((failures + 1))
+    fi
+  fi
+elif ((require_production)); then
+  printf 'blocked: production commissioning file is missing\n'
+  failures=$((failures + 1))
+fi
+
+if ((package_mode && !isolated_root)); then
+  if ! command -v systemctl >/dev/null 2>&1; then
+    printf 'missing: systemctl is required to resolve package user units\n'
+    failures=$((failures + 1))
+  else
+    for unit in xeneon-agentd.service xeneon-edge-portal.service; do
+      expected_fragment=$package_systemd_dir/$unit
+      fragment=$(systemctl --user show --property=FragmentPath --value "$unit" 2>/dev/null || true)
+      if [[ "$fragment" == "$expected_fragment" ]]; then
+        printf 'ok: package unit resolution: %s\n' "$fragment"
+      else
+        printf 'unsafe: %s resolves to %s instead of %s\n' \
+          "$unit" "${fragment:-<missing>}" "$expected_fragment"
+        failures=$((failures + 1))
+      fi
+    done
   fi
 fi
 

@@ -13,3 +13,4 @@ command -v luac >/dev/null 2>&1 || {
 cargo build --workspace
 XENEON_AGENTD_BIN=${XENEON_AGENTD_BIN:-"$repo_root/target/debug/xeneon-agentd"} \
   "$repo_root/tests/install_integration.sh"
+python3 "$repo_root/tests/test_herdr_compatibility.py"

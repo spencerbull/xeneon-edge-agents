@@ -12,6 +12,8 @@ config_arg=
 data_arg=
 state_arg=
 bin_arg=
+package_prefix=
+quickshell_source_explicit=0
 apply_production=0
 activate=0
 connector=
@@ -37,9 +39,11 @@ Paths:
   --config-home DIR   Explicit XDG config directory
   --data-home DIR     Explicit XDG data directory
   --state-home DIR    Explicit XDG state directory
-  --bin-home DIR      Directory containing xeneon-agentd/xeneon-agentctl
+  --bin-home DIR      User runtime directory for repository installs
   --quickshell-source DIR
                       Source tree containing shell.qml (package/test staging)
+  --package-prefix DIR
+                      Trusted static package prefix (package wrapper only)
 
 Production commissioning (all values required together):
   --apply-production
@@ -58,7 +62,8 @@ Runtime:
   --activate           Enable and start both user services after checks pass
 
 The default is simulator-safe: it seeds a config that matches no production
-output, does not edit hyprland.lua, and does not call systemctl.
+output and does not edit hyprland.lua. Package migration may reload the user
+manager, but never enables a service without --activate.
 EOF
 }
 
@@ -69,7 +74,15 @@ while (($#)); do
     --data-home) data_arg=${2:?missing value for --data-home}; shift 2 ;;
     --state-home) state_arg=${2:?missing value for --state-home}; shift 2 ;;
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
-    --quickshell-source) quickshell_source=${2:?missing value for --quickshell-source}; shift 2 ;;
+    --quickshell-source)
+      quickshell_source=${2:?missing value for --quickshell-source}
+      quickshell_source_explicit=1
+      shift 2
+      ;;
+    --package-prefix)
+      package_prefix=${2:?missing value for --package-prefix}
+      shift 2
+      ;;
     --apply-production) apply_production=1; shift ;;
     --connector) connector=${2:?missing value for --connector}; shift 2 ;;
     --edid-sha256) edid_sha=${2:?missing value for --edid-sha256}; shift 2 ;;
@@ -88,6 +101,25 @@ while (($#)); do
 done
 
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
+
+package_mode=0
+asset_root=$repo_root
+runtime_bin_home=$bin_home
+package_systemd_dir=
+if [[ -n "$package_prefix" ]]; then
+  validate_path_argument "--package-prefix" "$package_prefix"
+  package_prefix=$(canonical_dir "$package_prefix")
+  if ((!isolated_root)) && [[ "$package_prefix" != /usr ]]; then
+    die "live package installation requires the canonical /usr prefix"
+  fi
+  ((quickshell_source_explicit == 0)) ||
+    die "--quickshell-source cannot override trusted package assets"
+  package_mode=1
+  asset_root=$package_prefix/share/$project_name
+  runtime_bin_home=$package_prefix/bin
+  package_systemd_dir=$package_prefix/lib/systemd/user
+  quickshell_source=$asset_root/quickshell
+fi
 
 if ((activate && isolated_root)); then
   die "--activate is not available with --root"
@@ -221,18 +253,38 @@ snapshot_activation_artifact() {
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
-render_template \
-  "$repo_root/config/systemd/user/xeneon-agentd.service.in" "$daemon_unit" \
-  CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home"
-render_template \
-  "$repo_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
-  CONFIG_HOME "$config_home" BIN_HOME "$bin_home" \
-  OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+if ((package_mode)); then
+  for required_file in \
+    "$asset_root/config/xeneon-edge-agents/config.toml.example" \
+    "$asset_root/config/xeneon-edge-agents/config.toml.production.in" \
+    "$asset_root/config/xeneon-edge-agents/commissioning.toml.example" \
+    "$asset_root/config/xeneon-edge-agents/portal.env.example" \
+    "$asset_root/config/hypr/xeneon_edge_agents.lua.in" \
+    "$quickshell_source/shell.qml" \
+    "$package_systemd_dir/xeneon-agentd.service" \
+    "$package_systemd_dir/xeneon-edge-portal.service"; do
+    [[ -f "$required_file" && ! -L "$required_file" ]] ||
+      die "package asset is missing or not a regular file: $required_file"
+  done
+  for executable in xeneon-agentd xeneon-agentctl; do
+    [[ -x "$runtime_bin_home/$executable" && ! -L "$runtime_bin_home/$executable" ]] ||
+      die "package executable is missing or not a regular file: $runtime_bin_home/$executable"
+  done
+else
+  render_template \
+    "$asset_root/config/systemd/user/xeneon-agentd.service.in" "$daemon_unit" \
+    CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$runtime_bin_home"
+  render_template \
+    "$asset_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
+    CONFIG_HOME "$config_home" BIN_HOME "$runtime_bin_home" \
+    OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+fi
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
 config_target=$config_dir/config.toml
 commissioning_target=$config_dir/commissioning.toml
+portal_env_target=$config_dir/portal.env
 module_target=$hypr_dir/xeneon_edge_agents.lua
 hyprland_target=$hypr_dir/hyprland.lua
 quickshell_target=$config_home/quickshell/xeneon-edge-agents
@@ -245,13 +297,17 @@ fi
 
 # Preflight every managed overwrite before making any change. A collision
 # therefore leaves no partial installation to roll back.
-preflight_managed_target "$daemon_unit" "$daemon_target"
-preflight_managed_target "$portal_unit" "$portal_target"
+if ((!package_mode)); then
+  preflight_managed_target "$daemon_unit" "$daemon_target"
+  preflight_managed_target "$portal_unit" "$portal_target"
+fi
 
 quickshell_sources=()
 quickshell_targets=()
 declare -A current_quickshell_targets=()
-if [[ -f "$quickshell_source/shell.qml" ]]; then
+if ((package_mode)); then
+  :
+elif [[ -f "$quickshell_source/shell.qml" ]]; then
   while IFS= read -r -d '' source; do
     relative=${source#"$quickshell_source"/}
     quickshell_sources+=("$source")
@@ -268,11 +324,12 @@ fi
 
 production_config=
 production_commissioning=
+production_portal_env=
 production_module=
 if ((apply_production)); then
   production_config=$temp_dir/config.toml
   render_template \
-    "$repo_root/config/xeneon-edge-agents/config.toml.production.in" "$production_config" \
+    "$asset_root/config/xeneon-edge-agents/config.toml.production.in" "$production_config" \
     OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" \
     OUTPUT_MODEL "$output_model" TOUCH_DEVICE "$touch_device"
   production_commissioning=$temp_dir/commissioning.toml
@@ -290,9 +347,17 @@ if ((apply_production)); then
     -e "s|^uniq = \"\"$|uniq = \"$touch_uniq\"|" \
     -e "s|^phys = \"\"$|phys = \"$touch_phys\"|" \
     -e 's/^enabled = false$/enabled = true/' \
-    "$repo_root/config/xeneon-edge-agents/commissioning.toml.example" >"$production_commissioning"
+    "$asset_root/config/xeneon-edge-agents/commissioning.toml.example" >"$production_commissioning"
+  if ((package_mode)); then
+    production_portal_env=$temp_dir/portal.env
+    {
+      printf 'XENEON_EDGE_OUTPUT="%s"\n' "$connector"
+      printf 'XENEON_EDGE_SERIAL="%s"\n' "$output_serial"
+      printf 'XENEON_EDGE_MODEL="%s"\n' "$output_model"
+    } >"$production_portal_env"
+  fi
   render_template \
-    "$repo_root/config/hypr/xeneon_edge_agents.lua.in" "$temp_dir/xeneon_edge_agents.lua" \
+    "$asset_root/config/hypr/xeneon_edge_agents.lua.in" "$temp_dir/xeneon_edge_agents.lua" \
     TOUCH_DEVICE "$touch_device" OUTPUT_CONNECTOR "$connector"
   production_module=$temp_dir/xeneon_edge_agents.lua
 
@@ -301,6 +366,9 @@ if ((apply_production)); then
   fi
   if [[ -e "$commissioning_target" || -L "$commissioning_target" ]]; then
     preflight_managed_target "$production_commissioning" "$commissioning_target"
+  fi
+  if ((package_mode)) && [[ -e "$portal_env_target" || -L "$portal_env_target" ]]; then
+    preflight_managed_target "$production_portal_env" "$portal_env_target"
   fi
   preflight_managed_target "$production_module" "$module_target"
 
@@ -337,25 +405,34 @@ fi
 
 if ((apply_production && !isolated_root)); then
   for executable in xeneon-agentd xeneon-agentctl; do
-    [[ -x "$bin_home/$executable" ]] ||
-      die "production commissioning requires executable $bin_home/$executable"
+    [[ -x "$runtime_bin_home/$executable" ]] ||
+      die "production commissioning requires executable $runtime_bin_home/$executable"
   done
-  PATH="$bin_home:/usr/local/bin:/usr/bin" command -v quickshell >/dev/null 2>&1 ||
+  PATH="$bin_home:$runtime_bin_home:/usr/local/bin:/usr/bin" \
+    command -v quickshell >/dev/null 2>&1 ||
     die "production commissioning requires quickshell on the service PATH"
   command -v hyprctl >/dev/null 2>&1 ||
     die "production commissioning requires a running Hyprland session"
-  PATH="$bin_home:/usr/local/bin:/usr/bin" command -v herdr >/dev/null 2>&1 ||
+  herdr_executable=$(
+    PATH="$bin_home:$runtime_bin_home:/usr/local/bin:/usr/bin" command -v herdr
+  ) ||
     die "production commissioning requires herdr on the service PATH"
+  if ((activate)); then
+    "$script_dir/check-herdr-compatibility.py" "$herdr_executable"
+  fi
 
   preflight_root=$temp_dir/live-hardware-preflight
-  mkdir -p "$preflight_root/.config/hypr" "$preflight_root/.local/bin"
+  mkdir -p "$preflight_root/.config/hypr"
   awk '
     $0 !~ /^[[:space:]]*require\("hypr\.xeneon_edge_agents"\)[[:space:]]*$/
   ' "$hyprland_target" >"$preflight_root/.config/hypr/hyprland.lua"
-  ln -s "$bin_home/xeneon-agentd" \
-    "$preflight_root/.local/bin/xeneon-agentd"
-  ln -s "$bin_home/xeneon-agentctl" \
-    "$preflight_root/.local/bin/xeneon-agentctl"
+  if ((!package_mode)); then
+    mkdir -p "$preflight_root/.local/bin"
+    ln -s "$runtime_bin_home/xeneon-agentd" \
+      "$preflight_root/.local/bin/xeneon-agentd"
+    ln -s "$runtime_bin_home/xeneon-agentctl" \
+      "$preflight_root/.local/bin/xeneon-agentctl"
+  fi
   preflight_touch_identity=(
     --touch-bustype "$touch_bustype"
     --touch-vendor "$touch_vendor"
@@ -365,17 +442,25 @@ if ((apply_production && !isolated_root)); then
     preflight_touch_identity+=(--touch-uniq "$touch_uniq")
   [[ -z "$touch_phys" ]] ||
     preflight_touch_identity+=(--touch-phys "$touch_phys")
-  "$script_dir/install.sh" \
-    --root "$preflight_root" \
-    --quickshell-source "$quickshell_source" \
-    --apply-production \
-    --connector "$connector" \
-    --edid-sha256 "$edid_sha" \
-    --screen-serial "$output_serial" \
-    --screen-model "$output_model" \
-    --touch-device "$touch_device" \
-    "${preflight_touch_identity[@]}" >/dev/null
-  if ! "$script_dir/check.sh" --root "$preflight_root" \
+  preflight_install_args=(
+    --root "$preflight_root"
+    --apply-production
+    --connector "$connector"
+    --edid-sha256 "$edid_sha"
+    --screen-serial "$output_serial"
+    --screen-model "$output_model"
+    --touch-device "$touch_device"
+    "${preflight_touch_identity[@]}"
+  )
+  preflight_check_args=(--root "$preflight_root")
+  if ((package_mode)); then
+    preflight_install_args+=(--package-prefix "$package_prefix")
+    preflight_check_args+=(--package-prefix "$package_prefix")
+  else
+    preflight_install_args+=(--quickshell-source "$quickshell_source")
+  fi
+  "$script_dir/install.sh" "${preflight_install_args[@]}" >/dev/null
+  if ! "$script_dir/check.sh" "${preflight_check_args[@]}" \
     >"$preflight_root/check.log" 2>&1; then
     sed -n '1,160p' "$preflight_root/check.log" >&2
     die "live XENEON hardware identity did not pass; no live files were changed"
@@ -383,20 +468,38 @@ if ((apply_production && !isolated_root)); then
   note "Verified live XENEON output and touchscreen identity before installation."
 fi
 
+if ((package_mode)); then
+  "$script_dir/migrate-package.sh" \
+    --config-home "$config_home" \
+    --data-home "$data_home" \
+    --state-home "$state_home" \
+    --bin-home "$bin_home" \
+    --package-prefix "$package_prefix"
+fi
+
 if ((activate)); then
-  snapshot_activation_artifact "$daemon_target"
-  snapshot_activation_artifact "$portal_target"
+  if ((!package_mode)); then
+    snapshot_activation_artifact "$daemon_target"
+    snapshot_activation_artifact "$portal_target"
+  fi
   for target in "${quickshell_targets[@]}"; do
     snapshot_activation_artifact "$target"
   done
   if ((apply_production)); then
     snapshot_activation_artifact "$config_target"
     snapshot_activation_artifact "$commissioning_target"
+    if ((package_mode)); then
+      snapshot_activation_artifact "$portal_env_target"
+    fi
   else
     [[ -e "$config_target" || -L "$config_target" ]] ||
       snapshot_activation_artifact "$config_target"
     [[ -e "$commissioning_target" || -L "$commissioning_target" ]] ||
       snapshot_activation_artifact "$commissioning_target"
+    if ((package_mode)); then
+      [[ -e "$portal_env_target" || -L "$portal_env_target" ]] ||
+        snapshot_activation_artifact "$portal_env_target"
+    fi
   fi
   if [[ -f "$manifest_path" ]]; then
     activation_manifest_backup=$temp_dir/managed.tsv.backup
@@ -406,8 +509,10 @@ if ((activate)); then
   rollback_artifacts=1
 fi
 
-install_managed_file "$daemon_unit" "$daemon_target"
-install_managed_file "$portal_unit" "$portal_target"
+if ((!package_mode)); then
+  install_managed_file "$daemon_unit" "$daemon_target"
+  install_managed_file "$portal_unit" "$portal_target"
+fi
 for index in "${!quickshell_sources[@]}"; do
   install_managed_file \
     "${quickshell_sources[$index]}" "${quickshell_targets[$index]}"
@@ -416,6 +521,9 @@ done
 if ((apply_production)); then
   install_managed_file "$production_config" "$config_target" 0600
   install_managed_file "$production_commissioning" "$commissioning_target" 0600
+  if ((package_mode)); then
+    install_managed_file "$production_portal_env" "$portal_env_target" 0600
+  fi
 
   if ((activate)); then
     hyprland_backup=$temp_dir/hyprland.lua.backup
@@ -456,19 +564,30 @@ if ((apply_production)); then
   fi
 else
   seed_user_file \
-    "$repo_root/config/xeneon-edge-agents/config.toml.example" \
+    "$asset_root/config/xeneon-edge-agents/config.toml.example" \
     "$config_target"
   seed_user_file \
-    "$repo_root/config/xeneon-edge-agents/commissioning.toml.example" \
+    "$asset_root/config/xeneon-edge-agents/commissioning.toml.example" \
     "$commissioning_target"
+  if ((package_mode)); then
+    seed_user_file \
+      "$asset_root/config/xeneon-edge-agents/portal.env.example" \
+      "$portal_env_target"
+  fi
 fi
 
 mkdir -p "$state_home/$project_name"
 
 if ((activate)); then
-  "$script_dir/check.sh" \
-    --config-home "$config_home" --data-home "$data_home" \
+  activation_check_args=(
+    --config-home "$config_home"
+    --data-home "$data_home"
     --state-home "$state_home" --bin-home "$bin_home"
+  )
+  if ((package_mode)); then
+    activation_check_args+=(--package-prefix "$package_prefix")
+  fi
+  "$script_dir/check.sh" "${activation_check_args[@]}"
   if ((apply_production)); then
     command -v hyprctl >/dev/null 2>&1 ||
       die "production activation requires a running Hyprland session"
@@ -513,7 +632,8 @@ fi
 # Retire files removed or renamed in the packaged Quickshell tree. Only paths
 # still carrying their installer-recorded hash are deleted. Locally modified
 # files remain both on disk and in the manifest so uninstall can preserve them.
-if [[ -f "$quickshell_source/shell.qml" && -f "$manifest_path" ]]; then
+if ((!package_mode)) &&
+  [[ -f "$quickshell_source/shell.qml" && -f "$manifest_path" ]]; then
   while IFS=$'\t' read -r managed_target installed_hash; do
     [[ "$managed_target" == "$quickshell_target/"* ]] || continue
     [[ -z "${current_quickshell_targets["$managed_target"]+x}" ]] || continue
@@ -537,7 +657,11 @@ if ((!activate)); then
   note "Services were not enabled."
 fi
 if ((!apply_production)); then
-  note "Physical gate remains closed; run detect-hardware.sh before production commissioning."
+  if ((package_mode)); then
+    note "Physical gate remains closed; run xeneon-edge-agents detect before production commissioning."
+  else
+    note "Physical gate remains closed; run detect-hardware.sh before production commissioning."
+  fi
 fi
 rollback_hypr=0
 rollback_services=0

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+package_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+repo_root=$(cd "$package_dir/../.." && pwd -P)
+package_file=${1:-}
+source_package=${2:-}
+[[ -n "$package_file" && -f "$package_file" ]] || {
+  printf 'Usage: packaging/arch/validate-package PACKAGE [SOURCE_PACKAGE]\n' >&2
+  exit 2
+}
+
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT
+payload_root=$temp_dir/payload
+mkdir -p "$payload_root"
+bsdtar -xf "$package_file" -C "$payload_root"
+
+while IFS= read -r path; do
+  case "$path" in
+    .BUILDINFO|.MTREE|.PKGINFO|usr|usr/bin|usr/lib|usr/share) ;;
+    usr/bin/xeneon-agentctl|usr/bin/xeneon-agentd) ;;
+    usr/bin/xeneon-edge-agents) ;;
+    usr/bin/xeneon-edge-agents-check|usr/bin/xeneon-edge-agents-detect) ;;
+    usr/bin/xeneon-edge-agents-install|usr/bin/xeneon-edge-agents-migrate) ;;
+    usr/bin/xeneon-edge-agents-preview|usr/bin/xeneon-edge-agents-uninstall) ;;
+    usr/lib/systemd|usr/lib/systemd/user) ;;
+    usr/lib/systemd/user/xeneon-agentd.service) ;;
+    usr/lib/systemd/user/xeneon-edge-portal.service) ;;
+    usr/lib/xeneon-edge-agents|usr/lib/xeneon-edge-agents/*) ;;
+    usr/share/xeneon-edge-agents|usr/share/xeneon-edge-agents/*) ;;
+    usr/share/doc|usr/share/doc/xeneon-edge-agents) ;;
+    usr/share/doc/xeneon-edge-agents/*) ;;
+    usr/share/licenses|usr/share/licenses/xeneon-edge-agents) ;;
+    usr/share/licenses/xeneon-edge-agents/LICENSE) ;;
+    *)
+      printf 'error: package payload is outside the narrow ownership allowlist: %s\n' \
+        "$path" >&2
+      exit 1
+      ;;
+  esac
+done < <(bsdtar -tf "$package_file" | sed 's|/$||')
+
+pkgver=$(awk -F= '$1 == "pkgver" { print $2; exit }' "$package_dir/PKGBUILD")
+pkgrel=$(awk -F= '$1 == "pkgrel" { print $2; exit }' "$package_dir/PKGBUILD")
+cargo_version=$(
+  awk '
+    /^\[workspace.package\]$/ { workspace_package=1; next }
+    /^\[/ { workspace_package=0 }
+    workspace_package && /^version = / {
+      gsub(/"/, "", $3)
+      print $3
+      exit
+    }
+  ' "$repo_root/Cargo.toml"
+)
+[[ "$pkgver" == "$cargo_version" ]] || {
+  printf 'error: PKGBUILD and Cargo versions differ: %s != %s\n' \
+    "$pkgver" "$cargo_version" >&2
+  exit 1
+}
+grep -Fqx 'pkgname = xeneon-edge-agents' "$payload_root/.PKGINFO"
+grep -Fqx "pkgver = $pkgver-$pkgrel" "$payload_root/.PKGINFO"
+grep -Fqx 'arch = x86_64' "$payload_root/.PKGINFO"
+
+required_paths=(
+  usr/bin/xeneon-agentctl
+  usr/bin/xeneon-agentd
+  usr/bin/xeneon-edge-agents
+  usr/bin/xeneon-edge-agents-check
+  usr/bin/xeneon-edge-agents-detect
+  usr/bin/xeneon-edge-agents-install
+  usr/bin/xeneon-edge-agents-migrate
+  usr/bin/xeneon-edge-agents-preview
+  usr/bin/xeneon-edge-agents-uninstall
+  usr/lib/systemd/user/xeneon-agentd.service
+  usr/lib/systemd/user/xeneon-edge-portal.service
+  usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
+  usr/share/xeneon-edge-agents/config/xeneon-edge-agents/portal.env.example
+  usr/share/xeneon-edge-agents/quickshell/shell.qml
+  usr/share/licenses/xeneon-edge-agents/LICENSE
+)
+for path in "${required_paths[@]}"; do
+  [[ -e "$payload_root/$path" || -L "$payload_root/$path" ]] || {
+    printf 'error: required package path is missing: /%s\n' "$path" >&2
+    exit 1
+  }
+done
+
+if find "$payload_root/usr" -path '*/systemd/*/*.wants/*' -print -quit |
+  grep -q .; then
+  printf 'error: package must not enable a user or system service\n' >&2
+  exit 1
+fi
+[[ ! -e "$payload_root/usr/lib/systemd/system/xeneon-agentd.service" ]] ||
+  {
+    printf 'error: daemon was packaged as a system service\n' >&2
+    exit 1
+  }
+[[ ! -e "$payload_root/usr/share/xeneon-edge-agents/quickshell/tests" ]] ||
+  {
+    printf 'error: QML test sources leaked into the runtime package\n' >&2
+    exit 1
+  }
+
+daemon_unit=$payload_root/usr/lib/systemd/user/xeneon-agentd.service
+portal_unit=$payload_root/usr/lib/systemd/user/xeneon-edge-portal.service
+grep -Fqx 'UMask=0077' "$daemon_unit"
+grep -Fqx 'UMask=0077' "$portal_unit"
+grep -Fqx 'Environment="XDG_CONFIG_HOME=%E"' "$daemon_unit"
+grep -Fqx 'Environment="XDG_STATE_HOME=%S"' "$daemon_unit"
+grep -Fqx \
+  'ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh' \
+  "$portal_unit"
+if grep -Fq 'EnvironmentFile=' "$portal_unit"; then
+  printf 'error: portal unit loads unvalidated user environment directly\n' >&2
+  exit 1
+fi
+if command -v systemd-analyze >/dev/null 2>&1; then
+  verify_dir=$temp_dir/systemd-verify
+  mkdir -p "$verify_dir"
+  sed \
+    's|^ExecStart=/usr/bin/xeneon-agentd .*$|ExecStart=/usr/bin/true|' \
+    "$daemon_unit" >"$verify_dir/xeneon-agentd.service"
+  sed \
+    's|^ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh$|ExecStart=/usr/bin/true|' \
+    "$portal_unit" >"$verify_dir/xeneon-edge-portal.service"
+  systemd-analyze --user verify \
+    "$verify_dir/xeneon-agentd.service" \
+    "$verify_dir/xeneon-edge-portal.service"
+fi
+
+for command in \
+  xeneon-edge-agents \
+  xeneon-edge-agents-check \
+  xeneon-edge-agents-detect \
+  xeneon-edge-agents-install \
+  xeneon-edge-agents-migrate \
+  xeneon-edge-agents-preview \
+  xeneon-edge-agents-uninstall; do
+  target=$(readlink "$payload_root/usr/bin/$command")
+  [[ "$target" == ../lib/xeneon-edge-agents/xeneon-edge-agents ]] || {
+    printf 'error: unexpected dispatcher target for %s: %s\n' "$command" "$target" >&2
+    exit 1
+  }
+done
+
+isolated_root=$temp_dir/user
+"$payload_root/usr/bin/xeneon-edge-agents" install \
+  --root "$isolated_root" >/dev/null
+"$payload_root/usr/bin/xeneon-edge-agents" check \
+  --root "$isolated_root" >/dev/null
+[[ ! -e "$isolated_root/.config/systemd/user/xeneon-agentd.service" ]]
+[[ ! -e "$isolated_root/.config/quickshell/xeneon-edge-agents/shell.qml" ]]
+[[ -f "$isolated_root/.config/xeneon-edge-agents/config.toml" ]]
+[[ -f "$isolated_root/.config/xeneon-edge-agents/commissioning.toml" ]]
+[[ -f "$isolated_root/.config/xeneon-edge-agents/portal.env" ]]
+find "$isolated_root" -path '*.wants/*' -print -quit | grep -q . && {
+  printf 'error: isolated package install enabled a service\n' >&2
+  exit 1
+}
+"$payload_root/usr/bin/xeneon-edge-agents" uninstall \
+  --root "$isolated_root" >/dev/null
+[[ ! -e "$isolated_root/.config/xeneon-edge-agents/portal.env" ]]
+
+if [[ -n "$source_package" ]]; then
+  [[ -f "$source_package" ]] || {
+    printf 'error: source package does not exist: %s\n' "$source_package" >&2
+    exit 1
+  }
+  source_root=$temp_dir/source
+  mkdir -p "$source_root"
+  bsdtar -xf "$source_package" -C "$source_root"
+  mapfile -t source_pkgbuilds < <(
+    find "$source_root" -maxdepth 2 -type f -name PKGBUILD -print
+  )
+  [[ ${#source_pkgbuilds[@]} == 1 ]] || {
+    printf 'error: source package must contain exactly one PKGBUILD\n' >&2
+    exit 1
+  }
+  (
+    cd "$(dirname "${source_pkgbuilds[0]}")"
+    makepkg --verifysource --nodeps
+  ) >/dev/null
+fi
+
+printf 'Package validation passed: %s\n' "$package_file"

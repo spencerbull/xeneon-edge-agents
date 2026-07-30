@@ -11,6 +11,7 @@ config_arg=
 data_arg=
 state_arg=
 bin_arg=
+package_prefix=
 
 usage() {
   cat <<'EOF'
@@ -20,6 +21,8 @@ Usage: scripts/uninstall.sh [options]
   --data-home DIR
   --state-home DIR
   --bin-home DIR
+  --package-prefix DIR
+                      Trusted static package prefix (package wrapper only)
 
 Only unchanged files recorded by the installer are removed. Modified user
 files are preserved. The Hyprland require is removed only if this installer
@@ -34,6 +37,10 @@ while (($#)); do
     --data-home) data_arg=${2:?missing value for --data-home}; shift 2 ;;
     --state-home) state_arg=${2:?missing value for --state-home}; shift 2 ;;
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
+    --package-prefix)
+      package_prefix=${2:?missing value for --package-prefix}
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -41,25 +48,39 @@ done
 
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
 
+package_mode=0
+if [[ -n "$package_prefix" ]]; then
+  validate_path_argument "--package-prefix" "$package_prefix"
+  package_prefix=$(canonical_dir "$package_prefix")
+  if ((!isolated_root)) && [[ "$package_prefix" != /usr ]]; then
+    die "live package uninstall requires the canonical /usr prefix"
+  fi
+  package_mode=1
+fi
+
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")
-for index in "${!service_units[@]}"; do
-  unit=${service_units[$index]}
-  target=${service_targets[$index]}
-  installed_hash=$(manifest_hash "$target" 2>/dev/null || true)
-  [[ -n "$installed_hash" ]] || continue
-  if [[ ! -e "$target" && ! -L "$target" ]]; then
-    owned_units+=("$unit")
-  elif [[ ! -L "$target" && -f "$target" &&
-    "$(sha256_file "$target")" == "$installed_hash" ]]; then
-    owned_units+=("$unit")
-  else
-    die "refusing to uninstall while a managed service unit is modified: $target"
-  fi
-done
+if ((package_mode)); then
+  owned_units=("${service_units[@]}")
+else
+  for index in "${!service_units[@]}"; do
+    unit=${service_units[$index]}
+    target=${service_targets[$index]}
+    installed_hash=$(manifest_hash "$target" 2>/dev/null || true)
+    [[ -n "$installed_hash" ]] || continue
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      owned_units+=("$unit")
+    elif [[ ! -L "$target" && -f "$target" &&
+      "$(sha256_file "$target")" == "$installed_hash" ]]; then
+      owned_units+=("$unit")
+    else
+      die "refusing to uninstall while a managed service unit is modified: $target"
+    fi
+  done
+fi
 
 if ((!isolated_root)) && ((${#owned_units[@]})) &&
   command -v systemctl >/dev/null 2>&1; then

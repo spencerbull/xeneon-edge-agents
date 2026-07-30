@@ -1,0 +1,130 @@
+# LOCAL SNAPSHOT BUILD ONLY — this source definition is not AUR-ready.
+# A publication change must replace the generated local archive with an
+# immutable public release URL, publish its checksum, and settle the license.
+
+pkgname=xeneon-edge-agents
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Corsair XENEON EDGE agent command center for Omarchy and Herdr'
+arch=('x86_64')
+url='https://github.com/spencerbull/xeneon-edge-agents'
+license=('LicenseRef-Private')
+depends=(
+  'bash'
+  'binutils'
+  'coreutils'
+  'findutils'
+  'gawk'
+  'gcc-libs'
+  'glibc'
+  'grep'
+  'hyprland'
+  'lua'
+  'python'
+  'quickshell'
+  'sed'
+  'systemd'
+)
+makedepends=('cargo')
+optdepends=(
+  'ddcutil: read-only DDC capability discovery'
+  'edid-decode: readable EDID identity reports'
+  'herdr: agent and session authority for live operation'
+  'jq: exact Hyprland geometry for fixture previews'
+  'usbutils: Corsair USB identity discovery'
+)
+source=("${pkgname}-${pkgver}.tar.gz")
+options=('strip' '!debug')
+# build-local-package replaces SKIP in its private build directory. Do not
+# publish this PKGBUILD or an .SRCINFO generated from this placeholder.
+sha256sums=('SKIP')
+
+prepare() {
+  cd "${pkgname}-${pkgver}"
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd "${pkgname}-${pkgver}"
+  export CARGO_INCREMENTAL=0
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --workspace --bins
+}
+
+check() {
+  cd "${pkgname}-${pkgver}"
+  export CARGO_INCREMENTAL=0
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "${pkgname}-${pkgver}"
+
+  install -Dm0755 target/release/xeneon-agentd \
+    "$pkgdir/usr/bin/xeneon-agentd"
+  install -Dm0755 target/release/xeneon-agentctl \
+    "$pkgdir/usr/bin/xeneon-agentctl"
+
+  install -Dm0755 packaging/arch/xeneon-edge-agents \
+    "$pkgdir/usr/lib/$pkgname/xeneon-edge-agents"
+  for script in \
+    check-herdr-compatibility.py \
+    check.sh \
+    detect-hardware.sh \
+    install.sh \
+    launch-package-portal.sh \
+    lib.sh \
+    migrate-package.sh \
+    preview \
+    uninstall.sh; do
+    install -Dm0755 "scripts/$script" \
+      "$pkgdir/usr/lib/$pkgname/scripts/$script"
+  done
+
+  for command in \
+    xeneon-edge-agents \
+    xeneon-edge-agents-check \
+    xeneon-edge-agents-detect \
+    xeneon-edge-agents-install \
+    xeneon-edge-agents-migrate \
+    xeneon-edge-agents-preview \
+    xeneon-edge-agents-uninstall; do
+    ln -s "../lib/$pkgname/xeneon-edge-agents" "$pkgdir/usr/bin/$command"
+  done
+
+  install -Dm0644 packaging/arch/systemd/xeneon-agentd.service \
+    "$pkgdir/usr/lib/systemd/user/xeneon-agentd.service"
+  install -Dm0644 packaging/arch/systemd/xeneon-edge-portal.service \
+    "$pkgdir/usr/lib/systemd/user/xeneon-edge-portal.service"
+
+  while IFS= read -r -d '' source_path; do
+    install -Dm0644 "$source_path" \
+      "$pkgdir/usr/share/$pkgname/$source_path"
+  done < <(find config -type f -print0 | sort -z)
+  while IFS= read -r -d '' source_path; do
+    install -Dm0644 "$source_path" \
+      "$pkgdir/usr/share/$pkgname/$source_path"
+  done < <(
+    find quickshell -type f \
+      ! -path 'quickshell/tests/*' \
+      ! -name '*.qmlc' \
+      ! -name '*.jsc' \
+      -print0 | sort -z
+  )
+  install -Dm0644 schema/portal-v1.schema.json \
+    "$pkgdir/usr/share/$pkgname/schema/portal-v1.schema.json"
+
+  install -Dm0644 README.md \
+    "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm0644 docs/architecture.md \
+    "$pkgdir/usr/share/doc/$pkgname/architecture.md"
+  install -Dm0644 docs/commissioning.md \
+    "$pkgdir/usr/share/doc/$pkgname/commissioning.md"
+  install -Dm0644 docs/protocol.md \
+    "$pkgdir/usr/share/doc/$pkgname/protocol.md"
+  install -Dm0644 packaging/arch/README.md \
+    "$pkgdir/usr/share/doc/$pkgname/arch-package.md"
+  install -Dm0644 packaging/arch/LICENSE \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

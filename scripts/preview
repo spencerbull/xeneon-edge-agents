@@ -4,6 +4,7 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
+asset_root=${XENEON_EDGE_ASSET_ROOT:-$repo_root}
 fixture=${1:-snapshot.ndjson}
 preview_app_id="org.xeneon-edge.agent-portal-preview.$BASHPID"
 preview_pid=
@@ -12,7 +13,7 @@ if ! [[ "$fixture" =~ ^[a-z0-9_-]+\.ndjson$ ]]; then
   printf 'error: fixture must be a filename such as snapshot.ndjson\n' >&2
   exit 1
 fi
-if [[ ! -f "$repo_root/quickshell/fixtures/$fixture" ]]; then
+if [[ ! -f "$asset_root/quickshell/fixtures/$fixture" ]]; then
   printf 'error: fixture does not exist: %s\n' "$fixture" >&2
   exit 1
 fi
@@ -74,7 +75,7 @@ trap forward_signal HUP INT TERM
 QS_APP_ID=$preview_app_id \
 XENEON_EDGE_PREVIEW=1 \
 XENEON_EDGE_FIXTURE=$fixture \
-  quickshell --no-duplicate --path "$repo_root/quickshell" &
+  quickshell --no-duplicate --path "$asset_root/quickshell" &
 preview_pid=$!
 
 apply_hyprland_geometry

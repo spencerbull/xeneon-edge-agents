@@ -1,0 +1,24 @@
+[Unit]
+Description=XENEON EDGE Quickshell portal
+Documentation=https://github.com/spencerbull/xeneon-edge-agents
+Requires=xeneon-agentd.service
+After=graphical-session.target xeneon-agentd.service
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+UMask=0077
+Environment="XDG_CONFIG_HOME=%E"
+Environment="XDG_STATE_HOME=%S"
+Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin"
+ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=graphical-session.target

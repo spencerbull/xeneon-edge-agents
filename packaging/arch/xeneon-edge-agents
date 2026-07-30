@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+wrapper_path=$(readlink -f -- "${BASH_SOURCE[0]}")
+libexec_dir=$(cd "$(dirname "$wrapper_path")" && pwd -P)
+package_prefix=$(cd "$libexec_dir/../.." && pwd -P)
+command_name=$(basename "$0")
+
+usage() {
+  printf 'Usage: xeneon-edge-agents <install|check|uninstall|migrate|detect|preview> [options]\n'
+}
+
+if [[ "$command_name" == xeneon-edge-agents ]]; then
+  (($#)) || {
+    usage
+    exit 0
+  }
+  case "$1" in
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+  esac
+  command_name=xeneon-edge-agents-$1
+  shift
+fi
+
+case "$command_name" in
+  xeneon-edge-agents-install)
+    exec "$libexec_dir/scripts/install.sh" \
+      "$@" --package-prefix "$package_prefix"
+    ;;
+  xeneon-edge-agents-check)
+    exec "$libexec_dir/scripts/check.sh" \
+      "$@" --package-prefix "$package_prefix"
+    ;;
+  xeneon-edge-agents-uninstall)
+    exec "$libexec_dir/scripts/uninstall.sh" \
+      "$@" --package-prefix "$package_prefix"
+    ;;
+  xeneon-edge-agents-migrate)
+    exec "$libexec_dir/scripts/migrate-package.sh" \
+      "$@" --package-prefix "$package_prefix"
+    ;;
+  xeneon-edge-agents-detect)
+    exec "$libexec_dir/scripts/detect-hardware.sh" "$@"
+    ;;
+  xeneon-edge-agents-preview)
+    exec env \
+      PATH="$package_prefix/bin:$PATH" \
+      XENEON_EDGE_ASSET_ROOT="$package_prefix/share/xeneon-edge-agents" \
+      "$libexec_dir/scripts/preview" "$@"
+    ;;
+  *)
+    printf 'error: unsupported XENEON EDGE package command: %s\n' \
+      "$command_name" >&2
+    exit 2
+    ;;
+esac
