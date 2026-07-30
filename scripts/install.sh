@@ -365,6 +365,7 @@ fi
 # change. A collision therefore leaves no partial installation to roll back.
 preflight_installer_state
 preflight_manifest_targets
+preflight_directory_cleanup_target "$quickshell_target"
 if ((!package_mode)); then
   preflight_managed_target "$daemon_unit" "$daemon_target"
   preflight_managed_target "$portal_unit" "$portal_target"

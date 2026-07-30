@@ -265,6 +265,11 @@ preflight_target_parent() {
     die "refusing to create a target below a non-directory path: $parent"
 }
 
+preflight_directory_cleanup_target() {
+  local directory=$1
+  preflight_target_parent "$directory/.xeneon-edge-cleanup-preflight"
+}
+
 preflight_seed_user_file() {
   local target=$1
 

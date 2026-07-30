@@ -109,6 +109,22 @@ legacy_service_targets=(
   "$systemd_dir/xeneon-agentd.service"
   "$systemd_dir/xeneon-edge-portal.service"
 )
+legacy_quickshell_root=$config_home/quickshell/$project_name
+legacy_portal_scripts_root=$data_home/$project_name/scripts
+legacy_static_roots=("$legacy_quickshell_root" "$legacy_portal_scripts_root")
+legacy_static_labels=("QML copy" "portal helper")
+cleanup_directories=(
+  "$legacy_quickshell_root"
+  "$config_home/quickshell"
+  "$legacy_portal_scripts_root"
+  "$data_home/$project_name"
+)
+for target in "${legacy_service_targets[@]}"; do
+  preflight_target_parent "$target"
+done
+for directory in "${cleanup_directories[@]}"; do
+  preflight_directory_cleanup_target "$directory"
+done
 removable_service_targets=()
 removable_service_units=()
 removable_service_by_index=(0 0)
@@ -192,10 +208,6 @@ for target in "${removable_service_targets[@]}"; do
   note "Removed unchanged legacy user unit: $target"
 done
 
-legacy_quickshell_root=$config_home/quickshell/$project_name
-legacy_portal_scripts_root=$data_home/$project_name/scripts
-legacy_static_roots=("$legacy_quickshell_root" "$legacy_portal_scripts_root")
-legacy_static_labels=("QML copy" "portal helper")
 for index in "${!legacy_static_roots[@]}"; do
   legacy_root=${legacy_static_roots[$index]}
   legacy_label=${legacy_static_labels[$index]}

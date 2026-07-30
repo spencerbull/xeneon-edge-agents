@@ -293,7 +293,7 @@ test_state_path_collisions_fail_before_installation() {
 
 test_nested_managed_parent_symlinks_fail_before_mutation() {
   local root external collision log config_home data_home state_home bin_home
-  local prefix
+  local prefix lifecycle marker before after
 
   for collision in systemd quickshell config data; do
     root=$(new_temp_dir)
@@ -376,6 +376,62 @@ test_nested_managed_parent_symlinks_fail_before_mutation() {
     'parent resolves outside configured XDG home'
   assert_file "$external/systemd/user/xeneon-agentd.service"
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+
+  root=$(new_temp_dir)
+  external=$(new_temp_dir)
+  marker=$root/.local/state/xeneon-edge-agents/install/hypr-require-injected
+  mkdir -p "$root/.config" "$(dirname "$marker")"
+  cat >"$external/hyprland.lua" <<'EOF'
+require("hypr.input")
+require("hypr.xeneon_edge_agents")
+EOF
+  before=$(sha256sum "$external/hyprland.lua")
+  : >"$marker"
+  ln -s "$external" "$root/.config/hypr"
+  log=$root/uninstall-hypr.log
+  if "$uninstall_script" --root "$root" >"$log" 2>&1; then
+    fail "uninstall rewrote a redirected Hyprland entrypoint"
+  fi
+  assert_contains "$log" \
+    'parent resolves outside configured XDG home'
+  after=$(sha256sum "$external/hyprland.lua")
+  [[ "$before" == "$after" ]] ||
+    fail "uninstall changed the external Hyprland entrypoint"
+  assert_file "$marker"
+
+  for lifecycle in install migrate uninstall; do
+    root=$(new_temp_dir)
+    external=$(new_temp_dir)
+    prefix=$(new_temp_dir)
+    make_package_prefix "$prefix"
+    mkdir -p "$root/.config" "$external/xeneon-edge-agents/empty-child"
+    ln -s "$external" "$root/.config/quickshell"
+    log=$root/package-$lifecycle.log
+    case "$lifecycle" in
+      install)
+        if "$install_script" \
+          --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+          fail "package install cleaned through a redirected empty root"
+        fi
+        ;;
+      migrate)
+        if "$package_migrate_script" \
+          --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+          fail "package migration cleaned through a redirected empty root"
+        fi
+        ;;
+      uninstall)
+        if "$uninstall_script" \
+          --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+          fail "package uninstall cleaned through a redirected empty root"
+        fi
+        ;;
+    esac
+    assert_contains "$log" \
+      'parent resolves outside configured XDG home'
+    [[ -d "$external/xeneon-edge-agents/empty-child" ]] ||
+      fail "$lifecycle removed an external empty directory"
+  done
 }
 
 test_marker_symlink_fails_before_activation() {

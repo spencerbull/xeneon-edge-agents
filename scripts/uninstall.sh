@@ -79,8 +79,25 @@ fi
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
+hyprland_target=$hypr_dir/hyprland.lua
+module_target=$hypr_dir/xeneon_edge_agents.lua
+cleanup_directories=(
+  "$config_home/quickshell/xeneon-edge-agents"
+  "$config_home/quickshell"
+  "$data_home/$project_name/scripts"
+  "$data_home/$project_name"
+  "$config_dir"
+  "$systemd_dir"
+  "$hypr_dir"
+  "$install_state_dir"
+  "$project_state_dir"
+)
 preflight_installer_state
 preflight_manifest_targets
+preflight_target_parent "$hyprland_target"
+for directory in "${cleanup_directories[@]}"; do
+  preflight_directory_cleanup_target "$directory"
+done
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")
@@ -154,8 +171,6 @@ if ((use_systemctl)) && ((${#owned_units[@]})); then
   done
 fi
 
-hyprland_target=$hypr_dir/hyprland.lua
-module_target=$hypr_dir/xeneon_edge_agents.lua
 preserve_module=0
 hypr_entrypoint_changed=0
 if [[ -f "$hypr_marker_path" && ! -L "$hypr_marker_path" ]]; then
@@ -240,11 +255,7 @@ if ((hypr_entrypoint_changed && !isolated_root)); then
   fi
 fi
 
-for directory in \
-  "$config_home/quickshell/xeneon-edge-agents" "$config_home/quickshell" \
-  "$data_home/$project_name/scripts" "$data_home/$project_name" \
-  "$config_dir" "$systemd_dir" "$hypr_dir" \
-  "$install_state_dir" "$state_home/$project_name"; do
+for directory in "${cleanup_directories[@]}"; do
   rmdir "$directory" 2>/dev/null || true
 done
 
