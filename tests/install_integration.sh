@@ -897,8 +897,10 @@ test_live_production_preflight_changes_nothing_when_edge_absent() {
   : >"$root/bin/xeneon-agentd"
   : >"$root/bin/xeneon-agentctl"
   : >"$root/bin/herdr"
+  : >"$root/bin/quickshell"
   chmod +x \
-    "$root/bin/xeneon-agentd" "$root/bin/xeneon-agentctl" "$root/bin/herdr"
+    "$root/bin/xeneon-agentd" "$root/bin/xeneon-agentctl" "$root/bin/herdr" \
+    "$root/bin/quickshell"
   before=$(sha256sum "$root/config/hypr/hyprland.lua")
 
   if env \
