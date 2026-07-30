@@ -78,11 +78,47 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.screen.connector.as_deref() == Some("") {
-            anyhow::bail!("screen.connector must not be empty");
+        let screen_identity = [
+            ("screen.connector", self.screen.connector.as_deref()),
+            ("screen.serial", self.screen.serial.as_deref()),
+            ("screen.model", self.screen.model.as_deref()),
+            ("screen.touch_device", self.screen.touch_device.as_deref()),
+        ];
+        for (name, value) in screen_identity {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                anyhow::bail!("{name} must not be empty");
+            }
         }
-        if self.screen.touch_device.as_deref() == Some("") {
-            anyhow::bail!("screen.touch_device must not be empty");
+        let configured_identity_fields = screen_identity
+            .iter()
+            .filter(|(_, value)| value.is_some())
+            .count();
+        if configured_identity_fields != 0 && configured_identity_fields != screen_identity.len() {
+            anyhow::bail!(
+                "screen identity must configure connector, serial, model, and touch_device together"
+            );
+        }
+        if self
+            .desktop
+            .edge_output
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            anyhow::bail!("desktop.edge_output must not be empty");
+        }
+        if self.desktop.edge_output.is_some() && configured_identity_fields == 0 {
+            anyhow::bail!("desktop.edge_output requires a complete screen identity");
+        }
+        if configured_identity_fields == screen_identity.len()
+            && self.desktop.edge_output.as_deref() != self.screen.connector.as_deref()
+        {
+            anyhow::bail!("desktop.edge_output must match screen.connector");
+        }
+        if self.herdr_bin.as_os_str().is_empty() {
+            anyhow::bail!("herdr_bin must not be empty");
+        }
+        if self.desktop.herdr_class.trim().is_empty() {
+            anyhow::bail!("desktop.herdr_class must not be empty");
         }
         if self.herdr_refresh_ms < 250 || self.health_refresh_ms < 250 {
             anyhow::bail!("refresh intervals must be at least 250ms");
@@ -116,5 +152,30 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn partial_screen_identity_is_rejected() {
+        let mut config = Config::default();
+        config.screen.connector = Some("DP-1".into());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn complete_screen_identity_requires_matching_desktop_output() {
+        let mut config = Config {
+            screen: ScreenConfig {
+                connector: Some("DP-1".into()),
+                serial: Some("CX123".into()),
+                model: Some("XENEON EDGE".into()),
+                touch_device: Some("corsair-xeneon-edge-touchscreen".into()),
+            },
+            ..Config::default()
+        };
+        config.desktop.edge_output = Some("DP-2".into());
+        assert!(config.validate().is_err());
+
+        config.desktop.edge_output = Some("DP-1".into());
+        assert!(config.validate().is_ok());
     }
 }

@@ -8,6 +8,7 @@ PartOf=graphical-session.target
 Type=simple
 Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
 Environment="XDG_STATE_HOME=@STATE_HOME@"
+Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
 ExecStart="@BIN_HOME@/xeneon-agentd" --config "@CONFIG_HOME@/xeneon-edge-agents/config.toml"
 Restart=on-failure
 RestartSec=2s

@@ -172,6 +172,8 @@ test_production_commissioning_and_exact_check() {
   assert_contains "$root/.config/xeneon-edge-agents/commissioning.toml" 'allow_primary_fallback = false'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
     'Environment="XENEON_EDGE_SERIAL=CX123456"'
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+    "Environment=\"PATH=$root/.local/bin:/usr/local/bin:/usr/bin\""
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'name = "corsair-xeneon-edge-touchscreen"'
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'output = "DP-1"'
