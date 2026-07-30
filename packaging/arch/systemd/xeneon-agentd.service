@@ -9,7 +9,7 @@ Type=simple
 UMask=0077
 Environment="XDG_CONFIG_HOME=%E"
 Environment="XDG_STATE_HOME=%S"
-Environment="PATH=%h/.local/bin:/usr/local/bin:/usr/bin"
+Environment="PATH=/usr/bin:/usr/local/bin:%h/.local/bin"
 ExecStart=/usr/bin/xeneon-agentd --config %E/xeneon-edge-agents/config.toml
 Restart=on-failure
 RestartSec=2s

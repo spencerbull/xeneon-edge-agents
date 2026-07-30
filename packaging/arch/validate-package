@@ -111,6 +111,12 @@ grep -Fqx 'UMask=0077' "$portal_unit"
 grep -Fqx 'Environment="XDG_CONFIG_HOME=%E"' "$daemon_unit"
 grep -Fqx 'Environment="XDG_STATE_HOME=%S"' "$daemon_unit"
 grep -Fqx \
+  'Environment="PATH=/usr/bin:/usr/local/bin:%h/.local/bin"' \
+  "$daemon_unit"
+grep -Fqx \
+  'Environment="PATH=/usr/bin:/usr/local/bin:%h/.local/bin"' \
+  "$portal_unit"
+grep -Fqx \
   'ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh' \
   "$portal_unit"
 if grep -Fq 'EnvironmentFile=' "$portal_unit"; then

@@ -12,6 +12,7 @@ data_arg=
 state_arg=
 bin_arg=
 package_prefix=
+systemctl_command=
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,8 @@ Usage: scripts/uninstall.sh [options]
   --bin-home DIR
   --package-prefix DIR
                       Trusted static package prefix (package wrapper only)
+  --systemctl-command FILE
+                      Isolated-test service-manager stub (requires --root)
 
 Only unchanged files recorded by the installer are removed. Modified user
 files are preserved. The Hyprland require is removed only if this installer
@@ -39,6 +42,10 @@ while (($#)); do
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
     --package-prefix)
       package_prefix=${2:?missing value for --package-prefix}
+      shift 2
+      ;;
+    --systemctl-command)
+      systemctl_command=${2:?missing value for --systemctl-command}
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -58,12 +65,49 @@ if [[ -n "$package_prefix" ]]; then
   package_mode=1
 fi
 
+use_systemctl=0
+if [[ -n "$systemctl_command" ]]; then
+  ((isolated_root)) ||
+    die "--systemctl-command is available only with isolated test paths"
+  validate_path_argument "--systemctl-command" "$systemctl_command"
+  systemctl_command=$(canonical_dir "$systemctl_command")
+  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
+    die "--systemctl-command must be an executable regular file"
+  use_systemctl=1
+elif ((!isolated_root)) && command -v systemctl >/dev/null 2>&1; then
+  systemctl_command=$(command -v systemctl)
+  use_systemctl=1
+fi
+
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")
 if ((package_mode)); then
+  if ((!use_systemctl && !isolated_root)); then
+    die "systemctl is required to uninstall live package services"
+  fi
+  if ((use_systemctl)); then
+    "$systemctl_command" --user daemon-reload ||
+      die "could not contact the user service manager; no files were removed"
+    for unit in "${service_units[@]}"; do
+      expected_fragment=$package_prefix/lib/systemd/user/$unit
+      fragment=$(
+        "$systemctl_command" --user show \
+          --property=FragmentPath --value "$unit"
+      )
+      drop_ins=$(
+        "$systemctl_command" --user show \
+          --property=DropInPaths --value "$unit"
+      )
+      [[ "$fragment" == "$expected_fragment" ]] ||
+        die "refusing to uninstall while $unit resolves outside the package: ${fragment:-<missing>}"
+      if [[ "$drop_ins" =~ [^[:space:]] ]]; then
+        die "refusing to uninstall while $unit has systemd drop-ins: $drop_ins"
+      fi
+    done
+  fi
   owned_units=("${service_units[@]}")
 else
   for index in "${!service_units[@]}"; do
@@ -82,14 +126,13 @@ else
   done
 fi
 
-if ((!isolated_root)) && ((${#owned_units[@]})) &&
-  command -v systemctl >/dev/null 2>&1; then
-  systemctl --user daemon-reload ||
+if ((use_systemctl)) && ((${#owned_units[@]})); then
+  "$systemctl_command" --user daemon-reload ||
     die "could not contact the user service manager; no files were removed"
-  systemctl --user disable --now "${owned_units[@]}" ||
+  "$systemctl_command" --user disable --now "${owned_units[@]}" ||
     die "could not stop and disable XENEON services; no files were removed"
   for unit in "${owned_units[@]}"; do
-    if systemctl --user is-active --quiet "$unit"; then
+    if "$systemctl_command" --user is-active --quiet "$unit"; then
       die "refusing to remove unit files while $unit is still active"
     fi
   done
@@ -188,9 +231,8 @@ for directory in \
   rmdir "$directory" 2>/dev/null || true
 done
 
-if ((!isolated_root)) && ((${#owned_units[@]})) &&
-  command -v systemctl >/dev/null 2>&1; then
-  systemctl --user daemon-reload ||
+if ((use_systemctl)) && ((${#owned_units[@]})); then
+  "$systemctl_command" --user daemon-reload ||
     warn "user service files were removed but daemon-reload failed"
 fi
 

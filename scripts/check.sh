@@ -12,6 +12,7 @@ data_arg=
 state_arg=
 bin_arg=
 package_prefix=
+systemctl_command=
 require_production=0
 sys_root=/sys
 hypr_devices_json=
@@ -27,6 +28,8 @@ Usage: scripts/check.sh [options]
   --bin-home DIR
   --package-prefix DIR
                       Trusted static package prefix (package wrapper only)
+  --systemctl-command FILE
+                      Isolated-test service-manager stub (requires --root)
   --require-production
                       Fail unless exact production commissioning is active
   --sys-root DIR      Alternate read-only sysfs tree for tests
@@ -46,6 +49,10 @@ while (($#)); do
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
     --package-prefix)
       package_prefix=${2:?missing value for --package-prefix}
+      shift 2
+      ;;
+    --systemctl-command)
+      systemctl_command=${2:?missing value for --systemctl-command}
       shift 2
       ;;
     --require-production) require_production=1; shift ;;
@@ -79,6 +86,23 @@ if [[ -n "$package_prefix" ]]; then
   runtime_bin_home=$package_prefix/bin
   package_share=$package_prefix/share/$project_name
   package_systemd_dir=$package_prefix/lib/systemd/user
+fi
+
+use_systemctl=0
+if [[ -n "$systemctl_command" ]]; then
+  ((package_mode)) ||
+    die "--systemctl-command requires --package-prefix"
+  ((isolated_root)) ||
+    die "--systemctl-command is available only with isolated test paths"
+  validate_path_argument "--systemctl-command" "$systemctl_command"
+  systemctl_command=$(canonical_dir "$systemctl_command")
+  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
+    die "--systemctl-command must be an executable regular file"
+  use_systemctl=1
+elif ((package_mode && !isolated_root)) &&
+  command -v systemctl >/dev/null 2>&1; then
+  systemctl_command=$(command -v systemctl)
+  use_systemctl=1
 fi
 
 failures=0
@@ -450,19 +474,40 @@ elif ((require_production)); then
   failures=$((failures + 1))
 fi
 
-if ((package_mode && !isolated_root)); then
-  if ! command -v systemctl >/dev/null 2>&1; then
+if ((package_mode && (!isolated_root || use_systemctl))); then
+  if ((!use_systemctl)); then
     printf 'missing: systemctl is required to resolve package user units\n'
     failures=$((failures + 1))
   else
     for unit in xeneon-agentd.service xeneon-edge-portal.service; do
       expected_fragment=$package_systemd_dir/$unit
-      fragment=$(systemctl --user show --property=FragmentPath --value "$unit" 2>/dev/null || true)
-      if [[ "$fragment" == "$expected_fragment" ]]; then
+      fragment=
+      drop_ins=
+      fragment_query_ok=1
+      dropin_query_ok=1
+      fragment=$(
+        "$systemctl_command" --user show \
+          --property=FragmentPath --value "$unit" 2>/dev/null
+      ) || fragment_query_ok=0
+      drop_ins=$(
+        "$systemctl_command" --user show \
+          --property=DropInPaths --value "$unit" 2>/dev/null
+      ) || dropin_query_ok=0
+      if ((fragment_query_ok && dropin_query_ok)) &&
+        [[ "$fragment" == "$expected_fragment" ]] &&
+        [[ ! "$drop_ins" =~ [^[:space:]] ]]; then
         printf 'ok: package unit resolution: %s\n' "$fragment"
       else
-        printf 'unsafe: %s resolves to %s instead of %s\n' \
-          "$unit" "${fragment:-<missing>}" "$expected_fragment"
+        if ((!fragment_query_ok || !dropin_query_ok)); then
+          printf 'unsafe: could not inspect the complete %s unit definition\n' \
+            "$unit"
+        elif [[ "$fragment" != "$expected_fragment" ]]; then
+          printf 'unsafe: %s resolves to %s instead of %s\n' \
+            "$unit" "${fragment:-<missing>}" "$expected_fragment"
+        else
+          printf 'unsafe: %s has unsupported systemd drop-ins: %s\n' \
+            "$unit" "$drop_ins"
+        fi
         failures=$((failures + 1))
       fi
     done

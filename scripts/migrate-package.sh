@@ -100,14 +100,24 @@ legacy_service_targets=(
   "$systemd_dir/xeneon-edge-portal.service"
 )
 removable_service_targets=()
+removable_service_units=()
+removable_service_by_index=(0 0)
+missing_service_manifest_targets=()
 
 # Preflight all masking user units before changing service or filesystem state.
-for target in "${legacy_service_targets[@]}"; do
-  [[ -e "$target" || -L "$target" ]] || continue
+for index in "${!legacy_service_targets[@]}"; do
+  target=${legacy_service_targets[$index]}
   installed_hash=$(manifest_hash "$target" 2>/dev/null || true)
+  if [[ ! -e "$target" && ! -L "$target" ]]; then
+    [[ -z "$installed_hash" ]] ||
+      missing_service_manifest_targets+=("$target")
+    continue
+  fi
   if [[ -n "$installed_hash" && ! -L "$target" && -f "$target" ]] &&
     [[ "$(sha256_file "$target")" == "$installed_hash" ]]; then
     removable_service_targets+=("$target")
+    removable_service_units+=("${service_units[$index]}")
+    removable_service_by_index[index]=1
   else
     die "preserving user service override that masks the package unit: $target"
   fi
@@ -124,8 +134,14 @@ if ((use_systemctl)); then
     fragment=$(
       "$systemctl_command" --user show --property=FragmentPath --value "$unit"
     )
+    drop_ins=$(
+      "$systemctl_command" --user show --property=DropInPaths --value "$unit"
+    )
     if [[ "$fragment" != "$legacy_fragment" && "$fragment" != "$package_fragment" ]]; then
       die "$unit resolves to an unknown override before migration: ${fragment:-<missing>}"
+    fi
+    if [[ "$drop_ins" =~ [^[:space:]] ]]; then
+      die "$unit has unsupported systemd drop-ins before migration: $drop_ins"
     fi
     service_active_before+=(
       "$("$systemctl_command" --user is-active "$unit" 2>/dev/null || true)"
@@ -137,9 +153,14 @@ if ((use_systemctl)); then
   disable_legacy_package_services \
     "${#removable_service_targets[@]}" \
     "$systemctl_command" \
-    "${service_units[@]}" ||
+    "${removable_service_units[@]}" ||
     die "could not stop and disable the legacy user services; no files were removed"
 fi
+
+for target in "${missing_service_manifest_targets[@]}"; do
+  remove_manifest_entry "$target"
+  note "Removed stale legacy unit manifest entry: $target"
+done
 
 for target in "${removable_service_targets[@]}"; do
   rm -f -- "$target"
@@ -174,15 +195,21 @@ if ((use_systemctl)); then
     fragment=$(
       "$systemctl_command" --user show --property=FragmentPath --value "$unit"
     )
+    drop_ins=$(
+      "$systemctl_command" --user show --property=DropInPaths --value "$unit"
+    )
     [[ "$fragment" == "$expected_fragment" ]] ||
       die "$unit resolves to $fragment instead of $expected_fragment"
+    if [[ "$drop_ins" =~ [^[:space:]] ]]; then
+      die "$unit has unsupported systemd drop-ins after migration: $drop_ins"
+    fi
     active_state=$(
       "$systemctl_command" --user is-active "$unit" 2>/dev/null || true
     )
     enabled_state=$(
       "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
     )
-    if ((${#removable_service_targets[@]})); then
+    if ((removable_service_by_index[index])); then
       [[ "$active_state" != active ]] ||
         die "$unit remained active after migration"
       [[ "$enabled_state" == disabled ]] ||

@@ -1053,6 +1053,8 @@ case "$*" in
   "--user show --property=FragmentPath --value "*)
     printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
     ;;
+  "--user show --property=DropInPaths --value "*)
+    ;;
   "--user is-active xeneon-agentd.service")
     printf 'active\n'
     ;;
@@ -1084,6 +1086,253 @@ EOF
       --package-prefix "$prefix" \
       --systemctl-command "$stub" >/dev/null
   assert_no_file "$log"
+}
+
+test_mixed_package_migration_preserves_package_unit_state() {
+  local root prefix stub log daemon_disabled portal_disabled
+  local portal_target manifest
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  portal_target=$root/.config/systemd/user/xeneon-edge-portal.service
+  manifest=$root/.local/state/xeneon-edge-agents/install/managed.tsv
+  rm "$portal_target"
+  sed -i "\|^$portal_target	|d" "$manifest"
+
+  stub=$root/systemctl
+  log=$root/systemctl.log
+  daemon_disabled=$root/daemon-disabled
+  portal_disabled=$root/portal-disabled
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit=${*: -1}
+case "$*" in
+  "--user daemon-reload")
+    ;;
+  "--user show --property=FragmentPath --value xeneon-agentd.service")
+    if [[ -f "$TEST_DAEMON_LEGACY" ]]; then
+      printf '%s\n' "$TEST_DAEMON_LEGACY"
+    else
+      printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    fi
+    ;;
+  "--user show --property=FragmentPath --value xeneon-edge-portal.service")
+    printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    ;;
+  "--user show --property=DropInPaths --value "*)
+    ;;
+  "--user is-active xeneon-agentd.service")
+    [[ ! -f "$TEST_DAEMON_DISABLED" ]] && printf 'active\n' ||
+      printf 'inactive\n'
+    ;;
+  "--user is-active xeneon-edge-portal.service")
+    [[ ! -f "$TEST_PORTAL_DISABLED" ]] && printf 'active\n' ||
+      printf 'inactive\n'
+    ;;
+  "--user is-enabled xeneon-agentd.service")
+    [[ ! -f "$TEST_DAEMON_DISABLED" ]] && printf 'enabled\n' ||
+      printf 'disabled\n'
+    ;;
+  "--user is-enabled xeneon-edge-portal.service")
+    [[ ! -f "$TEST_PORTAL_DISABLED" ]] && printf 'enabled\n' ||
+      printf 'disabled\n'
+    ;;
+  "--user disable --now "*)
+    printf '%s\n' "$*" >>"$TEST_SYSTEMCTL_LOG"
+    for argument in "$@"; do
+      case "$argument" in
+        xeneon-agentd.service) : >"$TEST_DAEMON_DISABLED" ;;
+        xeneon-edge-portal.service) : >"$TEST_PORTAL_DISABLED" ;;
+      esac
+    done
+    ;;
+  *)
+    printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+    exit 98
+    ;;
+esac
+EOF
+  chmod 0755 "$stub"
+
+  TEST_PACKAGE_PREFIX=$prefix \
+    TEST_DAEMON_LEGACY=$root/.config/systemd/user/xeneon-agentd.service \
+    TEST_DAEMON_DISABLED=$daemon_disabled \
+    TEST_PORTAL_DISABLED=$portal_disabled \
+    TEST_SYSTEMCTL_LOG=$log \
+    "$package_migrate_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >/dev/null
+
+  assert_count 1 \
+    '^--user disable --now xeneon-agentd\.service$' "$log"
+  assert_file "$daemon_disabled"
+  assert_no_file "$portal_disabled"
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+}
+
+test_package_migration_refuses_systemd_dropins() {
+  local root prefix stub log mutation_log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  stub=$root/systemctl
+  log=$root/migrate.log
+  mutation_log=$root/systemctl-mutation.log
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit=${*: -1}
+case "$*" in
+  "--user daemon-reload")
+    ;;
+  "--user show --property=FragmentPath --value "*)
+    printf '%s/.config/systemd/user/%s\n' "$TEST_ROOT" "$unit"
+    ;;
+  "--user show --property=DropInPaths --value xeneon-agentd.service")
+    printf '%s/.config/systemd/user/xeneon-agentd.service.d/override.conf\n' \
+      "$TEST_ROOT"
+    ;;
+  "--user show --property=DropInPaths --value "*)
+    ;;
+  *)
+    printf '%s\n' "$*" >>"$TEST_MUTATION_LOG"
+    exit 97
+    ;;
+esac
+EOF
+  chmod 0755 "$stub"
+
+  if TEST_ROOT=$root \
+    TEST_MUTATION_LOG=$mutation_log \
+    "$package_migrate_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "package migration accepted a systemd drop-in"
+  fi
+  assert_contains "$log" 'unsupported systemd drop-ins before migration'
+  assert_no_file "$mutation_log"
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+}
+
+test_package_check_rejects_systemd_dropins() {
+  local root prefix stub log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  stub=$root/systemctl
+  log=$root/check.log
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit=${*: -1}
+case "$*" in
+  "--user show --property=FragmentPath --value "*)
+    printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    ;;
+  "--user show --property=DropInPaths --value xeneon-edge-portal.service")
+    printf '/etc/systemd/user/xeneon-edge-portal.service.d/override.conf\n'
+    ;;
+  "--user show --property=DropInPaths --value "*)
+    ;;
+  *)
+    printf 'unexpected systemctl invocation: %s\n' "$*" >&2
+    exit 98
+    ;;
+esac
+EOF
+  chmod 0755 "$stub"
+
+  if TEST_PACKAGE_PREFIX=$prefix \
+    "$check_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "package check accepted a systemd drop-in"
+  fi
+  assert_contains "$log" \
+    'xeneon-edge-portal.service has unsupported systemd drop-ins'
+}
+
+test_package_uninstall_refuses_foreign_unit_definitions() {
+  local root prefix stub fragment_log dropin_log mutation_log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  stub=$root/systemctl
+  fragment_log=$root/uninstall-fragment.log
+  dropin_log=$root/uninstall-dropin.log
+  mutation_log=$root/systemctl-mutation.log
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+unit=${*: -1}
+case "$*" in
+  "--user daemon-reload")
+    ;;
+  "--user show --property=FragmentPath --value xeneon-edge-portal.service")
+    if [[ "$TEST_BAD_MODE" == fragment ]]; then
+      printf '/etc/systemd/user/xeneon-edge-portal.service\n'
+    else
+      printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    fi
+    ;;
+  "--user show --property=FragmentPath --value "*)
+    printf '%s/lib/systemd/user/%s\n' "$TEST_PACKAGE_PREFIX" "$unit"
+    ;;
+  "--user show --property=DropInPaths --value xeneon-edge-portal.service")
+    if [[ "$TEST_BAD_MODE" == dropin ]]; then
+      printf '%s/.config/systemd/user/%s.d/override.conf\n' \
+        "$TEST_ROOT" "$unit"
+    fi
+    ;;
+  "--user show --property=DropInPaths --value "*)
+    ;;
+  *)
+    printf '%s\n' "$*" >>"$TEST_MUTATION_LOG"
+    exit 97
+    ;;
+esac
+EOF
+  chmod 0755 "$stub"
+
+  if TEST_BAD_MODE=fragment \
+    TEST_PACKAGE_PREFIX=$prefix \
+    TEST_ROOT=$root \
+    TEST_MUTATION_LOG=$mutation_log \
+    "$uninstall_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$fragment_log" 2>&1; then
+    fail "package uninstall accepted a foreign unit fragment"
+  fi
+  assert_contains "$fragment_log" 'resolves outside the package'
+
+  if TEST_BAD_MODE=dropin \
+    TEST_PACKAGE_PREFIX=$prefix \
+    TEST_ROOT=$root \
+    TEST_MUTATION_LOG=$mutation_log \
+    "$uninstall_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$dropin_log" 2>&1; then
+    fail "package uninstall accepted a systemd drop-in"
+  fi
+  assert_contains "$dropin_log" 'has systemd drop-ins'
+  assert_no_file "$mutation_log"
+  assert_file "$root/.config/xeneon-edge-agents/config.toml"
+  assert_file "$root/.config/xeneon-edge-agents/portal.env"
 }
 
 printf 'TAP version 13\n'
@@ -1143,4 +1392,12 @@ run_test 'package portal environment rejects unvalidated assignments' \
   test_package_portal_environment_rejects_extra_assignments
 run_test 'idempotent package migration preserves established service state' \
   test_idempotent_package_migration_preserves_service_state
+run_test 'mixed package migration preserves established package unit state' \
+  test_mixed_package_migration_preserves_package_unit_state
+run_test 'package migration rejects systemd drop-ins before mutation' \
+  test_package_migration_refuses_systemd_dropins
+run_test 'package check rejects systemd drop-ins' \
+  test_package_check_rejects_systemd_dropins
+run_test 'package uninstall rejects foreign unit definitions' \
+  test_package_uninstall_refuses_foreign_unit_definitions
 printf '1..%d\n' "$tests_run"
