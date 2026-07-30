@@ -45,28 +45,31 @@ impl DesktopController {
     }
 
     pub async fn remember_non_edge_focus(&mut self) {
-        let Ok((clients, monitors)) = hypr_state().await else {
+        let Ok(active) = hypr_json::<HyprClient>(&["activewindow", "-j"]).await else {
             return;
         };
-        let Some(focused_monitor) = monitors.iter().find(|monitor| monitor.focused) else {
+        let Ok(monitors) = hypr_json::<Vec<HyprMonitor>>(&["monitors", "-j"]).await else {
+            return;
+        };
+        let Some(active_monitor) = monitors
+            .iter()
+            .find(|monitor| monitor.id == active.monitor)
+            .or_else(|| monitors.iter().find(|monitor| monitor.focused))
+        else {
             return;
         };
         if self
             .config
             .edge_output
             .as_deref()
-            .is_some_and(|edge| edge == focused_monitor.name)
+            .is_some_and(|edge| edge == active_monitor.name)
         {
             return;
         }
-        let Some(client) = clients
-            .iter()
-            .find(|client| client.monitor == focused_monitor.id)
-            .filter(|client| !client.address.is_empty())
-        else {
+        if active.address.is_empty() {
             return;
-        };
-        self.remembered_window = Some(client.address.clone());
+        }
+        self.remembered_window = Some(active.address);
     }
 
     pub async fn restore_focus(&self) -> Result<()> {

@@ -442,7 +442,7 @@ impl DaemonRuntime {
             .await
         {
             Ok(()) => {
-                if command.action == ActionKind::Open
+                if matches!(command.action, ActionKind::Open | ActionKind::Zoom)
                     && let Err(error) = self
                         .desktop
                         .lock()
