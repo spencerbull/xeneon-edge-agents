@@ -25,7 +25,7 @@ artifacts.
 - [x] Automated checks and completed independent reviews pass.
 - [x] An unpublished Arch package builds, installs, verifies, and uninstalls
       without owning user configuration.
-- [ ] GitHub Actions validate source and package builds with pinned,
+- [x] GitHub Actions validate source and package builds with pinned,
       least-privilege dependencies.
 - [ ] A private tag workflow can attach the Arch package to a GitHub Release
       without publishing to the AUR.
@@ -40,7 +40,7 @@ artifacts.
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Omarchy integration | `main` | `config/`, `scripts/`, services, install tests | Complete at `995d123`; simulator installed |
 | Arch packaging | `agent/arch-packaging-ci` | `packaging/arch/`, package helper and tests | Complete through `cdcd8db` |
-| GitHub automation | `agent/arch-packaging-ci` | `.github/`, CI documentation | Implemented on the current branch; hosted rerun pending |
+| GitHub automation | `agent/arch-packaging-ci` | `.github/`, CI documentation | Complete at `58eeb15`; branch-head source and package runs passed |
 
 ## Allowed actions
 
@@ -82,7 +82,8 @@ artifacts.
 - [x] `makepkg`, source-package, package archive, and `namcap` validation.
 - [x] Package install, pacman removal/reinstall, simulator
       install/check/uninstall, and 77-file package integrity verification.
-- [ ] GitHub Actions syntax, policy, and live private-repository runs.
+- [x] GitHub Actions syntax, policy, and live private-repository branch runs:
+      source `30556299464` and package `30556300158`.
 - [x] Independent package and workflow review.
 - [ ] Physical hardware gate (blocked: XENEON EDGE unavailable).
 
@@ -92,6 +93,8 @@ artifacts.
   `origin/main`.
 - Package and workflow work is pushed on `agent/arch-packaging-ci`; repository
   Actions require full-SHA pins.
+- Hosted branch-head source and unpublished-package workflows passed at
+  `58eeb15`; the package artifact remains private to the repository run.
 - `xeneon-edge-agents 0.1.0-1` is installed from the local package. Pacman
   reports 77 package files and zero altered files.
 - The simulator-safe package install contains three hash-verified user files;
