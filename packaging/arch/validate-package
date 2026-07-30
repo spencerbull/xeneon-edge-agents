@@ -76,7 +76,9 @@ required_paths=(
   usr/bin/xeneon-edge-agents-uninstall
   usr/lib/systemd/user/xeneon-agentd.service
   usr/lib/systemd/user/xeneon-edge-portal.service
+  usr/lib/xeneon-edge-agents/scripts/check.sh
   usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
+  usr/lib/xeneon-edge-agents/scripts/lib.sh
   usr/share/xeneon-edge-agents/config/xeneon-edge-agents/portal.env.example
   usr/share/xeneon-edge-agents/quickshell/shell.qml
   usr/share/licenses/xeneon-edge-agents/LICENSE
@@ -84,6 +86,22 @@ required_paths=(
 for path in "${required_paths[@]}"; do
   [[ -e "$payload_root/$path" || -L "$payload_root/$path" ]] || {
     printf 'error: required package path is missing: /%s\n' "$path" >&2
+    exit 1
+  }
+done
+
+runtime_executables=(
+  usr/bin/xeneon-agentctl
+  usr/bin/xeneon-agentd
+  usr/lib/xeneon-edge-agents/scripts/check.sh
+  usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
+  usr/lib/xeneon-edge-agents/scripts/lib.sh
+)
+for path in "${runtime_executables[@]}"; do
+  [[ -f "$payload_root/$path" && -x "$payload_root/$path" &&
+    ! -L "$payload_root/$path" ]] || {
+    printf 'error: package runtime is not an executable regular file: /%s\n' \
+      "$path" >&2
     exit 1
   }
 done

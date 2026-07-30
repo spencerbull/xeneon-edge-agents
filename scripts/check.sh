@@ -126,6 +126,12 @@ if ((package_mode)); then
   check_file "package daemon service" "$package_systemd_dir/xeneon-agentd.service"
   check_file "package portal service" "$package_systemd_dir/xeneon-edge-portal.service"
   check_file "package Quickshell config" "$package_share/quickshell/shell.qml"
+  check_file "package portal check" \
+    "$package_prefix/lib/$project_name/scripts/check.sh"
+  check_file "package portal launcher" \
+    "$package_prefix/lib/$project_name/scripts/launch-package-portal.sh"
+  check_file "package portal support library" \
+    "$package_prefix/lib/$project_name/scripts/lib.sh"
   check_file "portal identity environment" "$config_dir/portal.env"
 else
   check_file "daemon service" "$systemd_dir/xeneon-agentd.service"

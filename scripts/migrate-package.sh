@@ -58,6 +58,7 @@ done
 validate_path_argument "--package-prefix" "$package_prefix"
 package_prefix=$(canonical_dir "$package_prefix")
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
+preflight_installer_state
 
 use_systemctl=0
 if [[ -n "$systemctl_command" ]]; then
@@ -84,6 +85,9 @@ required_package_files=(
   "$package_share/quickshell/shell.qml"
   "$package_systemd_dir/xeneon-agentd.service"
   "$package_systemd_dir/xeneon-edge-portal.service"
+  "$package_prefix/lib/$project_name/scripts/check.sh"
+  "$package_prefix/lib/$project_name/scripts/launch-package-portal.sh"
+  "$package_prefix/lib/$project_name/scripts/lib.sh"
 )
 for required_file in "${required_package_files[@]}"; do
   [[ -f "$required_file" && ! -L "$required_file" ]] ||
@@ -92,6 +96,11 @@ done
 for executable in xeneon-agentd xeneon-agentctl; do
   [[ -x "$package_prefix/bin/$executable" && ! -L "$package_prefix/bin/$executable" ]] ||
     die "package executable is missing or not a regular file: $package_prefix/bin/$executable"
+done
+for executable in check.sh launch-package-portal.sh lib.sh; do
+  package_executable=$package_prefix/lib/$project_name/scripts/$executable
+  [[ -x "$package_executable" && ! -L "$package_executable" ]] ||
+    die "package executable is missing or not a regular file: $package_executable"
 done
 
 service_units=(xeneon-agentd.service xeneon-edge-portal.service)
@@ -165,8 +174,7 @@ if ((use_systemctl)); then
     [[ "${service_active_before[1]}" == active ]]; then
     die "cannot migrate the legacy daemon while the package portal is active; stop xeneon-edge-portal.service first"
   fi
-  disable_legacy_package_services \
-    "${#removable_service_targets[@]}" \
+  disable_user_services_all_scopes \
     "$systemctl_command" \
     "${removable_service_units[@]}" ||
     die "could not stop and disable the legacy user services; no files were removed"

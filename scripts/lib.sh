@@ -17,11 +17,12 @@ note() {
   printf '%s\n' "$*"
 }
 
-disable_legacy_package_services() {
-  local removable_count=$1
-  local systemctl_command=$2
-  shift 2
-  ((removable_count)) || return 0
+disable_user_services_all_scopes() {
+  local systemctl_command=$1
+  shift
+  (($#)) || return 0
+
+  "$systemctl_command" --user disable --runtime "$@"
   "$systemctl_command" --user disable --now "$@"
 }
 
@@ -222,6 +223,28 @@ preflight_directory_target() {
   [[ -e "$target" || -L "$target" ]] || return 0
   [[ -d "$target" ]] ||
     die "refusing to replace non-directory target: $target"
+}
+
+preflight_installer_state() {
+  preflight_target_parent "$install_state_dir"
+  if [[ -e "$install_state_dir" || -L "$install_state_dir" ]]; then
+    [[ ! -L "$install_state_dir" ]] ||
+      die "refusing to use symlink installer state directory: $install_state_dir"
+    [[ -d "$install_state_dir" ]] ||
+      die "refusing to replace non-directory target: $install_state_dir"
+  fi
+  if [[ -e "$manifest_path" || -L "$manifest_path" ]]; then
+    [[ ! -L "$manifest_path" ]] ||
+      die "refusing to replace symlink installer manifest: $manifest_path"
+    [[ -f "$manifest_path" ]] ||
+      die "refusing to replace non-file installer manifest: $manifest_path"
+  fi
+  if [[ -e "$hypr_marker_path" || -L "$hypr_marker_path" ]]; then
+    [[ ! -L "$hypr_marker_path" ]] ||
+      die "refusing to use symlink installer marker: $hypr_marker_path"
+    [[ -f "$hypr_marker_path" ]] ||
+      die "refusing to use non-file installer marker: $hypr_marker_path"
+  fi
 }
 
 install_managed_file() {

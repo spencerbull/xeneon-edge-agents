@@ -81,12 +81,7 @@ fi
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
-if [[ -e "$hypr_marker_path" || -L "$hypr_marker_path" ]]; then
-  [[ ! -L "$hypr_marker_path" ]] ||
-    die "refusing to use symlink installer marker: $hypr_marker_path"
-  [[ -f "$hypr_marker_path" ]] ||
-    die "refusing to use non-file installer marker: $hypr_marker_path"
-fi
+preflight_installer_state
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")
@@ -135,12 +130,28 @@ fi
 if ((use_systemctl)) && ((${#owned_units[@]})); then
   "$systemctl_command" --user daemon-reload ||
     die "could not contact the user service manager; no files were removed"
-  "$systemctl_command" --user disable --now "${owned_units[@]}" ||
+  for unit in "${owned_units[@]}"; do
+    enabled_state=$(
+      "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
+    )
+    case "$enabled_state" in
+      enabled|enabled-runtime|disabled) ;;
+      *) die "could not determine stable enabled state for $unit: ${enabled_state:-<missing>}" ;;
+    esac
+  done
+  disable_user_services_all_scopes \
+    "$systemctl_command" \
+    "${owned_units[@]}" ||
     die "could not stop and disable XENEON services; no files were removed"
   for unit in "${owned_units[@]}"; do
     if "$systemctl_command" --user is-active --quiet "$unit"; then
       die "refusing to remove unit files while $unit is still active"
     fi
+    enabled_state=$(
+      "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
+    )
+    [[ "$enabled_state" == disabled ]] ||
+      die "refusing to remove unit files while $unit remains enabled: ${enabled_state:-<missing>}"
   done
 fi
 

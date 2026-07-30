@@ -70,7 +70,7 @@ artifacts.
       Windows-bin clippy.
 - [x] QML gate: `qmllint`, 22 Python contract/fixture tests, 37 Qt tests,
       exact 1280x360 mapped preview, and inspected 1280x360 offscreen render.
-- [x] Installer gate: 38 temporary-XDG scenarios plus installed-unit
+- [x] Installer gate: 43 temporary-XDG scenarios plus installed-unit
       `systemd-analyze verify`.
 - [x] Independent Rust/API and PTY concurrency review.
 - [x] Independent QML/UX review.

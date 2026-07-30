@@ -13,6 +13,7 @@ data_arg=
 state_arg=
 bin_arg=
 package_prefix=
+systemctl_arg=
 quickshell_source_explicit=0
 apply_production=0
 activate=0
@@ -44,6 +45,8 @@ Paths:
                       Source tree containing shell.qml (package/test staging)
   --package-prefix DIR
                       Trusted static package prefix (package wrapper only)
+  --systemctl-command FILE
+                      Isolated-test service-manager stub (requires --root)
 
 Production commissioning (all values required together):
   --apply-production
@@ -59,7 +62,7 @@ Production commissioning (all values required together):
   --touch-phys VALUE   Stable kernel phys (optional when uniq is provided)
 
 Runtime:
-  --activate           Enable and start both user services after checks pass
+  --activate           Enable/start services after production checks pass
 
 The default is simulator-safe: it seeds a config that matches no production
 output and does not edit hyprland.lua. Package migration stops and disables
@@ -84,6 +87,10 @@ while (($#)); do
       package_prefix=${2:?missing value for --package-prefix}
       shift 2
       ;;
+    --systemctl-command)
+      systemctl_arg=${2:?missing value for --systemctl-command}
+      shift 2
+      ;;
     --apply-production) apply_production=1; shift ;;
     --connector) connector=${2:?missing value for --connector}; shift 2 ;;
     --edid-sha256) edid_sha=${2:?missing value for --edid-sha256}; shift 2 ;;
@@ -102,6 +109,26 @@ while (($#)); do
 done
 
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
+
+use_test_systemctl=0
+systemctl_command=systemctl
+if [[ -n "$systemctl_arg" ]]; then
+  ((isolated_root)) ||
+    die "--systemctl-command is available only with isolated test paths"
+  [[ -n "$root_arg" ]] ||
+    die "--systemctl-command requires --root"
+  validate_path_argument "--systemctl-command" "$systemctl_arg"
+  systemctl_command=$(canonical_dir "$systemctl_arg")
+  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
+    die "--systemctl-command must be an executable regular file"
+  use_test_systemctl=1
+fi
+if ((use_test_systemctl && !activate)); then
+  die "--systemctl-command requires --activate"
+fi
+if ((use_test_systemctl && apply_production)); then
+  die "--systemctl-command cannot be used for production activation"
+fi
 
 package_mode=0
 asset_root=$repo_root
@@ -124,8 +151,11 @@ if [[ -n "$package_prefix" ]]; then
   service_path=$runtime_bin_home:/usr/local/bin:$bin_home
 fi
 
-if ((activate && isolated_root)); then
+if ((activate && isolated_root && !use_test_systemctl)); then
   die "--activate is not available with --root"
+fi
+if ((activate && !apply_production && !use_test_systemctl)); then
+  die "--activate requires complete --apply-production commissioning"
 fi
 
 if ((apply_production)); then
@@ -208,7 +238,7 @@ cleanup() {
     fi
   fi
   if ((status != 0 && rollback_daemon_reload)); then
-    systemctl --user daemon-reload >/dev/null 2>&1 ||
+    "$systemctl_command" --user daemon-reload >/dev/null 2>&1 ||
       warn "user service daemon-reload failed during rollback"
   fi
   if ((status != 0 && rollback_services)); then
@@ -216,25 +246,25 @@ cleanup() {
     for index in "${!service_units[@]}"; do
       unit=${service_units[$index]}
       if [[ "${service_previous_active[$index]}" == active ]]; then
-        systemctl --user restart "$unit" >/dev/null 2>&1 ||
+        "$systemctl_command" --user restart "$unit" >/dev/null 2>&1 ||
           warn "could not restore active state for $unit"
       else
-        systemctl --user stop "$unit" >/dev/null 2>&1 ||
+        "$systemctl_command" --user stop "$unit" >/dev/null 2>&1 ||
           warn "could not stop newly activated $unit"
       fi
       case "${service_previous_enabled[$index]}" in
         enabled)
-          systemctl --user enable "$unit" >/dev/null 2>&1 ||
+          "$systemctl_command" --user enable "$unit" >/dev/null 2>&1 ||
             warn "could not restore enabled state for $unit"
           ;;
         enabled-runtime)
-          systemctl --user disable "$unit" >/dev/null 2>&1 ||
+          "$systemctl_command" --user disable "$unit" >/dev/null 2>&1 ||
             warn "could not remove persistent enablement for $unit"
-          systemctl --user enable --runtime "$unit" >/dev/null 2>&1 ||
+          "$systemctl_command" --user enable --runtime "$unit" >/dev/null 2>&1 ||
             warn "could not restore runtime enablement for $unit"
           ;;
         *)
-          systemctl --user disable "$unit" >/dev/null 2>&1 ||
+          "$systemctl_command" --user disable "$unit" >/dev/null 2>&1 ||
             warn "could not remove newly enabled state for $unit"
           ;;
       esac
@@ -272,13 +302,21 @@ if ((package_mode)); then
     "$asset_root/config/hypr/xeneon_edge_agents.lua.in" \
     "$quickshell_source/shell.qml" \
     "$package_systemd_dir/xeneon-agentd.service" \
-    "$package_systemd_dir/xeneon-edge-portal.service"; do
+    "$package_systemd_dir/xeneon-edge-portal.service" \
+    "$package_prefix/lib/$project_name/scripts/check.sh" \
+    "$package_prefix/lib/$project_name/scripts/launch-package-portal.sh" \
+    "$package_prefix/lib/$project_name/scripts/lib.sh"; do
     [[ -f "$required_file" && ! -L "$required_file" ]] ||
       die "package asset is missing or not a regular file: $required_file"
   done
   for executable in xeneon-agentd xeneon-agentctl; do
     [[ -x "$runtime_bin_home/$executable" && ! -L "$runtime_bin_home/$executable" ]] ||
       die "package executable is missing or not a regular file: $runtime_bin_home/$executable"
+  done
+  for executable in check.sh launch-package-portal.sh lib.sh; do
+    package_executable=$package_prefix/lib/$project_name/scripts/$executable
+    [[ -x "$package_executable" && ! -L "$package_executable" ]] ||
+      die "package executable is missing or not a regular file: $package_executable"
   done
 else
   render_template \
@@ -327,19 +365,7 @@ fi
 
 # Preflight every managed overwrite and installer-state path before making any
 # change. A collision therefore leaves no partial installation to roll back.
-preflight_directory_target "$install_state_dir"
-if [[ -e "$manifest_path" || -L "$manifest_path" ]]; then
-  [[ ! -L "$manifest_path" ]] ||
-    die "refusing to replace symlink installer manifest: $manifest_path"
-  [[ -f "$manifest_path" ]] ||
-    die "refusing to replace non-file installer manifest: $manifest_path"
-fi
-if [[ -e "$hypr_marker_path" || -L "$hypr_marker_path" ]]; then
-  [[ ! -L "$hypr_marker_path" ]] ||
-    die "refusing to use symlink installer marker: $hypr_marker_path"
-  [[ -f "$hypr_marker_path" ]] ||
-    die "refusing to use non-file installer marker: $hypr_marker_path"
-fi
+preflight_installer_state
 if ((!package_mode)); then
   preflight_managed_target "$daemon_unit" "$daemon_target"
   preflight_managed_target "$portal_unit" "$portal_target"
@@ -653,16 +679,20 @@ if ((activate)); then
       die "Hyprland reported config errors: $config_errors"
   fi
   rollback_daemon_reload=1
-  systemctl --user daemon-reload
+  "$systemctl_command" --user daemon-reload
   for unit in "${service_units[@]}"; do
-    active_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+    active_state=$(
+      "$systemctl_command" --user is-active "$unit" 2>/dev/null || true
+    )
     case "$active_state" in
       active|inactive|failed) ;;
       *) die "could not determine stable active state for $unit" ;;
     esac
     service_previous_active+=("$active_state")
 
-    enabled_state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
+    enabled_state=$(
+      "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
+    )
     case "$enabled_state" in
       enabled|enabled-runtime|disabled) ;;
       *) die "could not determine stable enabled state for $unit" ;;
@@ -670,13 +700,13 @@ if ((activate)); then
     service_previous_enabled+=("$enabled_state")
   done
   rollback_services=1
-  systemctl --user enable "${service_units[@]}"
+  "$systemctl_command" --user enable "${service_units[@]}"
   for index in "${!service_units[@]}"; do
     unit=${service_units[$index]}
     if [[ "${service_previous_active[$index]}" == active ]]; then
-      systemctl --user restart "$unit"
+      "$systemctl_command" --user restart "$unit"
     else
-      systemctl --user start "$unit"
+      "$systemctl_command" --user start "$unit"
     fi
   done
   rollback_services=0
