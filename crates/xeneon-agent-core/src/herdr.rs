@@ -353,7 +353,6 @@ async fn watch_events(
     let mut subscriptions = vec![
         json!({"type": "workspace.created"}),
         json!({"type": "workspace.updated"}),
-        json!({"type": "workspace.metadata_updated"}),
         json!({"type": "workspace.renamed"}),
         json!({"type": "workspace.moved"}),
         json!({"type": "workspace.closed"}),
@@ -365,12 +364,10 @@ async fn watch_events(
         json!({"type": "tab.moved"}),
         json!({"type": "pane.created"}),
         json!({"type": "pane.closed"}),
-        json!({"type": "pane.updated"}),
         json!({"type": "pane.focused"}),
         json!({"type": "pane.moved"}),
         json!({"type": "pane.exited"}),
         json!({"type": "pane.agent_detected"}),
-        json!({"type": "layout.updated"}),
     ];
     subscriptions.extend(
         pane_ids
@@ -555,6 +552,16 @@ mod tests {
             let request: Value =
                 serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
             assert_eq!(request["method"], "events.subscribe");
+            let subscription_types = request["params"]["subscriptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|subscription| subscription["type"].as_str())
+                .collect::<Vec<_>>();
+            assert!(subscription_types.contains(&"pane.agent_status_changed"));
+            assert!(!subscription_types.contains(&"pane.updated"));
+            assert!(!subscription_types.contains(&"layout.updated"));
+            assert!(!subscription_types.contains(&"workspace.metadata_updated"));
             write
                 .write_all(b"{\"id\":\"sub\",\"result\":{\"type\":\"subscription_started\"}}\n")
                 .await

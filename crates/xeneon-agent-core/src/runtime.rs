@@ -13,7 +13,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     sync::{Mutex, RwLock, mpsc, watch},
     task::JoinHandle,
-    time::{MissedTickBehavior, interval},
+    time::{MissedTickBehavior, interval, sleep},
 };
 use uuid::Uuid;
 
@@ -28,6 +28,8 @@ use crate::{
     },
     protocol::{command_capability_matches, validate_command},
 };
+
+const INVALIDATION_COALESCE: Duration = Duration::from_millis(200);
 
 #[derive(Debug)]
 struct RuntimeState {
@@ -129,6 +131,12 @@ impl DaemonRuntime {
                         tracing::error!("Herdr invalidation channel closed");
                         return;
                     }
+                    // A single terminal operation can emit several related
+                    // workspace, tab, pane, and agent events. Reconcile one
+                    // complete snapshot for the burst instead of invoking the
+                    // full Herdr API once per event.
+                    sleep(INVALIDATION_COALESCE).await;
+                    while invalidation_rx.try_recv().is_ok() {}
                     self.refresh_herdr(&mut subscriptions).await;
                 }
             }
