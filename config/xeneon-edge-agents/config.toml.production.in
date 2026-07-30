@@ -1,0 +1,13 @@
+herdr_bin = "herdr"
+herdr_refresh_ms = 5000
+health_refresh_ms = 1000
+
+[screen]
+connector = "@OUTPUT_CONNECTOR@"
+serial = "@OUTPUT_SERIAL@"
+model = "@OUTPUT_MODEL@"
+touch_device = "@TOUCH_DEVICE@"
+
+[desktop]
+edge_output = "@OUTPUT_CONNECTOR@"
+herdr_class = "herdr"

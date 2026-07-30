@@ -1,0 +1,21 @@
+[Unit]
+Description=XENEON EDGE agent adapter
+Documentation=https://github.com/spencerbull/xeneon-edge-agents
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
+Environment="XDG_STATE_HOME=@STATE_HOME@"
+ExecStart="@BIN_HOME@/xeneon-agentd" --config "@CONFIG_HOME@/xeneon-edge-agents/config.toml"
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths="@STATE_HOME@/xeneon-edge-agents"
+
+[Install]
+WantedBy=graphical-session.target

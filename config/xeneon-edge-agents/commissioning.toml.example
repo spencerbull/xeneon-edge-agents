@@ -1,0 +1,21 @@
+mode = "simulation"
+
+[output]
+# Production mode requires every field to match one connected DRM output.
+# Empty values intentionally match nothing.
+connector = ""
+serial = ""
+model = ""
+edid_sha256 = ""
+require_exact_match = true
+allow_primary_fallback = false
+
+[touch]
+# Use the normalized name reported by `hyprctl -j devices`.
+device = ""
+output = ""
+enabled = false
+
+[ddc]
+# DDC remains read-only until physical commissioning proves exact restore.
+brightness_enabled = false

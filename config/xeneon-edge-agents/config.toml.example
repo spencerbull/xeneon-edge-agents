@@ -1,0 +1,11 @@
+herdr_bin = "herdr"
+herdr_refresh_ms = 5000
+health_refresh_ms = 1000
+
+[screen]
+# Production commissioning writes connector, serial, model, and touch_device.
+# Their absence is intentional: the simulator-safe default identifies no EDGE.
+
+[desktop]
+herdr_class = "herdr"
+# Production commissioning writes edge_output.

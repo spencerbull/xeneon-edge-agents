@@ -1,0 +1,24 @@
+[Unit]
+Description=XENEON EDGE Quickshell portal
+Documentation=https://github.com/spencerbull/xeneon-edge-agents
+Requires=xeneon-agentd.service
+After=xeneon-agentd.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
+Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
+Environment="XENEON_EDGE_OUTPUT=@OUTPUT_CONNECTOR@"
+Environment="XENEON_EDGE_SERIAL=@OUTPUT_SERIAL@"
+Environment="XENEON_EDGE_MODEL=@OUTPUT_MODEL@"
+ExecStart=/usr/bin/env quickshell -c xeneon-edge-agents
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=graphical-session.target
