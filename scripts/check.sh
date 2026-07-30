@@ -447,7 +447,12 @@ print(sum(1 for device in touch if device.get("name") == wanted))
       ' "$hyprland_target")
       module_count=$(grep -Ec '^[[:space:]]*require\("hypr\.xeneon_edge_agents"\)[[:space:]]*$' "$hyprland_target" || true)
       if ((module_count == 0 && adjacent_count == 0)); then
-        printf 'ok: Hyprland integration is staged but not active\n'
+        if ((require_production)); then
+          printf 'blocked: Hyprland integration is staged but not active\n'
+          failures=$((failures + 1))
+        else
+          printf 'ok: Hyprland integration is staged but not active\n'
+        fi
       elif ((module_count == 1 && adjacent_count == 1)); then
         printf 'ok: Hyprland integration is active\n'
       else

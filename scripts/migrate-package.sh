@@ -143,13 +143,28 @@ if ((use_systemctl)); then
     if [[ "$drop_ins" =~ [^[:space:]] ]]; then
       die "$unit has unsupported systemd drop-ins before migration: $drop_ins"
     fi
-    service_active_before+=(
-      "$("$systemctl_command" --user is-active "$unit" 2>/dev/null || true)"
+    active_state=$(
+      "$systemctl_command" --user is-active "$unit" 2>/dev/null || true
     )
-    service_enabled_before+=(
-      "$("$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true)"
+    case "$active_state" in
+      active|inactive|failed) ;;
+      *) die "could not determine stable active state for $unit: ${active_state:-<missing>}" ;;
+    esac
+    service_active_before+=("$active_state")
+
+    enabled_state=$(
+      "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
     )
+    case "$enabled_state" in
+      enabled|enabled-runtime|disabled) ;;
+      *) die "could not determine stable enabled state for $unit: ${enabled_state:-<missing>}" ;;
+    esac
+    service_enabled_before+=("$enabled_state")
   done
+  if ((removable_service_by_index[0] && !removable_service_by_index[1])) &&
+    [[ "${service_active_before[1]}" == active ]]; then
+    die "cannot migrate the legacy daemon while the package portal is active; stop xeneon-edge-portal.service first"
+  fi
   disable_legacy_package_services \
     "${#removable_service_targets[@]}" \
     "$systemctl_command" \
@@ -169,23 +184,32 @@ for target in "${removable_service_targets[@]}"; do
 done
 
 legacy_quickshell_root=$config_home/quickshell/$project_name
-if [[ -f "$manifest_path" ]]; then
-  while IFS=$'\t' read -r target installed_hash; do
-    [[ "$target" == "$legacy_quickshell_root/"* ]] || continue
-    if [[ ! -e "$target" && ! -L "$target" ]]; then
-      remove_manifest_entry "$target"
-    elif [[ ! -L "$target" && -f "$target" ]] &&
-      [[ "$(sha256_file "$target")" == "$installed_hash" ]]; then
-      rm -f -- "$target"
-      remove_manifest_entry "$target"
-      note "Removed unchanged legacy QML copy: $target"
-    else
-      warn "preserving modified legacy QML file (the package unit does not load it): $target"
-    fi
-  done < <(cp "$manifest_path" /dev/stdout)
-fi
+legacy_portal_scripts_root=$data_home/$project_name/scripts
+legacy_static_roots=("$legacy_quickshell_root" "$legacy_portal_scripts_root")
+legacy_static_labels=("QML copy" "portal helper")
+for index in "${!legacy_static_roots[@]}"; do
+  legacy_root=${legacy_static_roots[$index]}
+  legacy_label=${legacy_static_labels[$index]}
+  if [[ -f "$manifest_path" ]]; then
+    while IFS=$'\t' read -r target installed_hash; do
+      [[ "$target" == "$legacy_root/"* ]] || continue
+      if [[ ! -e "$target" && ! -L "$target" ]]; then
+        remove_manifest_entry "$target"
+      elif [[ ! -L "$target" && -f "$target" ]] &&
+        [[ "$(sha256_file "$target")" == "$installed_hash" ]]; then
+        rm -f -- "$target"
+        remove_manifest_entry "$target"
+        note "Removed unchanged legacy $legacy_label: $target"
+      else
+        warn "preserving modified legacy $legacy_label (the package unit does not load it): $target"
+      fi
+    done < <(cp "$manifest_path" /dev/stdout)
+  fi
+done
 find "$legacy_quickshell_root" -depth -type d -empty -delete 2>/dev/null || true
 rmdir "$config_home/quickshell" 2>/dev/null || true
+find "$legacy_portal_scripts_root" -depth -type d -empty -delete 2>/dev/null || true
+rmdir "$data_home/$project_name" 2>/dev/null || true
 
 if ((use_systemctl)); then
   "$systemctl_command" --user daemon-reload
@@ -209,6 +233,14 @@ if ((use_systemctl)); then
     enabled_state=$(
       "$systemctl_command" --user is-enabled "$unit" 2>/dev/null || true
     )
+    case "$active_state" in
+      active|inactive|failed) ;;
+      *) die "could not determine stable active state for $unit after migration: ${active_state:-<missing>}" ;;
+    esac
+    case "$enabled_state" in
+      enabled|enabled-runtime|disabled) ;;
+      *) die "could not determine stable enabled state for $unit after migration: ${enabled_state:-<missing>}" ;;
+    esac
     if ((removable_service_by_index[index])); then
       [[ "$active_state" != active ]] ||
         die "$unit remained active after migration"

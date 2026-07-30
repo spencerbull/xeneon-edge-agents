@@ -106,10 +106,14 @@ fi
 
 daemon_unit=$payload_root/usr/lib/systemd/user/xeneon-agentd.service
 portal_unit=$payload_root/usr/lib/systemd/user/xeneon-edge-portal.service
+portal_launcher=$payload_root/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
 grep -Fqx 'UMask=0077' "$daemon_unit"
 grep -Fqx 'UMask=0077' "$portal_unit"
 grep -Fqx 'Environment="XDG_CONFIG_HOME=%E"' "$daemon_unit"
 grep -Fqx 'Environment="XDG_STATE_HOME=%S"' "$daemon_unit"
+grep -Fqx \
+  'Environment="XDG_CACHE_HOME=%t/xeneon-edge-agents/cache"' \
+  "$portal_unit"
 grep -Fqx \
   'Environment="PATH=/usr/bin:/usr/local/bin:%h/.local/bin"' \
   "$daemon_unit"
@@ -119,6 +123,16 @@ grep -Fqx \
 grep -Fqx \
   'ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh' \
   "$portal_unit"
+grep -Fqx \
+  'UnsetEnvironment=XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID' \
+  "$portal_unit"
+grep -Fqx 'ReadWritePaths=%t' "$portal_unit"
+grep -Fqx \
+  'unset XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID' \
+  "$portal_launcher"
+grep -Fqx \
+  '"$script_dir/check.sh" --package-prefix /usr --require-production' \
+  "$portal_launcher"
 if grep -Fq 'EnvironmentFile=' "$portal_unit"; then
   printf 'error: portal unit loads unvalidated user environment directly\n' >&2
   exit 1

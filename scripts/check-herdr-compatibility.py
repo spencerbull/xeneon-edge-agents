@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
+# Keep synchronized with crates/xeneon-agent-core/src/herdr.rs.
 SUPPORTED_PROTOCOLS = {17, 18}
 SOCKET_TIMEOUT_SECONDS = 1.0
 

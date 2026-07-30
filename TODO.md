@@ -64,13 +64,13 @@ artifacts.
 
 ## Gates and evidence
 
-- [x] Foundation focused tests: 24 core plus 1 CLI test and strict clippy.
+- [x] Foundation focused tests: 25 core plus 1 CLI test and strict clippy.
 - [x] Herdr gates: 2,825 unit, 213 integration, 86 maintenance, 17
       integration-asset, and 12 marketplace tests; strict Linux all-target and
       Windows-bin clippy.
-- [x] QML gate: `qmllint`, 21 Python contract/fixture tests, 37 Qt tests,
+- [x] QML gate: `qmllint`, 22 Python contract/fixture tests, 37 Qt tests,
       exact 1280x360 mapped preview, and inspected 1280x360 offscreen render.
-- [x] Installer gate: 33 temporary-XDG scenarios plus installed-unit
+- [x] Installer gate: 38 temporary-XDG scenarios plus installed-unit
       `systemd-analyze verify`.
 - [x] Independent Rust/API and PTY concurrency review.
 - [x] Independent QML/UX review.
@@ -93,8 +93,8 @@ artifacts.
   `origin/main`.
 - Package and workflow work is pushed on `agent/arch-packaging-ci`; repository
   Actions require full-SHA pins.
-- Hosted branch-head source and unpublished-package workflows passed at
-  `58eeb15`; the package artifact remains private to the repository run.
+- Workflow revision `58eeb15` passed hosted source and unpublished-package
+  runs; the package artifact remains private to the repository run.
 - `xeneon-edge-agents 0.1.0-1` is installed from the local package. Pacman
   reports 77 package files and zero altered files.
 - The simulator-safe package install contains three hash-verified user files;

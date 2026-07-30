@@ -117,10 +117,12 @@ grep -Fqx "sha256sums=('$source_sha')" "$build_dir/PKGBUILD" || {
 )
 
 mapfile -t binary_packages < <(
-  find "$output_dir" -maxdepth 1 -type f -name '*.pkg.tar.*' -print | sort
+  find "$output_dir" -maxdepth 1 -type f \
+    -name '*.pkg.tar.*' ! -name '*.sig' -print | sort
 )
 mapfile -t source_packages < <(
-  find "$output_dir" -maxdepth 1 -type f -name '*.src.tar.*' -print | sort
+  find "$output_dir" -maxdepth 1 -type f \
+    -name '*.src.tar.*' ! -name '*.sig' -print | sort
 )
 [[ ${#binary_packages[@]} == 1 ]] || {
   printf 'error: expected one binary package, found %d\n' \

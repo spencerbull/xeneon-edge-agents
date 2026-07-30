@@ -11,7 +11,9 @@ Type=simple
 UMask=0077
 Environment="XDG_CONFIG_HOME=%E"
 Environment="XDG_STATE_HOME=%S"
+Environment="XDG_CACHE_HOME=%t/xeneon-edge-agents/cache"
 Environment="PATH=/usr/bin:/usr/local/bin:%h/.local/bin"
+UnsetEnvironment=XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID
 ExecStart=/usr/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
 Restart=on-failure
 RestartSec=2s
@@ -19,6 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=%t
 
 [Install]
 WantedBy=graphical-session.target

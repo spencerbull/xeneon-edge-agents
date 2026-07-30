@@ -265,6 +265,43 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertNotIn("hyprctl keyword", preview)
         self.assertNotIn(".config/hypr", preview)
 
+    def test_service_launchers_clear_preview_only_environment(self):
+        repository_root = ROOT.parent
+        package_launcher = (
+            repository_root / "scripts" / "launch-package-portal.sh"
+        ).read_text(encoding="utf-8")
+        source_launcher = (
+            repository_root / "scripts" / "launch-portal.sh.in"
+        ).read_text(encoding="utf-8")
+        package_unit = (
+            repository_root
+            / "packaging"
+            / "arch"
+            / "systemd"
+            / "xeneon-edge-portal.service"
+        ).read_text(encoding="utf-8")
+        repository_unit = (
+            repository_root
+            / "config"
+            / "systemd"
+            / "user"
+            / "xeneon-edge-portal.service.in"
+        ).read_text(encoding="utf-8")
+        preview_variables = (
+            "XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID"
+        )
+
+        self.assertIn(f"unset {preview_variables}", package_launcher)
+        self.assertIn("--package-prefix /usr --require-production", package_launcher)
+        self.assertIn(f"unset {preview_variables}", source_launcher)
+        self.assertIn("--require-production", source_launcher)
+        self.assertIn(
+            'ExecStart="@DATA_HOME@/xeneon-edge-agents/scripts/launch-portal.sh"',
+            repository_unit,
+        )
+        for unit in (package_unit, repository_unit):
+            self.assertIn(f"UnsetEnvironment={preview_variables}", unit)
+
     def test_ambient_overlay_shields_input_until_fade_finishes(self):
         ambient = source("components/AmbientView.qml")
         self.assertIn("visible: active || opacity > 0", ambient)

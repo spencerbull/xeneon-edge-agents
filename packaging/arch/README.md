@@ -57,10 +57,13 @@ Long-form compatibility commands such as
 `xeneon-edge-agents-install` and `xeneon-edge-agents-check` are also installed.
 
 The default `install` is simulator-safe. It seeds only user commissioning
-files, migrates unchanged manifest-owned legacy unit/QML copies to static
-package assets, and leaves the user services stopped and disabled. Modified
-legacy QML is preserved; a modified user service override blocks migration
-because it would mask the packaged unit.
+files, migrates unchanged manifest-owned legacy units, QML copies, and
+repository-launch helpers to static package assets, and leaves the user
+services stopped and disabled. Migrating an unchanged legacy unit stops and
+disables that legacy service; rerun with the complete production identity and
+`--activate` to start the package unit. Modified legacy static files are
+preserved; a modified user service override blocks migration because it would
+mask the packaged unit.
 
 Production remains explicit and uses the same complete
 `--apply-production ...` identity arguments documented in the project

@@ -6,6 +6,8 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=scripts/lib.sh
 source "$script_dir/lib.sh"
 
+unset XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID
+
 "$script_dir/check.sh" --package-prefix /usr --require-production
 
 resolve_xdg_paths "" "" "" "" ""

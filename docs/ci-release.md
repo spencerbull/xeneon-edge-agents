@@ -29,9 +29,10 @@ an older run for the same branch or pull request.
 branch push, pull request, and `v*` tag. Running broadly ensures that changes
 to Rust, QML, scripts, templates, documentation, or packaging all exercise the
 archive path. It expects the package definition at `packaging/arch/PKGBUILD`;
-until that file is present, it exits with an explicit error.
-Superseded branch and pull-request builds are cancelled, while tag builds are
-never cancelled automatically.
+if that file is missing, it exits with an explicit error.
+Superseded branch and pull-request builds are cancelled. A running tag build is
+not cancelled, while GitHub retains only the newest pending attempt for that
+same tag.
 Tag builds call the source workflow first and cannot build or release unless
 the complete source gate succeeds. Branch and pull-request package builds rely
 on the independently triggered source workflow to avoid running that same
@@ -63,6 +64,12 @@ tag job verifies through the GitHub API that the repository is still private
 before creating a release. If a release already exists, this workflow refuses
 to replace it or any asset. The workflow uploads every asset to a draft and
 publishes it only after all uploads succeed.
+
+If a run fails after creating its draft, inspect that draft and its assets
+before retrying. An administrator may delete the unpublished draft only after
+confirming that the tag still resolves to the same commit and that no release
+was published. A rerun then creates a fresh draft; the workflow never resumes,
+edits, or replaces an existing release.
 
 Repository-level immutable releases are a separate administrator setting and
 are currently a human gate: without that setting, an administrator can still

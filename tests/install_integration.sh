@@ -161,6 +161,9 @@ test_default_idempotence_and_uninstall() {
   assert_file "$root/.config/xeneon-edge-agents/commissioning.toml"
   assert_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_file "$root/.local/share/xeneon-edge-agents/scripts/check.sh"
+  assert_file "$root/.local/share/xeneon-edge-agents/scripts/lib.sh"
+  assert_file "$root/.local/share/xeneon-edge-agents/scripts/launch-portal.sh"
   assert_no_file "$root/.config/hypr/xeneon_edge_agents.lua"
   assert_count 0 'hypr\.xeneon_edge_agents' "$root/.config/hypr/hyprland.lua"
   after=$(sha256sum "$root/.config/hypr/hyprland.lua")
@@ -169,6 +172,7 @@ test_default_idempotence_and_uninstall() {
   "$uninstall_script" --root "$root" >/dev/null
   assert_no_file "$root/.config/xeneon-edge-agents/config.toml"
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.local/share/xeneon-edge-agents/scripts/launch-portal.sh"
   assert_file "$root/.config/hypr/hyprland.lua"
 }
 
@@ -222,6 +226,94 @@ test_preflight_rollback_on_collision() {
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_no_file "$root/.config/xeneon-edge-agents/config.toml"
   assert_contains "$portal" 'user service'
+}
+
+test_state_path_collisions_fail_before_installation() {
+  local root collision log
+  for collision in install managed.tsv; do
+    root=$(new_temp_dir)
+    log=$root/install.log
+    mkdir -p "$root/.local/state/xeneon-edge-agents"
+    if [[ "$collision" == install ]]; then
+      : >"$root/.local/state/xeneon-edge-agents/install"
+    else
+      mkdir "$root/.local/state/xeneon-edge-agents/install"
+      mkdir "$root/.local/state/xeneon-edge-agents/install/managed.tsv"
+    fi
+
+    if "$install_script" --root "$root" >"$log" 2>&1; then
+      fail "installer accepted a conflicting $collision state path"
+    fi
+    assert_contains "$log" 'refusing to replace'
+    assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+    assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+    assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+  done
+}
+
+test_marker_symlink_fails_before_activation() {
+  local root marker victim stub_bin systemctl_log log
+  root=$(new_temp_dir)
+  marker=$root/state/xeneon-edge-agents/install/hypr-require-injected
+  victim=$root/user-data
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  log=$root/install.log
+  mkdir -p "$(dirname "$marker")" "$root/config" "$root/data" "$root/bin" \
+    "$stub_bin"
+  printf 'preserve me\n' >"$victim"
+  ln -s "$victim" "$marker"
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 0
+EOF
+  chmod +x "$stub_bin/systemctl"
+
+  if env \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_BIN_HOME="$root/bin" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    PATH="$stub_bin:/usr/bin" \
+    "$install_script" --activate >"$log" 2>&1; then
+    fail "activation accepted a symlink installer marker"
+  fi
+  assert_contains "$log" 'refusing to use symlink installer marker'
+  assert_contains "$victim" 'preserve me'
+  assert_no_file "$systemctl_log"
+  assert_no_file "$root/config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/config/quickshell/xeneon-edge-agents/shell.qml"
+}
+
+test_production_parent_collision_fails_before_installation() {
+  local root fixture sha quickshell_source config_path log
+  root=$(new_temp_dir)
+  fixture=$root/edid.bin
+  quickshell_source=$root/quickshell-source
+  config_path=$root/.config/xeneon-edge-agents
+  log=$root/install.log
+  printf 'CORSAIR XENEON EDGE deterministic EDID fixture\n' >"$fixture"
+  sha=$(sha256sum "$fixture" | awk '{print $1}')
+  write_hyprland "$root"
+  make_runtime_stubs "$root" "$quickshell_source"
+  printf 'blocking file\n' >"$config_path"
+
+  if "$install_script" --root "$root" --quickshell-source "$quickshell_source" \
+    --apply-production \
+    --connector DP-1 --edid-sha256 "$sha" \
+    --screen-serial CX123456 --screen-model "XENEON EDGE" \
+    "${production_touch_args[@]}" >"$log" 2>&1; then
+    fail "production install accepted a non-directory config path"
+  fi
+  assert_contains "$log" \
+    'refusing to create a target below a non-directory path'
+  assert_contains "$config_path" 'blocking file'
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+  assert_no_file "$root/.local/state/xeneon-edge-agents/install/managed.tsv"
 }
 
 test_identical_user_file_is_not_claimed() {
@@ -278,7 +370,7 @@ test_obsolete_quickshell_files_are_pruned_safely() {
 
 test_production_commissioning_and_exact_check() {
   local root fixture sha sys_root quickshell_source hypr_devices hypr_monitors
-  local marker
+  local marker launcher_dir stub_bin quickshell_marker
   root=$(new_temp_dir)
   fixture=$root/edid.bin
   sys_root=$root/sys
@@ -310,6 +402,14 @@ test_production_commissioning_and_exact_check() {
   assert_contains "$root/.config/xeneon-edge-agents/commissioning.toml" 'allow_primary_fallback = false'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
     'Environment="XENEON_EDGE_SERIAL=CX123456"'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'Environment="XDG_CACHE_HOME=%t/xeneon-edge-agents/cache"'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'ReadWritePaths=%t'
+  launcher_dir=$root/.local/share/xeneon-edge-agents/scripts
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    "ExecStart=\"$launcher_dir/launch-portal.sh\""
+  assert_contains "$launcher_dir/launch-portal.sh" '--require-production'
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
     "Environment=\"PATH=$root/.local/bin:/usr/local/bin:/usr/bin\""
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
@@ -326,6 +426,45 @@ test_production_commissioning_and_exact_check() {
   fi
   assert_contains "$root/check.log" \
     'Hyprland integration is staged but not active'
+  if "$check_script" --root "$root" --sys-root "$sys_root" \
+    --hypr-devices-json "$hypr_devices" \
+    --hypr-monitors-json "$hypr_monitors" \
+    --require-production >"$root/launch-check.log" 2>&1; then
+    fail "production launch check accepted staged Hyprland integration"
+  fi
+  assert_contains "$root/launch-check.log" \
+    'blocked: Hyprland integration is staged but not active'
+
+  cp -p "$launcher_dir/check.sh" "$launcher_dir/check-real.sh"
+  cat >"$launcher_dir/check.sh" <<'EOF'
+#!/usr/bin/env bash
+exec "$(dirname "$0")/check-real.sh" "$@" \
+  --sys-root "$TEST_SYS_ROOT" \
+  --hypr-devices-json "$TEST_HYPR_DEVICES" \
+  --hypr-monitors-json "$TEST_HYPR_MONITORS"
+EOF
+  chmod 0755 "$launcher_dir/check.sh"
+  stub_bin=$root/stub-bin
+  quickshell_marker=$root/quickshell-started
+  mkdir -p "$stub_bin"
+  cat >"$stub_bin/quickshell" <<'EOF'
+#!/usr/bin/env bash
+: >"$QUICKSHELL_MARKER"
+EOF
+  chmod +x "$stub_bin/quickshell"
+  if env \
+    TEST_SYS_ROOT="$sys_root" \
+    TEST_HYPR_DEVICES="$hypr_devices" \
+    TEST_HYPR_MONITORS="$hypr_monitors" \
+    QUICKSHELL_MARKER="$quickshell_marker" \
+    PATH="$stub_bin:$root/.local/bin:/usr/bin" \
+    "$launcher_dir/launch-portal.sh" >"$root/source-launch.log" 2>&1; then
+    fail "source portal launcher accepted staged Hyprland integration"
+  fi
+  mv "$launcher_dir/check-real.sh" "$launcher_dir/check.sh"
+  assert_contains "$root/source-launch.log" \
+    'blocked: Hyprland integration is staged but not active'
+  assert_no_file "$quickshell_marker"
 
   if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify \
@@ -702,6 +841,59 @@ EOF
   assert_no_file "$systemctl_log"
 }
 
+test_uninstall_rejects_marker_symlink_before_service_mutation() {
+  local root marker victim stub_bin systemctl_log log
+  root=$(new_temp_dir)
+  marker=$root/state/xeneon-edge-agents/install/hypr-require-injected
+  victim=$root/user-data
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  log=$root/uninstall.log
+  mkdir -p "$root/config/hypr" "$root/data" "$root/state" "$root/bin" \
+    "$stub_bin"
+  cat >"$root/config/hypr/hyprland.lua" <<'EOF'
+require("hypr.input")
+EOF
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 0
+EOF
+  chmod +x "$stub_bin/systemctl"
+
+  env \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_BIN_HOME="$root/bin" \
+    PATH="$stub_bin:/usr/bin" \
+    "$install_script" >/dev/null
+
+  sed -i '/require("hypr.input")/a require("hypr.xeneon_edge_agents")' \
+    "$root/config/hypr/hyprland.lua"
+  printf 'preserve me\n' >"$victim"
+  ln -s "$victim" "$marker"
+
+  if env \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_BIN_HOME="$root/bin" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    PATH="$stub_bin:/usr/bin" \
+    "$uninstall_script" >"$log" 2>&1; then
+    fail "uninstall accepted a symlink installer marker"
+  fi
+  assert_contains "$log" 'refusing to use symlink installer marker'
+  assert_contains "$victim" 'preserve me'
+  assert_count 1 \
+    'require\("hypr\.xeneon_edge_agents"\)' \
+    "$root/config/hypr/hyprland.lua"
+  assert_no_file "$systemctl_log"
+  assert_file "$root/config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/config/systemd/user/xeneon-edge-portal.service"
+}
+
 test_modified_managed_unit_aborts_uninstall() {
   local root daemon config log
   root=$(new_temp_dir)
@@ -787,6 +979,7 @@ test_failed_activation_restores_prior_artifacts() {
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 case "$*" in
   *" is-active "*) printf 'active\n' ;;
+  *" is-enabled xeneon-agentd.service") printf 'enabled-runtime\n' ;;
   *" is-enabled "*) printf 'enabled\n' ;;
   *" restart xeneon-edge-portal.service")
     if [[ ! -f "$FAILURE_MARKER" ]]; then
@@ -846,6 +1039,13 @@ EOF
   )
   [[ "$daemon_restarts" == 2 && "$portal_restarts" == 2 ]] ||
     fail "failed activation did not restart both prior active services"
+  grep -Fxq -- '--user disable xeneon-agentd.service' "$systemctl_log" ||
+    fail "failed activation did not remove persistent daemon enablement"
+  grep -Fxq -- '--user enable --runtime xeneon-agentd.service' "$systemctl_log" ||
+    fail "failed activation did not restore runtime daemon enablement"
+  if grep -Fxq -- '--user enable xeneon-agentd.service' "$systemctl_log"; then
+    fail "failed activation restored runtime daemon enablement as persistent"
+  fi
 }
 
 test_live_uninstall_reloads_hyprland() {
@@ -970,6 +1170,7 @@ test_package_layout_migrates_static_payload() {
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
   assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+  assert_no_file "$root/.local/share/xeneon-edge-agents/scripts/launch-portal.sh"
   assert_file "$root/.config/xeneon-edge-agents/portal.env"
   [[ "$hypr_before" == "$(sha256sum "$root/.config/hypr/hyprland.lua")" ]] ||
     fail "package migration changed Hyprland"
@@ -980,6 +1181,27 @@ test_package_layout_migrates_static_payload() {
   "$uninstall_script" --root "$root" --package-prefix "$prefix" >/dev/null
   assert_no_file "$root/.config/xeneon-edge-agents/portal.env"
   assert_file "$root/.config/hypr/hyprland.lua"
+}
+
+test_package_install_preflights_seed_targets_before_migration() {
+  local root prefix config_target log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  config_target=$root/.config/xeneon-edge-agents/config.toml
+  log=$root/install.log
+  rm "$config_target"
+  mkdir "$config_target"
+
+  if "$install_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package install accepted a directory as a seed target"
+  fi
+  assert_contains "$log" 'refusing to replace non-file target'
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
 }
 
 test_package_migration_refuses_modified_user_unit() {
@@ -1014,7 +1236,7 @@ test_package_migration_preserves_modified_qml() {
 
   "$package_migrate_script" \
     --root "$root" --package-prefix "$prefix" >"$log" 2>&1
-  assert_contains "$log" 'preserving modified legacy QML file'
+  assert_contains "$log" 'preserving modified legacy QML'
   assert_contains "$qml" '// user customization'
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
@@ -1090,8 +1312,8 @@ EOF
   assert_no_file "$log"
 }
 
-test_mixed_package_migration_preserves_package_unit_state() {
-  local root prefix stub log daemon_disabled portal_disabled
+test_mixed_package_migration_refuses_dependency_state_loss() {
+  local root prefix stub log mutation_log
   local portal_target manifest
   root=$(new_temp_dir)
   prefix=$(new_temp_dir)
@@ -1103,9 +1325,8 @@ test_mixed_package_migration_preserves_package_unit_state() {
   sed -i "\|^$portal_target	|d" "$manifest"
 
   stub=$root/systemctl
-  log=$root/systemctl.log
-  daemon_disabled=$root/daemon-disabled
-  portal_disabled=$root/portal-disabled
+  log=$root/migrate.log
+  mutation_log=$root/systemctl-mutation.log
   cat >"$stub" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1127,29 +1348,20 @@ case "$*" in
   "--user show --property=DropInPaths --value "*)
     ;;
   "--user is-active xeneon-agentd.service")
-    [[ ! -f "$TEST_DAEMON_DISABLED" ]] && printf 'active\n' ||
-      printf 'inactive\n'
+    printf 'active\n'
     ;;
   "--user is-active xeneon-edge-portal.service")
-    [[ ! -f "$TEST_PORTAL_DISABLED" ]] && printf 'active\n' ||
-      printf 'inactive\n'
+    printf '%s\n' "$TEST_PORTAL_STATE"
     ;;
   "--user is-enabled xeneon-agentd.service")
-    [[ ! -f "$TEST_DAEMON_DISABLED" ]] && printf 'enabled\n' ||
-      printf 'disabled\n'
+    printf 'enabled\n'
     ;;
   "--user is-enabled xeneon-edge-portal.service")
-    [[ ! -f "$TEST_PORTAL_DISABLED" ]] && printf 'enabled\n' ||
-      printf 'disabled\n'
+    printf 'enabled\n'
     ;;
   "--user disable --now "*)
-    printf '%s\n' "$*" >>"$TEST_SYSTEMCTL_LOG"
-    for argument in "$@"; do
-      case "$argument" in
-        xeneon-agentd.service) : >"$TEST_DAEMON_DISABLED" ;;
-        xeneon-edge-portal.service) : >"$TEST_PORTAL_DISABLED" ;;
-      esac
-    done
+    printf '%s\n' "$*" >>"$TEST_MUTATION_LOG"
+    exit 97
     ;;
   *)
     printf 'unexpected systemctl invocation: %s\n' "$*" >&2
@@ -1159,21 +1371,37 @@ esac
 EOF
   chmod 0755 "$stub"
 
-  TEST_PACKAGE_PREFIX=$prefix \
+  if TEST_PORTAL_STATE=active \
+    TEST_PACKAGE_PREFIX=$prefix \
     TEST_DAEMON_LEGACY=$root/.config/systemd/user/xeneon-agentd.service \
-    TEST_DAEMON_DISABLED=$daemon_disabled \
-    TEST_PORTAL_DISABLED=$portal_disabled \
-    TEST_SYSTEMCTL_LOG=$log \
+    TEST_MUTATION_LOG=$mutation_log \
     "$package_migrate_script" \
       --root "$root" \
       --package-prefix "$prefix" \
-      --systemctl-command "$stub" >/dev/null
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "mixed migration accepted package portal dependency state loss"
+  fi
 
-  assert_count 1 \
-    '^--user disable --now xeneon-agentd\.service$' "$log"
-  assert_file "$daemon_disabled"
-  assert_no_file "$portal_disabled"
-  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_contains "$log" \
+    'cannot migrate the legacy daemon while the package portal is active'
+  assert_no_file "$mutation_log"
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+
+  if TEST_PORTAL_STATE=activating \
+    TEST_PACKAGE_PREFIX=$prefix \
+    TEST_DAEMON_LEGACY=$root/.config/systemd/user/xeneon-agentd.service \
+    TEST_MUTATION_LOG=$mutation_log \
+    "$package_migrate_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "mixed migration accepted a transitional package portal state"
+  fi
+  assert_contains "$log" \
+    'could not determine stable active state for xeneon-edge-portal.service'
+  assert_no_file "$mutation_log"
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
 }
 
 test_package_migration_refuses_systemd_dropins() {
@@ -1345,6 +1573,12 @@ run_test 'existing user config symlink is preserved' \
   test_user_config_symlink_is_preserved
 run_test 'preflight collision rolls back without a partial install' \
   test_preflight_rollback_on_collision
+run_test 'installer-state collisions fail before installation' \
+  test_state_path_collisions_fail_before_installation
+run_test 'installer marker symlinks fail before activation' \
+  test_marker_symlink_fails_before_activation
+run_test 'production parent collisions fail before installation' \
+  test_production_parent_collision_fails_before_installation
 run_test 'identical user file is not claimed by the installer' \
   test_identical_user_file_is_not_claimed
 run_test 'obsolete Quickshell files are pruned without deleting modifications' \
@@ -1372,6 +1606,8 @@ run_test 'path boundaries reject systemd hazards and allow spaces' \
   test_path_boundaries_and_spaces
 run_test 'uninstall leaves unowned same-name services untouched' \
   test_uninstall_does_not_touch_unowned_services
+run_test 'uninstall rejects marker symlinks before service mutation' \
+  test_uninstall_rejects_marker_symlink_before_service_mutation
 run_test 'modified managed units abort uninstall before dependency removal' \
   test_modified_managed_unit_aborts_uninstall
 run_test 'activation restarts already-active services' \
@@ -1386,6 +1622,8 @@ run_test 'read-only detection reports the absent-hardware gate' \
   test_read_only_detection_reports_physical_gate
 run_test 'package layout migrates static payload without touching user identity' \
   test_package_layout_migrates_static_payload
+run_test 'package install preflights seed targets before migration' \
+  test_package_install_preflights_seed_targets_before_migration
 run_test 'package migration refuses modified masking service units' \
   test_package_migration_refuses_modified_user_unit
 run_test 'package migration preserves modified legacy QML' \
@@ -1394,8 +1632,8 @@ run_test 'package portal environment rejects unvalidated assignments' \
   test_package_portal_environment_rejects_extra_assignments
 run_test 'idempotent package migration preserves established service state' \
   test_idempotent_package_migration_preserves_service_state
-run_test 'mixed package migration preserves established package unit state' \
-  test_mixed_package_migration_preserves_package_unit_state
+run_test 'mixed package migration refuses package portal dependency state loss' \
+  test_mixed_package_migration_refuses_dependency_state_loss
 run_test 'package migration rejects systemd drop-ins before mutation' \
   test_package_migration_refuses_systemd_dropins
 run_test 'package check rejects systemd drop-ins' \

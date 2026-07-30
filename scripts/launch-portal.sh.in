@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
+unset XENEON_EDGE_PREVIEW XENEON_EDGE_FIXTURE QS_APP_ID
+
+"$script_dir/check.sh" \
+  --config-home "@CONFIG_HOME@" \
+  --data-home "@DATA_HOME@" \
+  --state-home "@STATE_HOME@" \
+  --bin-home "@BIN_HOME@" \
+  --require-production
+
+exec /usr/bin/env quickshell --no-duplicate -c xeneon-edge-agents

@@ -22,6 +22,8 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+// Keep synchronized with scripts/check-herdr-compatibility.py.
+const SUPPORTED_HERDR_PROTOCOLS: &[u32] = &[17, 18];
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -164,6 +166,13 @@ impl HerdrClient {
             json!({"id": request_id(), "method": "ping", "params": {}}),
         )
         .await?;
+        if !SUPPORTED_HERDR_PROTOCOLS.contains(&ping.result.protocol) {
+            bail!(
+                "unsupported Herdr protocol {}; supported protocols are {:?}",
+                ping.result.protocol,
+                SUPPORTED_HERDR_PROTOCOLS
+            );
+        }
         let response: SnapshotResponse = request(
             &descriptor.socket_path,
             json!({"id": request_id(), "method": "session.snapshot", "params": {}}),
@@ -538,6 +547,48 @@ mod tests {
             )),
             Some(("interrupt-1", 101, 8))
         );
+    }
+
+    #[tokio::test]
+    async fn observation_rejects_unsupported_protocol_before_snapshot() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "ping");
+            write
+                .write_all(
+                    b"{\"id\":\"ping\",\"result\":{\"version\":\"future\",\"protocol\":99}}\n",
+                )
+                .await
+                .unwrap();
+            assert!(lines.next_line().await.unwrap().is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "unsupported protocol opened a snapshot connection"
+            );
+        });
+        let descriptor = SessionDescriptor {
+            name: "future".into(),
+            running: true,
+            socket_path: socket,
+        };
+        let client = HerdrClient::new("herdr");
+
+        let error = client
+            .observe_session(&descriptor, "epoch", 0, 0)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported Herdr protocol 99"));
+        server.await.unwrap();
     }
 
     #[tokio::test]

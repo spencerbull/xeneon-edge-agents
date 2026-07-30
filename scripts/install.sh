@@ -62,8 +62,9 @@ Runtime:
   --activate           Enable and start both user services after checks pass
 
 The default is simulator-safe: it seeds a config that matches no production
-output and does not edit hyprland.lua. Package migration may reload the user
-manager, but never enables a service without --activate.
+output and does not edit hyprland.lua. Package migration stops and disables
+unchanged legacy units before removing them, but never enables a service
+without --activate.
 EOF
 }
 
@@ -106,6 +107,7 @@ package_mode=0
 asset_root=$repo_root
 runtime_bin_home=$bin_home
 package_systemd_dir=
+service_path=$bin_home:/usr/local/bin:/usr/bin
 if [[ -n "$package_prefix" ]]; then
   validate_path_argument "--package-prefix" "$package_prefix"
   package_prefix=$(canonical_dir "$package_prefix")
@@ -119,6 +121,7 @@ if [[ -n "$package_prefix" ]]; then
   runtime_bin_home=$package_prefix/bin
   package_systemd_dir=$package_prefix/lib/systemd/user
   quickshell_source=$asset_root/quickshell
+  service_path=$runtime_bin_home:/usr/local/bin:$bin_home
 fi
 
 if ((activate && isolated_root)); then
@@ -220,9 +223,15 @@ cleanup() {
           warn "could not stop newly activated $unit"
       fi
       case "${service_previous_enabled[$index]}" in
-        enabled|enabled-runtime|linked|linked-runtime|alias)
+        enabled)
           systemctl --user enable "$unit" >/dev/null 2>&1 ||
             warn "could not restore enabled state for $unit"
+          ;;
+        enabled-runtime)
+          systemctl --user disable "$unit" >/dev/null 2>&1 ||
+            warn "could not remove persistent enablement for $unit"
+          systemctl --user enable --runtime "$unit" >/dev/null 2>&1 ||
+            warn "could not restore runtime enablement for $unit"
           ;;
         *)
           systemctl --user disable "$unit" >/dev/null 2>&1 ||
@@ -253,6 +262,7 @@ snapshot_activation_artifact() {
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
+portal_launcher=$temp_dir/launch-portal.sh
 if ((package_mode)); then
   for required_file in \
     "$asset_root/config/xeneon-edge-agents/config.toml.example" \
@@ -276,8 +286,13 @@ else
     CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$runtime_bin_home"
   render_template \
     "$asset_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
-    CONFIG_HOME "$config_home" BIN_HOME "$runtime_bin_home" \
+    CONFIG_HOME "$config_home" DATA_HOME "$data_home" STATE_HOME "$state_home" \
+    BIN_HOME "$runtime_bin_home" \
     OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+  render_template \
+    "$asset_root/scripts/launch-portal.sh.in" "$portal_launcher" \
+    CONFIG_HOME "$config_home" DATA_HOME "$data_home" STATE_HOME "$state_home" \
+    BIN_HOME "$runtime_bin_home"
 fi
 
 daemon_target=$systemd_dir/xeneon-agentd.service
@@ -288,6 +303,21 @@ portal_env_target=$config_dir/portal.env
 module_target=$hypr_dir/xeneon_edge_agents.lua
 hyprland_target=$hypr_dir/hyprland.lua
 quickshell_target=$config_home/quickshell/xeneon-edge-agents
+portal_scripts_dir=$data_home/$project_name/scripts
+portal_script_sources=()
+portal_script_targets=()
+if ((!package_mode)); then
+  portal_script_sources=(
+    "$asset_root/scripts/check.sh"
+    "$asset_root/scripts/lib.sh"
+    "$portal_launcher"
+  )
+  portal_script_targets=(
+    "$portal_scripts_dir/check.sh"
+    "$portal_scripts_dir/lib.sh"
+    "$portal_scripts_dir/launch-portal.sh"
+  )
+fi
 
 if [[ -f "$commissioning_target" ]] &&
   [[ "$(top_level_toml_value "$commissioning_target" mode)" == production ]] &&
@@ -295,11 +325,28 @@ if [[ -f "$commissioning_target" ]] &&
   die "existing production commissioning requires --apply-production with its exact identity"
 fi
 
-# Preflight every managed overwrite before making any change. A collision
-# therefore leaves no partial installation to roll back.
+# Preflight every managed overwrite and installer-state path before making any
+# change. A collision therefore leaves no partial installation to roll back.
+preflight_directory_target "$install_state_dir"
+if [[ -e "$manifest_path" || -L "$manifest_path" ]]; then
+  [[ ! -L "$manifest_path" ]] ||
+    die "refusing to replace symlink installer manifest: $manifest_path"
+  [[ -f "$manifest_path" ]] ||
+    die "refusing to replace non-file installer manifest: $manifest_path"
+fi
+if [[ -e "$hypr_marker_path" || -L "$hypr_marker_path" ]]; then
+  [[ ! -L "$hypr_marker_path" ]] ||
+    die "refusing to use symlink installer marker: $hypr_marker_path"
+  [[ -f "$hypr_marker_path" ]] ||
+    die "refusing to use non-file installer marker: $hypr_marker_path"
+fi
 if ((!package_mode)); then
   preflight_managed_target "$daemon_unit" "$daemon_target"
   preflight_managed_target "$portal_unit" "$portal_target"
+  for index in "${!portal_script_sources[@]}"; do
+    preflight_managed_target \
+      "${portal_script_sources[$index]}" "${portal_script_targets[$index]}"
+  done
 fi
 
 quickshell_sources=()
@@ -361,13 +408,9 @@ if ((apply_production)); then
     TOUCH_DEVICE "$touch_device" OUTPUT_CONNECTOR "$connector"
   production_module=$temp_dir/xeneon_edge_agents.lua
 
-  if [[ -e "$config_target" || -L "$config_target" ]]; then
-    preflight_managed_target "$production_config" "$config_target"
-  fi
-  if [[ -e "$commissioning_target" || -L "$commissioning_target" ]]; then
-    preflight_managed_target "$production_commissioning" "$commissioning_target"
-  fi
-  if ((package_mode)) && [[ -e "$portal_env_target" || -L "$portal_env_target" ]]; then
+  preflight_managed_target "$production_config" "$config_target"
+  preflight_managed_target "$production_commissioning" "$commissioning_target"
+  if ((package_mode)); then
     preflight_managed_target "$production_portal_env" "$portal_env_target"
   fi
   preflight_managed_target "$production_module" "$module_target"
@@ -401,6 +444,12 @@ if ((apply_production)); then
     ((activate)) ||
       die "production staging cannot retain an active XENEON require; rerun with --activate"
   fi
+else
+  preflight_seed_user_file "$config_target"
+  preflight_seed_user_file "$commissioning_target"
+  if ((package_mode)); then
+    preflight_seed_user_file "$portal_env_target"
+  fi
 fi
 
 if ((apply_production && !isolated_root)); then
@@ -408,13 +457,13 @@ if ((apply_production && !isolated_root)); then
     [[ -x "$runtime_bin_home/$executable" ]] ||
       die "production commissioning requires executable $runtime_bin_home/$executable"
   done
-  PATH="$bin_home:$runtime_bin_home:/usr/local/bin:/usr/bin" \
+  PATH="$service_path" \
     command -v quickshell >/dev/null 2>&1 ||
     die "production commissioning requires quickshell on the service PATH"
   command -v hyprctl >/dev/null 2>&1 ||
     die "production commissioning requires a running Hyprland session"
   herdr_executable=$(
-    PATH="$bin_home:$runtime_bin_home:/usr/local/bin:/usr/bin" command -v herdr
+    PATH="$service_path" command -v herdr
   ) ||
     die "production commissioning requires herdr on the service PATH"
   if ((activate)); then
@@ -481,6 +530,9 @@ if ((activate)); then
   if ((!package_mode)); then
     snapshot_activation_artifact "$daemon_target"
     snapshot_activation_artifact "$portal_target"
+    for target in "${portal_script_targets[@]}"; do
+      snapshot_activation_artifact "$target"
+    done
   fi
   for target in "${quickshell_targets[@]}"; do
     snapshot_activation_artifact "$target"
@@ -512,6 +564,10 @@ fi
 if ((!package_mode)); then
   install_managed_file "$daemon_unit" "$daemon_target"
   install_managed_file "$portal_unit" "$portal_target"
+  for index in "${!portal_script_sources[@]}"; do
+    install_managed_file \
+      "${portal_script_sources[$index]}" "${portal_script_targets[$index]}" 0755
+  done
 fi
 for index in "${!quickshell_sources[@]}"; do
   install_managed_file \
@@ -608,7 +664,7 @@ if ((activate)); then
 
     enabled_state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
     case "$enabled_state" in
-      enabled|enabled-runtime|linked|linked-runtime|alias|disabled) ;;
+      enabled|enabled-runtime|disabled) ;;
       *) die "could not determine stable enabled state for $unit" ;;
     esac
     service_previous_enabled+=("$enabled_state")

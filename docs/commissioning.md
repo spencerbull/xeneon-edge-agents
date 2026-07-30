@@ -73,7 +73,9 @@ luac -p "$HOME/.config/hypr/xeneon_edge_agents.lua"
 
 The portal service receives connector, serial, and model independently of the
 daemon config. Quickshell requires all three to match one screen before it
-creates a layer surface.
+creates a layer surface. Its managed launcher reruns the exact production,
+hardware, and active Hyprland checks on every service start, so staged
+configuration cannot become a live portal after a login or restart.
 
 ## Activate and verify
 

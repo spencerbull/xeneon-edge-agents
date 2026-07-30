@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import subprocess
 import tempfile
@@ -12,9 +13,28 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CHECKER = REPO_ROOT / "scripts" / "check-herdr-compatibility.py"
+HERDR_CLIENT = REPO_ROOT / "crates" / "xeneon-agent-core" / "src" / "herdr.rs"
 
 
 class HerdrCompatibilityTests(unittest.TestCase):
+    def test_checker_and_runtime_protocol_allowlists_match(self) -> None:
+        checker_match = re.search(
+            r"SUPPORTED_PROTOCOLS\s*=\s*\{([^}]*)\}", CHECKER.read_text()
+        )
+        runtime_match = re.search(
+            r"SUPPORTED_HERDR_PROTOCOLS:\s*&\[u32\]\s*=\s*&\[([^]]*)\]",
+            HERDR_CLIENT.read_text(),
+        )
+        self.assertIsNotNone(checker_match)
+        self.assertIsNotNone(runtime_match)
+        checker_protocols = {
+            int(value) for value in checker_match.group(1).split(",") if value.strip()
+        }
+        runtime_protocols = {
+            int(value) for value in runtime_match.group(1).split(",") if value.strip()
+        }
+        self.assertEqual(checker_protocols, runtime_protocols)
+
     def run_checker(self, protocol: int) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

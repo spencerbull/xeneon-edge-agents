@@ -81,6 +81,12 @@ fi
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
+if [[ -e "$hypr_marker_path" || -L "$hypr_marker_path" ]]; then
+  [[ ! -L "$hypr_marker_path" ]] ||
+    die "refusing to use symlink installer marker: $hypr_marker_path"
+  [[ -f "$hypr_marker_path" ]] ||
+    die "refusing to use non-file installer marker: $hypr_marker_path"
+fi
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")
@@ -142,7 +148,7 @@ hyprland_target=$hypr_dir/hyprland.lua
 module_target=$hypr_dir/xeneon_edge_agents.lua
 preserve_module=0
 hypr_entrypoint_changed=0
-if [[ -f "$hypr_marker_path" ]]; then
+if [[ -f "$hypr_marker_path" && ! -L "$hypr_marker_path" ]]; then
   if [[ -L "$hyprland_target" ]]; then
     warn "preserving replaced Hyprland symlink: $hyprland_target"
     preserve_module=1
@@ -226,6 +232,7 @@ fi
 
 for directory in \
   "$config_home/quickshell/xeneon-edge-agents" "$config_home/quickshell" \
+  "$data_home/$project_name/scripts" "$data_home/$project_name" \
   "$config_dir" "$systemd_dir" "$hypr_dir" \
   "$install_state_dir" "$state_home/$project_name"; do
   rmdir "$directory" 2>/dev/null || true

@@ -174,6 +174,7 @@ preflight_managed_target() {
   local target=$2
   local current_hash previous_hash source_hash
 
+  preflight_target_parent "$target"
   [[ -e "$target" || -L "$target" ]] || return 0
   [[ ! -L "$target" ]] || die "refusing to replace symlink target: $target"
   [[ -f "$target" ]] || die "refusing to replace non-file target: $target"
@@ -189,6 +190,38 @@ preflight_managed_target() {
   [[ -n "$previous_hash" && "$current_hash" == "$previous_hash" ]] && return 0
 
   die "refusing to overwrite user-owned or modified file: $target"
+}
+
+preflight_target_parent() {
+  local target=$1
+  local parent
+
+  parent=$(dirname "$target")
+  while [[ ! -e "$parent" && ! -L "$parent" ]]; do
+    [[ "$parent" != / ]] || break
+    parent=$(dirname "$parent")
+  done
+  [[ -d "$parent" ]] ||
+    die "refusing to create a target below a non-directory path: $parent"
+}
+
+preflight_seed_user_file() {
+  local target=$1
+
+  preflight_target_parent "$target"
+  [[ -L "$target" ]] && return 0
+  [[ -e "$target" ]] || return 0
+  [[ -f "$target" ]] ||
+    die "refusing to replace non-file target: $target"
+}
+
+preflight_directory_target() {
+  local target=$1
+
+  preflight_target_parent "$target"
+  [[ -e "$target" || -L "$target" ]] || return 0
+  [[ -d "$target" ]] ||
+    die "refusing to replace non-directory target: $target"
 }
 
 install_managed_file() {
