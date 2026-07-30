@@ -204,12 +204,16 @@ fn first_number_matching(root: &Path, file_name: &str, divisor: f64) -> Option<f
         if visited >= 512 {
             break;
         }
-        let canonical = fs::canonicalize(&path).ok()?;
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
         if !seen.insert(canonical) {
             continue;
         }
         visited += 1;
-        let entries = fs::read_dir(&path).ok()?;
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let child = entry.path();
             if child.file_name().is_some_and(|name| name == file_name)

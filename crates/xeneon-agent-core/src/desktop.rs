@@ -266,7 +266,10 @@ fn command_matches_session(
     let names_other_session = command.iter().any(|value| value == "--session")
         || environment
             .iter()
-            .any(|value| value.starts_with("HERDR_SESSION="));
+            .any(|value| value.starts_with("HERDR_SESSION="))
+        || environment
+            .iter()
+            .any(|value| value.starts_with("HERDR_SOCKET_PATH=") && !socket_environment);
     !names_other_session || session_argument || session_environment || socket_environment
 }
 
@@ -301,6 +304,12 @@ mod tests {
         assert!(command_matches_session(
             &["herdr".into()],
             &[],
+            "default",
+            Path::new("/tmp/default.sock")
+        ));
+        assert!(!command_matches_session(
+            &["herdr".into()],
+            &["HERDR_SOCKET_PATH=/tmp/named.sock".into()],
             "default",
             Path::new("/tmp/default.sock")
         ));
