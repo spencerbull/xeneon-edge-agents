@@ -126,20 +126,35 @@ async fn hypr_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
 }
 
 async fn dispatch_focus(address: &str) -> Result<()> {
+    let expression = focus_expression(address)?;
     let output = Command::new("hyprctl")
-        .args(["dispatch", "focuswindow", &format!("address:{address}")])
+        .args(["dispatch", &expression])
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .await
         .context("restoring Hyprland focus")?;
     if !output.status.success() {
         bail!(
-            "Hyprland focus dispatch failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "Hyprland focus dispatch failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
         );
     }
     Ok(())
+}
+
+fn focus_expression(address: &str) -> Result<String> {
+    let Some(hex) = address.strip_prefix("0x") else {
+        bail!("Hyprland window address lacks 0x prefix");
+    };
+    if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Hyprland window address is not hexadecimal");
+    }
+    Ok(format!(
+        "hl.dsp.focus({{ window = \"address:{address}\" }})"
+    ))
 }
 
 fn client_hosts_session(client_pid: i32, session: &str, socket_path: &Path) -> bool {
@@ -286,5 +301,15 @@ mod tests {
             "default",
             Path::new("/tmp/default.sock")
         ));
+    }
+
+    #[test]
+    fn focus_expression_uses_installed_lua_dispatcher_syntax() {
+        assert_eq!(
+            focus_expression("0x123abc").unwrap(),
+            "hl.dsp.focus({ window = \"address:0x123abc\" })"
+        );
+        assert!(focus_expression("title:herdr").is_err());
+        assert!(focus_expression("0x1\" })").is_err());
     }
 }
