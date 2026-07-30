@@ -92,12 +92,10 @@ use_systemctl=0
 if [[ -n "$systemctl_command" ]]; then
   ((package_mode)) ||
     die "--systemctl-command requires --package-prefix"
-  ((isolated_root)) ||
-    die "--systemctl-command is available only with isolated test paths"
-  validate_path_argument "--systemctl-command" "$systemctl_command"
-  systemctl_command=$(canonical_dir "$systemctl_command")
-  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
-    die "--systemctl-command must be an executable regular file"
+  systemctl_command=$(
+    canonical_isolated_test_command \
+      "--systemctl-command" "$systemctl_command" "$root_arg"
+  )
   use_systemctl=1
 elif ((package_mode && !isolated_root)) &&
   command -v systemctl >/dev/null 2>&1; then
@@ -117,6 +115,19 @@ check_file() {
   fi
 }
 
+check_runtime_executable() {
+  local label=$1
+  local path=$2
+  local require_regular=${3:-1}
+  if [[ -f "$path" && -x "$path" ]] &&
+    { ((require_regular == 0)) || [[ ! -L "$path" ]]; }; then
+    printf 'ok: runtime executable: %s: %s\n' "$label" "$path"
+  else
+    printf 'invalid: runtime executable: %s: %s\n' "$label" "$path"
+    failures=$((failures + 1))
+  fi
+}
+
 config_target=$config_dir/config.toml
 commissioning_target=$config_dir/commissioning.toml
 module_target=$hypr_dir/xeneon_edge_agents.lua
@@ -126,12 +137,12 @@ if ((package_mode)); then
   check_file "package daemon service" "$package_systemd_dir/xeneon-agentd.service"
   check_file "package portal service" "$package_systemd_dir/xeneon-edge-portal.service"
   check_file "package Quickshell config" "$package_share/quickshell/shell.qml"
-  check_file "package portal check" \
-    "$package_prefix/lib/$project_name/scripts/check.sh"
-  check_file "package portal launcher" \
-    "$package_prefix/lib/$project_name/scripts/launch-package-portal.sh"
-  check_file "package portal support library" \
-    "$package_prefix/lib/$project_name/scripts/lib.sh"
+  check_runtime_executable "package portal check" \
+    "$package_prefix/lib/$project_name/scripts/check.sh" 1
+  check_runtime_executable "package portal launcher" \
+    "$package_prefix/lib/$project_name/scripts/launch-package-portal.sh" 1
+  check_runtime_executable "package portal support library" \
+    "$package_prefix/lib/$project_name/scripts/lib.sh" 1
   check_file "portal identity environment" "$config_dir/portal.env"
 else
   check_file "daemon service" "$systemd_dir/xeneon-agentd.service"
@@ -142,12 +153,8 @@ check_file "config" "$config_target"
 check_file "commissioning config" "$commissioning_target"
 
 for executable in xeneon-agentd xeneon-agentctl; do
-  if [[ -x "$runtime_bin_home/$executable" ]]; then
-    printf 'ok: executable: %s\n' "$runtime_bin_home/$executable"
-  else
-    printf 'missing: executable: %s\n' "$runtime_bin_home/$executable"
-    failures=$((failures + 1))
-  fi
+  check_runtime_executable \
+    "$executable" "$runtime_bin_home/$executable" "$package_mode"
 done
 
 if [[ -f "$commissioning_target" ]]; then

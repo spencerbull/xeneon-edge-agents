@@ -67,12 +67,10 @@ fi
 
 use_systemctl=0
 if [[ -n "$systemctl_command" ]]; then
-  ((isolated_root)) ||
-    die "--systemctl-command is available only with isolated test paths"
-  validate_path_argument "--systemctl-command" "$systemctl_command"
-  systemctl_command=$(canonical_dir "$systemctl_command")
-  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
-    die "--systemctl-command must be an executable regular file"
+  systemctl_command=$(
+    canonical_isolated_test_command \
+      "--systemctl-command" "$systemctl_command" "$root_arg"
+  )
   use_systemctl=1
 elif ((!isolated_root)) && command -v systemctl >/dev/null 2>&1; then
   systemctl_command=$(command -v systemctl)
@@ -82,6 +80,7 @@ fi
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
 preflight_installer_state
+preflight_manifest_targets
 owned_units=()
 service_units=(xeneon-edge-portal.service xeneon-agentd.service)
 service_targets=("$portal_target" "$daemon_target")

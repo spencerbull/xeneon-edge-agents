@@ -234,26 +234,148 @@ test_preflight_rollback_on_collision() {
 }
 
 test_state_path_collisions_fail_before_installation() {
-  local root collision log
-  for collision in install managed.tsv; do
+  local root collision log state_root external
+  for collision in \
+    config-home-symlink data-home-symlink state-home-symlink \
+    bin-home-symlink project-symlink install-file install-symlink \
+    managed.tsv-directory; do
     root=$(new_temp_dir)
+    external=$(new_temp_dir)
     log=$root/install.log
-    mkdir -p "$root/.local/state/xeneon-edge-agents"
-    if [[ "$collision" == install ]]; then
-      : >"$root/.local/state/xeneon-edge-agents/install"
-    else
-      mkdir "$root/.local/state/xeneon-edge-agents/install"
-      mkdir "$root/.local/state/xeneon-edge-agents/install/managed.tsv"
-    fi
+    state_root=$root/.local/state/xeneon-edge-agents
+    mkdir -p "$root/.local" "$external"
+    printf 'preserve me\n' >"$external/user-data"
+    case "$collision" in
+      config-home-symlink)
+        ln -s "$external" "$root/.config"
+        ;;
+      data-home-symlink)
+        ln -s "$external" "$root/.local/share"
+        ;;
+      state-home-symlink)
+        ln -s "$external" "$root/.local/state"
+        ;;
+      bin-home-symlink)
+        ln -s "$external" "$root/.local/bin"
+        ;;
+      project-symlink)
+        mkdir -p "$root/.local/state"
+        ln -s "$external" "$state_root"
+        ;;
+      install-file)
+        mkdir -p "$state_root"
+        : >"$state_root/install"
+        ;;
+      install-symlink)
+        mkdir -p "$state_root"
+        ln -s "$external" "$state_root/install"
+        ;;
+      managed.tsv-directory)
+        mkdir -p "$state_root/install/managed.tsv"
+        ;;
+    esac
 
     if "$install_script" --root "$root" >"$log" 2>&1; then
       fail "installer accepted a conflicting $collision state path"
     fi
-    assert_contains "$log" 'refusing to replace'
+    case "$collision" in
+      *-home-symlink) assert_contains "$log" 'resolves outside --root' ;;
+      *) assert_contains "$log" 'refusing to' ;;
+    esac
     assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
     assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
     assert_no_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+    assert_contains "$external/user-data" 'preserve me'
+    assert_no_file "$external/install/managed.tsv"
+    assert_no_file "$external/xeneon-edge-agents/install/managed.tsv"
   done
+}
+
+test_nested_managed_parent_symlinks_fail_before_mutation() {
+  local root external collision log config_home data_home state_home bin_home
+  local prefix
+
+  for collision in systemd quickshell config data; do
+    root=$(new_temp_dir)
+    external=$(new_temp_dir)
+    log=$root/install.log
+    printf 'preserve me\n' >"$external/user-data"
+    case "$collision" in
+      systemd)
+        mkdir -p "$root/.config"
+        ln -s "$external" "$root/.config/systemd"
+        ;;
+      quickshell)
+        mkdir -p "$root/.config"
+        ln -s "$external" "$root/.config/quickshell"
+        ;;
+      config)
+        mkdir -p "$root/.config"
+        ln -s "$external" "$root/.config/xeneon-edge-agents"
+        ;;
+      data)
+        mkdir -p "$root/.local/share"
+        ln -s "$external" "$root/.local/share/xeneon-edge-agents"
+        ;;
+    esac
+
+    if "$install_script" --root "$root" >"$log" 2>&1; then
+      fail "install accepted a nested $collision parent symlink"
+    fi
+    assert_contains "$log" \
+      'parent resolves outside configured XDG home'
+    assert_contains "$external/user-data" 'preserve me'
+    assert_no_file "$root/.local/state/xeneon-edge-agents/install/managed.tsv"
+  done
+
+  config_home=$(new_temp_dir)
+  data_home=$(new_temp_dir)
+  state_home=$(new_temp_dir)
+  bin_home=$(new_temp_dir)
+  external=$(new_temp_dir)
+  log=$state_home/install.log
+  ln -s "$external" "$config_home/systemd"
+  if "$install_script" \
+    --config-home "$config_home" \
+    --data-home "$data_home" \
+    --state-home "$state_home" \
+    --bin-home "$bin_home" >"$log" 2>&1; then
+    fail "explicit isolated XDG install accepted a nested parent escape"
+  fi
+  assert_contains "$log" \
+    'parent resolves outside configured XDG home'
+  assert_no_file "$external/user/xeneon-agentd.service"
+
+  root=$(new_temp_dir)
+  external=$(new_temp_dir)
+  "$install_script" --root "$root" >/dev/null
+  mv "$root/.config/systemd" "$external/systemd"
+  ln -s "$external/systemd" "$root/.config/systemd"
+  log=$root/uninstall.log
+  if "$uninstall_script" --root "$root" >"$log" 2>&1; then
+    fail "uninstall followed a nested managed-parent symlink"
+  fi
+  assert_contains "$log" \
+    'parent resolves outside configured XDG home'
+  assert_file "$external/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+
+  root=$(new_temp_dir)
+  external=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" >/dev/null
+  mv "$root/.config/systemd" "$external/systemd"
+  ln -s "$external/systemd" "$root/.config/systemd"
+  log=$root/migrate.log
+  if "$package_migrate_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package migration followed a nested managed-parent symlink"
+  fi
+  assert_contains "$log" \
+    'parent resolves outside configured XDG home'
+  assert_file "$external/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
 }
 
 test_marker_symlink_fails_before_activation() {
@@ -312,6 +434,65 @@ test_bare_activation_requires_production() {
     '--activate requires complete --apply-production commissioning'
   assert_no_file "$root/config/systemd/user/xeneon-agentd.service"
   assert_no_file "$root/config/systemd/user/xeneon-edge-portal.service"
+}
+
+test_isolated_systemctl_commands_stay_below_root() {
+  local root outside prefix stub systemctl_log log
+  root=$(new_temp_dir)
+  outside=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  stub=$outside/systemctl
+  systemctl_log=$outside/systemctl.log
+  cat >"$stub" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 97
+EOF
+  chmod 0755 "$stub"
+
+  log=$root/install.log
+  if SYSTEMCTL_LOG=$systemctl_log \
+    "$install_script" \
+      --root "$root" \
+      --systemctl-command "$stub" \
+      --activate >"$log" 2>&1; then
+    fail "isolated activation accepted a service manager outside --root"
+  fi
+  assert_contains "$log" '--systemctl-command must be located below --root'
+
+  log=$root/uninstall.log
+  if SYSTEMCTL_LOG=$systemctl_log \
+    "$uninstall_script" \
+      --root "$root" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "isolated uninstall accepted a service manager outside --root"
+  fi
+  assert_contains "$log" '--systemctl-command must be located below --root'
+
+  log=$root/migrate.log
+  if SYSTEMCTL_LOG=$systemctl_log \
+    "$package_migrate_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "isolated migration accepted a service manager outside --root"
+  fi
+  assert_contains "$log" '--systemctl-command must be located below --root'
+
+  log=$root/check.log
+  if SYSTEMCTL_LOG=$systemctl_log \
+    "$check_script" \
+      --root "$root" \
+      --package-prefix "$prefix" \
+      --systemctl-command "$stub" >"$log" 2>&1; then
+    fail "isolated package check accepted a service manager outside --root"
+  fi
+  assert_contains "$log" '--systemctl-command must be located below --root'
+
+  assert_no_file "$systemctl_log"
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.config/systemd/user/xeneon-edge-portal.service"
 }
 
 test_production_parent_collision_fails_before_installation() {
@@ -453,6 +634,20 @@ test_production_commissioning_and_exact_check() {
   fi
   assert_contains "$root/check.log" \
     'Hyprland integration is staged but not active'
+
+  for executable in xeneon-agentd xeneon-agentctl; do
+    mv "$root/.local/bin/$executable" "$root/.local/bin/$executable.real"
+    ln -s "$root/.local/bin/$executable.real" \
+      "$root/.local/bin/$executable"
+  done
+  if ! "$check_script" --root "$root" --sys-root "$sys_root" \
+    --hypr-devices-json "$hypr_devices" \
+    --hypr-monitors-json "$hypr_monitors" \
+    >"$root/source-symlink-check.log" 2>&1; then
+    sed -n '1,160p' "$root/source-symlink-check.log" >&2
+    fail "source preflight rejected executable binary targets behind symlinks"
+  fi
+
   if "$check_script" --root "$root" --sys-root "$sys_root" \
     --hypr-devices-json "$hypr_devices" \
     --hypr-monitors-json "$hypr_monitors" \
@@ -1244,7 +1439,7 @@ test_package_install_preflights_seed_targets_before_migration() {
 }
 
 test_package_install_requires_complete_runtime_before_migration() {
-  local root prefix launcher log
+  local root prefix launcher binary log
   root=$(new_temp_dir)
   prefix=$(new_temp_dir)
   make_package_prefix "$prefix"
@@ -1262,6 +1457,28 @@ test_package_install_requires_complete_runtime_before_migration() {
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
   assert_file "$root/.local/share/xeneon-edge-agents/scripts/launch-portal.sh"
+
+  install -m 0755 "$repo_root/scripts/launch-package-portal.sh" "$launcher"
+  binary=$prefix/bin/xeneon-agentctl
+  rm "$binary"
+  mkdir "$binary"
+  if "$install_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package install accepted a directory as an agent binary"
+  fi
+  assert_contains "$log" \
+    'package executable is missing or not a regular file'
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
+
+  if "$package_migrate_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package migration accepted a directory as an agent binary"
+  fi
+  assert_contains "$log" \
+    'package executable is missing or not a regular file'
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
 }
 
 test_mutating_lifecycle_rejects_manifest_symlinks() {
@@ -1752,6 +1969,34 @@ EOF
     'xeneon-edge-portal.service has unsupported systemd drop-ins'
 }
 
+test_package_check_rejects_invalid_runtime_executables() {
+  local root prefix launcher binary log
+  root=$(new_temp_dir)
+  prefix=$(new_temp_dir)
+  make_package_prefix "$prefix"
+  "$install_script" --root "$root" --package-prefix "$prefix" >/dev/null
+  launcher=$prefix/lib/xeneon-edge-agents/scripts/launch-package-portal.sh
+  binary=$prefix/bin/xeneon-agentctl
+  log=$root/check.log
+
+  chmod 0644 "$launcher"
+  if "$check_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package check accepted a non-executable portal launcher"
+  fi
+  assert_contains "$log" \
+    'invalid: runtime executable: package portal launcher'
+
+  chmod 0755 "$launcher"
+  rm "$binary"
+  ln -s "$prefix/bin/xeneon-agentd" "$binary"
+  if "$check_script" \
+    --root "$root" --package-prefix "$prefix" >"$log" 2>&1; then
+    fail "package check accepted a symlinked agent binary"
+  fi
+  assert_contains "$log" 'invalid: runtime executable: xeneon-agentctl'
+}
+
 test_package_uninstall_refuses_foreign_unit_definitions() {
   local root prefix stub fragment_log dropin_log mutation_log
   root=$(new_temp_dir)
@@ -1834,10 +2079,14 @@ run_test 'preflight collision rolls back without a partial install' \
   test_preflight_rollback_on_collision
 run_test 'installer-state collisions fail before installation' \
   test_state_path_collisions_fail_before_installation
+run_test 'nested managed-parent symlinks fail before mutation' \
+  test_nested_managed_parent_symlinks_fail_before_mutation
 run_test 'installer marker symlinks fail before activation' \
   test_marker_symlink_fails_before_activation
 run_test 'activation requires production commissioning' \
   test_bare_activation_requires_production
+run_test 'isolated service-manager seams stay below their root' \
+  test_isolated_systemctl_commands_stay_below_root
 run_test 'production parent collisions fail before installation' \
   test_production_parent_collision_fails_before_installation
 run_test 'identical user file is not claimed by the installer' \
@@ -1907,6 +2156,8 @@ run_test 'package migration rejects systemd drop-ins before mutation' \
   test_package_migration_refuses_systemd_dropins
 run_test 'package check rejects systemd drop-ins' \
   test_package_check_rejects_systemd_dropins
+run_test 'package check rejects invalid runtime executables' \
+  test_package_check_rejects_invalid_runtime_executables
 run_test 'package uninstall rejects foreign unit definitions' \
   test_package_uninstall_refuses_foreign_unit_definitions
 printf '1..%d\n' "$tests_run"

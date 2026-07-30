@@ -31,10 +31,42 @@ canonical_dir() {
   realpath -m -- "$value"
 }
 
+canonical_isolated_test_command() {
+  local label=$1
+  local value=$2
+  local explicit_root=$3
+  local command_path root_path
+
+  ((isolated_root)) ||
+    die "$label is available only with isolated test paths"
+  [[ -n "$explicit_root" ]] ||
+    die "$label requires --root"
+  validate_path_argument "$label" "$value"
+  [[ ! -L "$value" ]] ||
+    die "$label must be an executable regular file"
+  command_path=$(canonical_dir "$value")
+  root_path=$(canonical_dir "$explicit_root")
+  [[ "$command_path" == "$root_path/"* ]] ||
+    die "$label must be located below --root"
+  [[ -f "$command_path" && -x "$command_path" && ! -L "$command_path" ]] ||
+    die "$label must be an executable regular file"
+  printf '%s\n' "$command_path"
+}
+
 paths_overlap() {
   local left=${1%/}
   local right=${2%/}
   [[ "$left" == "$right" || "$left" == "$right/"* || "$right" == "$left/"* ]]
+}
+
+path_is_within() {
+  local base=${1%/}
+  local candidate=${2%/}
+  if [[ -z "$base" ]]; then
+    [[ "$candidate" == /* ]]
+  else
+    [[ "$candidate" == "$base" || "$candidate" == "$base/"* ]]
+  fi
 }
 
 validate_path_argument() {
@@ -93,6 +125,16 @@ resolve_xdg_paths() {
   data_home=$(canonical_dir "$data_home")
   state_home=$(canonical_dir "$state_home")
   bin_home=$(canonical_dir "$bin_home")
+  if [[ -n "$root_arg" ]]; then
+    [[ -n "$config_arg" || "$config_home" == "$root_arg/"* ]] ||
+      die "default config home resolves outside --root: $config_home"
+    [[ -n "$data_arg" || "$data_home" == "$root_arg/"* ]] ||
+      die "default data home resolves outside --root: $data_home"
+    [[ -n "$state_arg" || "$state_home" == "$root_arg/"* ]] ||
+      die "default state home resolves outside --root: $state_home"
+    [[ -n "$bin_arg" || "$bin_home" == "$root_arg/"* ]] ||
+      die "default bin home resolves outside --root: $bin_home"
+  fi
   for pair in \
     "canonical config home:$config_home" "canonical data home:$data_home" \
     "canonical state home:$state_home" "canonical bin home:$bin_home"; do
@@ -129,7 +171,8 @@ resolve_xdg_paths() {
   config_dir=$config_home/$project_name
   systemd_dir=$config_home/systemd/user
   hypr_dir=$config_home/hypr
-  install_state_dir=$state_home/$project_name/install
+  project_state_dir=$state_home/$project_name
+  install_state_dir=$project_state_dir/install
   manifest_path=$install_state_dir/managed.tsv
   hypr_marker_path=$install_state_dir/hypr-require-injected
 }
@@ -195,9 +238,25 @@ preflight_managed_target() {
 
 preflight_target_parent() {
   local target=$1
-  local parent
+  local parent authorized_home='' resolved_parent home
+
+  if ((isolated_root)); then
+    for home in "$config_home" "$data_home" "$state_home" "$bin_home"; do
+      if path_is_within "$home" "$target" &&
+        ((${#home} > ${#authorized_home})); then
+        authorized_home=$home
+      fi
+    done
+    [[ -n "$authorized_home" ]] ||
+      die "refusing isolated target outside configured XDG homes: $target"
+  fi
 
   parent=$(dirname "$target")
+  if ((isolated_root)); then
+    resolved_parent=$(canonical_dir "$parent")
+    path_is_within "$authorized_home" "$resolved_parent" ||
+      die "refusing target whose parent resolves outside configured XDG home: $target -> $resolved_parent"
+  fi
   while [[ ! -e "$parent" && ! -L "$parent" ]]; do
     [[ "$parent" != / ]] || break
     parent=$(dirname "$parent")
@@ -226,7 +285,13 @@ preflight_directory_target() {
 }
 
 preflight_installer_state() {
-  preflight_target_parent "$install_state_dir"
+  preflight_target_parent "$project_state_dir"
+  if [[ -e "$project_state_dir" || -L "$project_state_dir" ]]; then
+    [[ ! -L "$project_state_dir" ]] ||
+      die "refusing to use symlink project state directory: $project_state_dir"
+    [[ -d "$project_state_dir" ]] ||
+      die "refusing to replace non-directory target: $project_state_dir"
+  fi
   if [[ -e "$install_state_dir" || -L "$install_state_dir" ]]; then
     [[ ! -L "$install_state_dir" ]] ||
       die "refusing to use symlink installer state directory: $install_state_dir"
@@ -245,6 +310,15 @@ preflight_installer_state() {
     [[ -f "$hypr_marker_path" ]] ||
       die "refusing to use non-file installer marker: $hypr_marker_path"
   fi
+}
+
+preflight_manifest_targets() {
+  local target installed_hash
+  [[ -f "$manifest_path" ]] || return 0
+  while IFS=$'\t' read -r target installed_hash; do
+    [[ -n "$target" ]] || continue
+    preflight_target_parent "$target"
+  done <"$manifest_path"
 }
 
 install_managed_file() {

@@ -113,14 +113,10 @@ resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
 use_test_systemctl=0
 systemctl_command=systemctl
 if [[ -n "$systemctl_arg" ]]; then
-  ((isolated_root)) ||
-    die "--systemctl-command is available only with isolated test paths"
-  [[ -n "$root_arg" ]] ||
-    die "--systemctl-command requires --root"
-  validate_path_argument "--systemctl-command" "$systemctl_arg"
-  systemctl_command=$(canonical_dir "$systemctl_arg")
-  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
-    die "--systemctl-command must be an executable regular file"
+  systemctl_command=$(
+    canonical_isolated_test_command \
+      "--systemctl-command" "$systemctl_arg" "$root_arg"
+  )
   use_test_systemctl=1
 fi
 if ((use_test_systemctl && !activate)); then
@@ -310,7 +306,9 @@ if ((package_mode)); then
       die "package asset is missing or not a regular file: $required_file"
   done
   for executable in xeneon-agentd xeneon-agentctl; do
-    [[ -x "$runtime_bin_home/$executable" && ! -L "$runtime_bin_home/$executable" ]] ||
+    [[ -f "$runtime_bin_home/$executable" &&
+      -x "$runtime_bin_home/$executable" &&
+      ! -L "$runtime_bin_home/$executable" ]] ||
       die "package executable is missing or not a regular file: $runtime_bin_home/$executable"
   done
   for executable in check.sh launch-package-portal.sh lib.sh; do
@@ -366,6 +364,7 @@ fi
 # Preflight every managed overwrite and installer-state path before making any
 # change. A collision therefore leaves no partial installation to roll back.
 preflight_installer_state
+preflight_manifest_targets
 if ((!package_mode)); then
   preflight_managed_target "$daemon_unit" "$daemon_target"
   preflight_managed_target "$portal_unit" "$portal_target"

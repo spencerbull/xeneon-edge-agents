@@ -59,15 +59,14 @@ validate_path_argument "--package-prefix" "$package_prefix"
 package_prefix=$(canonical_dir "$package_prefix")
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
 preflight_installer_state
+preflight_manifest_targets
 
 use_systemctl=0
 if [[ -n "$systemctl_command" ]]; then
-  ((isolated_root)) ||
-    die "--systemctl-command is available only with isolated test paths"
-  validate_path_argument "--systemctl-command" "$systemctl_command"
-  systemctl_command=$(canonical_dir "$systemctl_command")
-  [[ -f "$systemctl_command" && -x "$systemctl_command" && ! -L "$systemctl_command" ]] ||
-    die "--systemctl-command must be an executable regular file"
+  systemctl_command=$(
+    canonical_isolated_test_command \
+      "--systemctl-command" "$systemctl_command" "$root_arg"
+  )
   use_systemctl=1
 elif ((!isolated_root)); then
   systemctl_command=$(command -v systemctl) ||
@@ -94,7 +93,9 @@ for required_file in "${required_package_files[@]}"; do
     die "package asset is missing or not a regular file: $required_file"
 done
 for executable in xeneon-agentd xeneon-agentctl; do
-  [[ -x "$package_prefix/bin/$executable" && ! -L "$package_prefix/bin/$executable" ]] ||
+  [[ -f "$package_prefix/bin/$executable" &&
+    -x "$package_prefix/bin/$executable" &&
+    ! -L "$package_prefix/bin/$executable" ]] ||
     die "package executable is missing or not a regular file: $package_prefix/bin/$executable"
 done
 for executable in check.sh launch-package-portal.sh lib.sh; do
