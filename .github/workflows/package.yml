@@ -362,7 +362,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write # zizmor: ignore[excessive-permissions] Required for private release assets.
 
     steps:
       - name: Download built assets
