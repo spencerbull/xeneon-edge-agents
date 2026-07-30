@@ -1,0 +1,7 @@
+/target/
+/.cache/
+/.worktrees/
+*.log
+*.qmlc
+*.jsc
+result/
