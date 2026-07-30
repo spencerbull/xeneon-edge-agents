@@ -22,7 +22,6 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const CAPABILITY_PROTOCOL: u32 = 19;
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -42,7 +41,6 @@ pub struct AgentTarget {
     pub socket_path: PathBuf,
     pub pane_id: String,
     pub terminal_id: String,
-    pub protocol: u32,
     pub state_change_seq: u64,
     pub revision: u64,
 }
@@ -202,7 +200,7 @@ impl HerdrClient {
             let repository = cwd
                 .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned());
-            let actions = actions_from_extra(&raw.extra, ping.result.protocol, raw.revision);
+            let actions = actions_from_extra(&raw.extra, raw.revision);
 
             targets.insert(
                 id.clone(),
@@ -211,7 +209,6 @@ impl HerdrClient {
                     socket_path: descriptor.socket_path.clone(),
                     pane_id: raw.pane_id.clone(),
                     terminal_id: raw.terminal_id,
-                    protocol: ping.result.protocol,
                     state_change_seq: raw.state_change_seq,
                     revision: raw.revision,
                 },
@@ -272,12 +269,6 @@ impl HerdrClient {
                 json!({"id": request_id(), "method": "pane.zoom", "params": {"pane_id": target.pane_id, "mode": "toggle"}})
             }
             ActionKind::Approve | ActionKind::Interrupt => {
-                if target.protocol < CAPABILITY_PROTOCOL {
-                    bail!(
-                        "Herdr protocol {} does not support guarded actions",
-                        target.protocol
-                    );
-                }
                 let capability_id = capability_id.ok_or_else(|| anyhow!("missing capability"))?;
                 json!({"id": request_id(), "method": "agent.perform_action", "params": {"capability_id": capability_id}})
             }
@@ -311,32 +302,18 @@ impl HerdrClient {
     }
 }
 
-fn actions_from_extra(
-    extra: &HashMap<String, Value>,
-    protocol: u32,
-    revision: u64,
-) -> AgentActions {
-    if protocol < CAPABILITY_PROTOCOL {
-        return AgentActions::default();
-    }
-    let values = extra
-        .get("action_capabilities")
-        .or_else(|| extra.get("capabilities"))
-        .and_then(Value::as_array);
+fn actions_from_extra(extra: &HashMap<String, Value>, revision: u64) -> AgentActions {
+    let values = extra.get("actions").and_then(Value::as_array);
     let Some(values) = values else {
         return AgentActions::default();
     };
 
     let mut actions = AgentActions::default();
     for value in values {
-        let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+        let Some(kind) = value.get("action").and_then(Value::as_str) else {
             continue;
         };
-        let Some(capability_id) = value
-            .get("capability_id")
-            .or_else(|| value.get("id"))
-            .and_then(Value::as_str)
-        else {
+        let Some(capability_id) = value.get("capability_id").and_then(Value::as_str) else {
             continue;
         };
         let Some(action_kind) = (match kind {
@@ -350,11 +327,11 @@ fn actions_from_extra(
             capability_id: capability_id.to_owned(),
             kind: action_kind,
             expires_at_ms: value
-                .get("expires_at_ms")
+                .get("expires_at_unix_ms")
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
             expected_revision: value
-                .get("expected_revision")
+                .get("revision")
                 .and_then(Value::as_u64)
                 .unwrap_or(revision),
         };
@@ -526,28 +503,29 @@ mod tests {
     }
 
     #[test]
-    fn protocol_17_never_surfaces_guarded_actions() {
+    fn legacy_capability_shapes_never_surface_guarded_actions() {
         let mut extra = HashMap::new();
         extra.insert(
             "action_capabilities".into(),
             json!([{"id":"unsafe","kind":"approve","expires_at_ms":99}]),
         );
-        let actions = actions_from_extra(&extra, 17, 1);
+        let actions = actions_from_extra(&extra, 1);
         assert!(actions.approve.is_none());
         assert!(actions.interrupt.is_none());
     }
 
     #[test]
-    fn protocol_19_parses_only_known_capabilities() {
+    fn public_actions_parse_only_known_capabilities() {
         let mut extra = HashMap::new();
         extra.insert(
-            "action_capabilities".into(),
+            "actions".into(),
             json!([
-                {"capability_id":"approve-1","kind":"approve","expires_at_ms":99,"expected_revision":7},
-                {"capability_id":"other","kind":"shell","expires_at_ms":99}
+                {"capability_id":"approve-1","action":"approve","expires_at_unix_ms":99,"revision":7},
+                {"capability_id":"interrupt-1","action":"interrupt","expires_at_unix_ms":101,"revision":8},
+                {"capability_id":"other","action":"shell","expires_at_unix_ms":99}
             ]),
         );
-        let actions = actions_from_extra(&extra, 19, 3);
+        let actions = actions_from_extra(&extra, 3);
         assert_eq!(
             actions
                 .approve
@@ -555,7 +533,14 @@ mod tests {
                 .map(|value| value.capability_id.as_str()),
             Some("approve-1")
         );
-        assert!(actions.interrupt.is_none());
+        assert_eq!(
+            actions.interrupt.as_ref().map(|value| (
+                value.capability_id.as_str(),
+                value.expires_at_ms,
+                value.expected_revision
+            )),
+            Some(("interrupt-1", 101, 8))
+        );
     }
 
     #[tokio::test]
