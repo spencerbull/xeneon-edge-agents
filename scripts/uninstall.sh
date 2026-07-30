@@ -42,12 +42,26 @@ done
 resolve_xdg_paths "$root_arg" "$config_arg" "$data_arg" "$state_arg" "$bin_arg"
 
 if ((!isolated_root)) && command -v systemctl >/dev/null 2>&1; then
-  systemctl --user disable --now xeneon-edge-portal.service xeneon-agentd.service 2>/dev/null || true
+  systemctl --user daemon-reload ||
+    die "could not contact the user service manager; no files were removed"
+  systemctl --user disable --now \
+    xeneon-edge-portal.service xeneon-agentd.service ||
+    die "could not stop and disable XENEON services; no files were removed"
+  for unit in xeneon-edge-portal.service xeneon-agentd.service; do
+    if systemctl --user is-active --quiet "$unit"; then
+      die "refusing to remove unit files while $unit is still active"
+    fi
+  done
 fi
 
 hyprland_target=$hypr_dir/hyprland.lua
+module_target=$hypr_dir/xeneon_edge_agents.lua
+preserve_module=0
 if [[ -f "$hypr_marker_path" ]]; then
-  if [[ -f "$hyprland_target" ]]; then
+  if [[ -L "$hyprland_target" ]]; then
+    warn "preserving replaced Hyprland symlink: $hyprland_target"
+    preserve_module=1
+  elif [[ -f "$hyprland_target" ]]; then
     input_count=$(grep -Ec '^[[:space:]]*require\("hypr\.input"\)[[:space:]]*$' "$hyprland_target" || true)
     module_count=$(grep -Ec '^[[:space:]]*require\("hypr\.xeneon_edge_agents"\)[[:space:]]*$' "$hyprland_target" || true)
     adjacent_count=$(awk '
@@ -72,6 +86,7 @@ if [[ -f "$hypr_marker_path" ]]; then
       note "Removed installer-owned Hyprland require."
     else
       warn "preserving changed Hyprland entrypoint: $hyprland_target"
+      preserve_module=1
     fi
   else
     rm -f "$hypr_marker_path"
@@ -81,9 +96,12 @@ fi
 if [[ -f "$manifest_path" ]]; then
   while IFS=$'\t' read -r target installed_hash; do
     [[ -n "$target" ]] || continue
-    if [[ ! -e "$target" ]]; then
+    if ((preserve_module)) && [[ "$target" == "$module_target" ]]; then
+      warn "preserving Hyprland module referenced by a changed entrypoint: $target"
+    elif [[ ! -e "$target" && ! -L "$target" ]]; then
       remove_manifest_entry "$target"
-    elif [[ -f "$target" && "$(sha256_file "$target")" == "$installed_hash" ]]; then
+    elif [[ ! -L "$target" && -f "$target" &&
+      "$(sha256_file "$target")" == "$installed_hash" ]]; then
       rm -f "$target"
       remove_manifest_entry "$target"
       note "Removed: $target"
@@ -101,7 +119,8 @@ for directory in \
 done
 
 if ((!isolated_root)) && command -v systemctl >/dev/null 2>&1; then
-  systemctl --user daemon-reload
+  systemctl --user daemon-reload ||
+    warn "user service files were removed but daemon-reload failed"
 fi
 
 note "Uninstall complete. Modified user files, if any, were preserved."

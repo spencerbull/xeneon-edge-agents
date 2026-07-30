@@ -12,6 +12,8 @@ data_arg=
 state_arg=
 bin_arg=
 sys_root=/sys
+hypr_devices_json=
+hypr_monitors_json=
 
 usage() {
   cat <<'EOF'
@@ -22,6 +24,10 @@ Usage: scripts/check.sh [options]
   --state-home DIR
   --bin-home DIR
   --sys-root DIR      Alternate read-only sysfs tree for tests
+  --hypr-devices-json FILE
+                      Alternate `hyprctl -j devices` payload for tests
+  --hypr-monitors-json FILE
+                      Alternate `hyprctl -j monitors all` payload for tests
 EOF
 }
 
@@ -33,6 +39,14 @@ while (($#)); do
     --state-home) state_arg=${2:?missing value for --state-home}; shift 2 ;;
     --bin-home) bin_arg=${2:?missing value for --bin-home}; shift 2 ;;
     --sys-root) sys_root=${2:?missing value for --sys-root}; shift 2 ;;
+    --hypr-devices-json)
+      hypr_devices_json=${2:?missing value for --hypr-devices-json}
+      shift 2
+      ;;
+    --hypr-monitors-json)
+      hypr_monitors_json=${2:?missing value for --hypr-monitors-json}
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
@@ -83,6 +97,11 @@ if [[ -f "$commissioning_target" ]]; then
   touch_device=$(toml_value "$commissioning_target" touch device)
   touch_output=$(toml_value "$commissioning_target" touch output)
   touch_enabled=$(toml_value "$commissioning_target" touch enabled)
+  touch_bustype=$(toml_value "$commissioning_target" touch bustype)
+  touch_vendor=$(toml_value "$commissioning_target" touch vendor)
+  touch_product=$(toml_value "$commissioning_target" touch product)
+  touch_uniq=$(toml_value "$commissioning_target" touch uniq)
+  touch_phys=$(toml_value "$commissioning_target" touch phys)
 
   if [[ "$mode" == production ]]; then
     if [[ "$exact" != true || "$fallback" != false ]]; then
@@ -109,7 +128,10 @@ if [[ -f "$commissioning_target" ]]; then
           "${candidate_sha,,}" == "${edid_sha,,}" ]]; then
           match_count=$((match_count + 1))
         fi
-      done < <(find "$sys_root/class/drm" -mindepth 2 -maxdepth 2 -type f -name edid -print0 2>/dev/null)
+      done < <(
+        find -L "$sys_root/class/drm" \
+          -mindepth 2 -maxdepth 2 -type f -name edid -print0 2>/dev/null
+      )
 
       case "$match_count" in
         1) printf 'ok: exact production output identity: %s\n' "$connector" ;;
@@ -122,12 +144,168 @@ if [[ -f "$commissioning_target" ]]; then
           failures=$((failures + 1))
           ;;
       esac
+
+      monitors_payload=
+      if [[ -n "$hypr_monitors_json" ]]; then
+        if [[ -r "$hypr_monitors_json" ]]; then
+          monitors_payload=$(<"$hypr_monitors_json")
+        else
+          printf 'blocked: Hyprland monitor fixture is unreadable\n'
+          failures=$((failures + 1))
+        fi
+      elif command -v hyprctl >/dev/null 2>&1; then
+        monitors_payload=$(hyprctl -j monitors all 2>/dev/null || true)
+      else
+        printf 'blocked: hyprctl is required to prove screen serial and model\n'
+        failures=$((failures + 1))
+      fi
+      if [[ -n "$monitors_payload" ]]; then
+        monitor_match_count=$(
+          python3 -c '
+import json
+import sys
+
+connector, serial, model = sys.argv[1:4]
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
+print(sum(
+    1
+    for monitor in payload
+    if monitor.get("name") == connector
+    and monitor.get("serial") == serial
+    and monitor.get("model") == model
+))
+' "$connector" "$output_serial" "$output_model" <<<"$monitors_payload"
+        )
+        case "$monitor_match_count" in
+          1) printf 'ok: exact Hyprland screen serial and model\n' ;;
+          -1)
+            printf 'blocked: Hyprland monitor inventory is invalid JSON\n'
+            failures=$((failures + 1))
+            ;;
+          0)
+            printf 'blocked: configured Hyprland screen serial/model is absent\n'
+            failures=$((failures + 1))
+            ;;
+          *)
+            printf 'blocked: configured Hyprland screen identity is ambiguous (%d matches)\n' \
+              "$monitor_match_count"
+            failures=$((failures + 1))
+            ;;
+        esac
+      fi
     fi
 
     if [[ "$touch_enabled" != true || -z "$touch_device" ||
       "$touch_output" != "$connector" ]]; then
       printf 'unsafe: per-device touch mapping is incomplete\n'
       failures=$((failures + 1))
+    elif [[ "${touch_bustype,,}" != 0003 || "${touch_vendor,,}" != 1b1c ||
+      ! "$touch_product" =~ ^[0-9a-fA-F]{4}$ ||
+      ( -z "$touch_uniq" && -z "$touch_phys" ) ]]; then
+      printf 'unsafe: Corsair USB touch identity is incomplete\n'
+      failures=$((failures + 1))
+    else
+      devices_payload=
+      if [[ -n "$hypr_devices_json" ]]; then
+        if [[ -r "$hypr_devices_json" ]]; then
+          devices_payload=$(<"$hypr_devices_json")
+        else
+          printf 'blocked: Hyprland touch-device fixture is unreadable\n'
+          failures=$((failures + 1))
+        fi
+      elif command -v hyprctl >/dev/null 2>&1; then
+        devices_payload=$(hyprctl -j devices 2>/dev/null || true)
+      else
+        printf 'blocked: hyprctl is required to prove the touch-device identity\n'
+        failures=$((failures + 1))
+      fi
+
+      if [[ -n "$devices_payload" ]]; then
+        touch_match_count=$(
+          python3 -c '
+import json
+import sys
+
+wanted = sys.argv[1]
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
+touch = payload.get("touch", [])
+print(sum(1 for device in touch if device.get("name") == wanted))
+' "$touch_device" <<<"$devices_payload"
+        )
+        case "$touch_match_count" in
+          1) printf 'ok: exact Hyprland touch device: %s\n' "$touch_device" ;;
+          -1)
+            printf 'blocked: Hyprland touch-device inventory is invalid JSON\n'
+            failures=$((failures + 1))
+            ;;
+          0)
+            printf 'blocked: configured Hyprland touch device is absent\n'
+            failures=$((failures + 1))
+            ;;
+          *)
+            printf 'blocked: configured Hyprland touch device is ambiguous (%d matches)\n' \
+              "$touch_match_count"
+            failures=$((failures + 1))
+            ;;
+        esac
+      fi
+
+      kernel_touch_match_count=0
+      while IFS= read -r -d '' event_path; do
+        properties=
+        if [[ "$sys_root" == /sys ]] && command -v udevadm >/dev/null 2>&1; then
+          properties=$(udevadm info --query=property --path="$event_path" 2>/dev/null || true)
+        elif [[ -r "$event_path/device/properties" ]]; then
+          properties=$(<"$event_path/device/properties")
+        fi
+        grep -Fqx 'ID_INPUT_TOUCHSCREEN=1' <<<"$properties" || continue
+
+        for field in name id/bustype id/vendor id/product uniq phys; do
+          [[ -r "$event_path/device/$field" ]] || continue 2
+        done
+        kernel_name=$(<"$event_path/device/name")
+        kernel_bustype=$(<"$event_path/device/id/bustype")
+        kernel_vendor=$(<"$event_path/device/id/vendor")
+        kernel_product=$(<"$event_path/device/id/product")
+        kernel_uniq=$(<"$event_path/device/uniq")
+        kernel_phys=$(<"$event_path/device/phys")
+
+        [[ "$(normalize_hypr_device_name "$kernel_name")" == "$touch_device" ]] ||
+          continue
+        [[ "${kernel_bustype,,}" == "${touch_bustype,,}" &&
+          "${kernel_vendor,,}" == "${touch_vendor,,}" &&
+          "${kernel_product,,}" == "${touch_product,,}" ]] ||
+          continue
+        [[ -z "$touch_uniq" || "$kernel_uniq" == "$touch_uniq" ]] || continue
+        [[ -z "$touch_phys" || "$kernel_phys" == "$touch_phys" ]] || continue
+        kernel_touch_match_count=$((kernel_touch_match_count + 1))
+      done < <(
+        find -L "$sys_root/class/input" \
+          -mindepth 1 -maxdepth 1 -type d -name 'event*' -print0 2>/dev/null
+      )
+
+      case "$kernel_touch_match_count" in
+        1)
+          printf 'ok: exact Corsair USB touchscreen kernel identity\n'
+          ;;
+        0)
+          printf 'blocked: configured Corsair USB touchscreen identity is absent\n'
+          failures=$((failures + 1))
+          ;;
+        *)
+          printf 'blocked: configured Corsair USB touchscreen identity is ambiguous (%d matches)\n' \
+            "$kernel_touch_match_count"
+          failures=$((failures + 1))
+          ;;
+      esac
     fi
 
     if [[ -f "$config_target" ]]; then

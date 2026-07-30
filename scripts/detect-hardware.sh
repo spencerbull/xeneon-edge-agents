@@ -51,6 +51,8 @@ fi
 printf '\n[DRM connectors and EDID]\n'
 edid_count=0
 while IFS= read -r -d '' edid_path; do
+  edid_bytes=$(wc -c <"$edid_path" 2>/dev/null || printf '0')
+  ((edid_bytes > 0)) || continue
   edid_count=$((edid_count + 1))
   connector=$(drm_connector_name "$edid_path")
   status_path=$(dirname "$edid_path")/status
@@ -77,7 +79,10 @@ while IFS= read -r -d '' edid_path; do
   if strings "$edid_path" 2>/dev/null | grep -Eqi 'xeneon[[:space:]_-]*edge|corsair'; then
     found_identity=1
   fi
-done < <(find "$sys_root/class/drm" -mindepth 2 -maxdepth 2 -type f -name edid -size +0c -print0 2>/dev/null)
+done < <(
+  find -L "$sys_root/class/drm" \
+    -mindepth 2 -maxdepth 2 -type f -name edid -print0 2>/dev/null
+)
 ((edid_count)) || printf 'none: no connected connector exposed a non-empty EDID\n'
 
 printf '\n[USB]\n'
@@ -102,6 +107,40 @@ elif command -v libinput >/dev/null 2>&1; then
   libinput list-devices 2>&1 || true
 else
   printf 'unavailable: neither hyprctl nor libinput is on PATH\n'
+fi
+
+printf '\n[Touch kernel identities]\n'
+kernel_touch_count=0
+if ((!runtime_tools)); then
+  printf 'skipped: alternate sysfs root selected\n'
+else
+  while IFS= read -r -d '' event_path; do
+    properties=
+    if command -v udevadm >/dev/null 2>&1; then
+      properties=$(udevadm info --query=property --path="$event_path" 2>/dev/null || true)
+    fi
+    grep -Fqx 'ID_INPUT_TOUCHSCREEN=1' <<<"$properties" || continue
+    for field in name id/bustype id/vendor id/product uniq phys; do
+      [[ -r "$event_path/device/$field" ]] || continue 2
+    done
+    kernel_touch_count=$((kernel_touch_count + 1))
+    kernel_name=$(<"$event_path/device/name")
+    kernel_bustype=$(<"$event_path/device/id/bustype")
+    kernel_vendor=$(<"$event_path/device/id/vendor")
+    kernel_product=$(<"$event_path/device/id/product")
+    kernel_uniq=$(<"$event_path/device/uniq")
+    kernel_phys=$(<"$event_path/device/phys")
+    printf 'event=%s hypr_name=%s kernel_name=%s bustype=%s vendor=%s product=%s uniq=%s phys=%s\n' \
+      "$(basename "$event_path")" \
+      "$(normalize_hypr_device_name "$kernel_name")" \
+      "$kernel_name" "$kernel_bustype" "$kernel_vendor" "$kernel_product" \
+      "${kernel_uniq:-<empty>}" "${kernel_phys:-<empty>}"
+  done < <(
+    find -L /sys/class/input \
+      -mindepth 1 -maxdepth 1 -type d -name 'event*' -print0 2>/dev/null
+  )
+  ((kernel_touch_count)) ||
+    printf 'none: udev reported no touchscreen input identities\n'
 fi
 
 printf '\n[DDC/CI read capability]\n'

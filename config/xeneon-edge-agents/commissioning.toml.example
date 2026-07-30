@@ -15,6 +15,12 @@ allow_primary_fallback = false
 device = ""
 output = ""
 enabled = false
+# Kernel identity binds the Hyprland name to the Corsair USB touchscreen.
+bustype = ""
+vendor = ""
+product = ""
+uniq = ""
+phys = ""
 
 [ddc]
 # DDC remains read-only until physical commissioning proves exact restore.

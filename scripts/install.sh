@@ -19,6 +19,11 @@ edid_sha=
 output_serial=
 output_model=
 touch_device=
+touch_bustype=
+touch_vendor=
+touch_product=
+touch_uniq=
+touch_phys=
 quickshell_source=$repo_root/quickshell
 
 usage() {
@@ -43,6 +48,11 @@ Production commissioning (all values required together):
   --screen-serial SERIAL
   --screen-model MODEL
   --touch-device NAME
+  --touch-bustype HEX
+  --touch-vendor HEX
+  --touch-product HEX
+  --touch-uniq VALUE   Stable kernel uniq (optional when phys is provided)
+  --touch-phys VALUE   Stable kernel phys (optional when uniq is provided)
 
 Runtime:
   --activate           Enable and start both user services after checks pass
@@ -66,6 +76,11 @@ while (($#)); do
     --screen-serial) output_serial=${2:?missing value for --screen-serial}; shift 2 ;;
     --screen-model) output_model=${2:?missing value for --screen-model}; shift 2 ;;
     --touch-device) touch_device=${2:?missing value for --touch-device}; shift 2 ;;
+    --touch-bustype) touch_bustype=${2:?missing value for --touch-bustype}; shift 2 ;;
+    --touch-vendor) touch_vendor=${2:?missing value for --touch-vendor}; shift 2 ;;
+    --touch-product) touch_product=${2:?missing value for --touch-product}; shift 2 ;;
+    --touch-uniq) touch_uniq=${2:?missing value for --touch-uniq}; shift 2 ;;
+    --touch-phys) touch_phys=${2:?missing value for --touch-phys}; shift 2 ;;
     --activate) activate=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -80,13 +95,55 @@ fi
 
 if ((apply_production)); then
   validate_commissioning_values \
-    "$connector" "$edid_sha" "$output_serial" "$output_model" "$touch_device"
-elif [[ -n "$connector$edid_sha$output_serial$output_model$touch_device" ]]; then
+    "$connector" "$edid_sha" "$output_serial" "$output_model" "$touch_device" \
+    "$touch_bustype" "$touch_vendor" "$touch_product" "$touch_uniq" "$touch_phys"
+elif [[ -n "$connector$edid_sha$output_serial$output_model$touch_device$touch_bustype$touch_vendor$touch_product$touch_uniq$touch_phys" ]]; then
   die "hardware identity options require --apply-production"
 fi
 
 temp_dir=$(mktemp -d)
-trap 'rm -rf "$temp_dir"' EXIT
+rollback_hypr=0
+hyprland_backup=
+module_backup=
+module_existed=0
+module_previous_manifest_hash=
+marker_existed=0
+hyprland_mode=0644
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if ((status != 0 && rollback_hypr)); then
+    warn "rolling back Hyprland integration after failed commissioning"
+    if [[ -n "$hyprland_backup" && -f "$hyprland_backup" ]]; then
+      install -m "$hyprland_mode" "$hyprland_backup" "$hyprland_target"
+    fi
+    if ((module_existed)); then
+      install -m 0644 "$module_backup" "$module_target"
+      if [[ -n "$module_previous_manifest_hash" ]]; then
+        write_manifest_entry "$module_target" "$module_previous_manifest_hash"
+      else
+        remove_manifest_entry "$module_target"
+      fi
+    else
+      rm -f "$module_target"
+      remove_manifest_entry "$module_target"
+    fi
+    if ((marker_existed)); then
+      mkdir -p "$install_state_dir"
+      : >"$hypr_marker_path"
+    else
+      rm -f "$hypr_marker_path"
+    fi
+    if ((!isolated_root)) && command -v hyprctl >/dev/null 2>&1; then
+      hyprctl reload >/dev/null 2>&1 ||
+        warn "Hyprland reload failed after rollback; run hyprctl reload"
+    fi
+  fi
+  rm -rf "$temp_dir"
+  exit "$status"
+}
+trap cleanup EXIT
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
@@ -113,11 +170,13 @@ preflight_managed_target "$portal_unit" "$portal_target"
 
 quickshell_sources=()
 quickshell_targets=()
+declare -A current_quickshell_targets=()
 if [[ -f "$quickshell_source/shell.qml" ]]; then
   while IFS= read -r -d '' source; do
     relative=${source#"$quickshell_source"/}
     quickshell_sources+=("$source")
     quickshell_targets+=("$quickshell_target/$relative")
+    current_quickshell_targets["$quickshell_target/$relative"]=1
     preflight_managed_target "$source" "$quickshell_target/$relative"
   done < <(
     find "$quickshell_source" -type f \
@@ -145,6 +204,11 @@ if ((apply_production)); then
     -e "s|^edid_sha256 = \"\"$|edid_sha256 = \"${edid_sha,,}\"|" \
     -e "s|^device = \"\"$|device = \"$touch_device\"|" \
     -e "s|^output = \"\"$|output = \"$connector\"|" \
+    -e "s|^bustype = \"\"$|bustype = \"${touch_bustype,,}\"|" \
+    -e "s|^vendor = \"\"$|vendor = \"${touch_vendor,,}\"|" \
+    -e "s|^product = \"\"$|product = \"${touch_product,,}\"|" \
+    -e "s|^uniq = \"\"$|uniq = \"$touch_uniq\"|" \
+    -e "s|^phys = \"\"$|phys = \"$touch_phys\"|" \
     -e 's/^enabled = false$/enabled = true/' \
     "$repo_root/config/xeneon-edge-agents/commissioning.toml.example" >"$production_commissioning"
   render_template \
@@ -152,16 +216,18 @@ if ((apply_production)); then
     TOUCH_DEVICE "$touch_device" OUTPUT_CONNECTOR "$connector"
   production_module=$temp_dir/xeneon_edge_agents.lua
 
-  if [[ -e "$config_target" ]]; then
+  if [[ -e "$config_target" || -L "$config_target" ]]; then
     preflight_managed_target "$production_config" "$config_target"
   fi
-  if [[ -e "$commissioning_target" ]]; then
+  if [[ -e "$commissioning_target" || -L "$commissioning_target" ]]; then
     preflight_managed_target "$production_commissioning" "$commissioning_target"
   fi
   preflight_managed_target "$production_module" "$module_target"
 
   [[ -f "$hyprland_target" ]] ||
     die "--apply-production requires an existing user-owned $hyprland_target"
+  [[ ! -L "$hyprland_target" ]] ||
+    die "refusing to rewrite symlinked Hyprland entrypoint: $hyprland_target"
   command -v luac >/dev/null 2>&1 ||
     die "--apply-production requires luac for offline syntax validation"
   luac -p "$hyprland_target" ||
@@ -187,6 +253,53 @@ if ((apply_production)); then
   fi
 fi
 
+if ((apply_production && !isolated_root)); then
+  for executable in xeneon-agentd xeneon-agentctl; do
+    [[ -x "$bin_home/$executable" ]] ||
+      die "production commissioning requires executable $bin_home/$executable"
+  done
+  PATH="$bin_home:/usr/local/bin:/usr/bin" command -v quickshell >/dev/null 2>&1 ||
+    die "production commissioning requires quickshell on the service PATH"
+  command -v hyprctl >/dev/null 2>&1 ||
+    die "production commissioning requires a running Hyprland session"
+  PATH="$bin_home:/usr/local/bin:/usr/bin" command -v herdr >/dev/null 2>&1 ||
+    die "production commissioning requires herdr on the service PATH"
+
+  preflight_root=$temp_dir/live-hardware-preflight
+  mkdir -p "$preflight_root/.config/hypr" "$preflight_root/.local/bin"
+  install -m 0644 "$hyprland_target" \
+    "$preflight_root/.config/hypr/hyprland.lua"
+  ln -s "$bin_home/xeneon-agentd" \
+    "$preflight_root/.local/bin/xeneon-agentd"
+  ln -s "$bin_home/xeneon-agentctl" \
+    "$preflight_root/.local/bin/xeneon-agentctl"
+  preflight_touch_identity=(
+    --touch-bustype "$touch_bustype"
+    --touch-vendor "$touch_vendor"
+    --touch-product "$touch_product"
+  )
+  [[ -z "$touch_uniq" ]] ||
+    preflight_touch_identity+=(--touch-uniq "$touch_uniq")
+  [[ -z "$touch_phys" ]] ||
+    preflight_touch_identity+=(--touch-phys "$touch_phys")
+  "$script_dir/install.sh" \
+    --root "$preflight_root" \
+    --quickshell-source "$quickshell_source" \
+    --apply-production \
+    --connector "$connector" \
+    --edid-sha256 "$edid_sha" \
+    --screen-serial "$output_serial" \
+    --screen-model "$output_model" \
+    --touch-device "$touch_device" \
+    "${preflight_touch_identity[@]}" >/dev/null
+  if ! "$script_dir/check.sh" --root "$preflight_root" \
+    >"$preflight_root/check.log" 2>&1; then
+    sed -n '1,160p' "$preflight_root/check.log" >&2
+    die "live XENEON hardware identity did not pass; no live files were changed"
+  fi
+  note "Verified live XENEON output and touchscreen identity before installation."
+fi
+
 install_managed_file "$daemon_unit" "$daemon_target"
 install_managed_file "$portal_unit" "$portal_target"
 for index in "${!quickshell_sources[@]}"; do
@@ -197,6 +310,19 @@ done
 if ((apply_production)); then
   install_managed_file "$production_config" "$config_target" 0600
   install_managed_file "$production_commissioning" "$commissioning_target" 0600
+
+  hyprland_backup=$temp_dir/hyprland.lua.backup
+  cp -p "$hyprland_target" "$hyprland_backup"
+  hyprland_mode=$(stat -c '%a' "$hyprland_target")
+  if [[ -f "$module_target" ]]; then
+    module_existed=1
+    module_backup=$temp_dir/xeneon_edge_agents.lua.backup
+    cp -p "$module_target" "$module_backup"
+    module_previous_manifest_hash=$(manifest_hash "$module_target" 2>/dev/null || true)
+  fi
+  [[ -f "$hypr_marker_path" ]] && marker_existed=1
+  rollback_hypr=1
+
   install_managed_file "$production_module" "$module_target"
 
   if ((module_count == 0)); then
@@ -207,7 +333,7 @@ if ((apply_production)); then
         print "require(\"hypr.xeneon_edge_agents\")"
       }
     ' "$hyprland_target" >"$hypr_temp"
-    install -m 0644 "$hypr_temp" "$hyprland_target"
+    install -m "$hyprland_mode" "$hypr_temp" "$hyprland_target"
     mkdir -p "$install_state_dir"
     : >"$hypr_marker_path"
   else
@@ -244,6 +370,27 @@ if ((activate)); then
   systemctl --user enable --now xeneon-agentd.service xeneon-edge-portal.service
 fi
 
+# Retire files removed or renamed in the packaged Quickshell tree. Only paths
+# still carrying their installer-recorded hash are deleted. Locally modified
+# files remain both on disk and in the manifest so uninstall can preserve them.
+if [[ -f "$quickshell_source/shell.qml" && -f "$manifest_path" ]]; then
+  while IFS=$'\t' read -r managed_target installed_hash; do
+    [[ "$managed_target" == "$quickshell_target/"* ]] || continue
+    [[ -z "${current_quickshell_targets["$managed_target"]+x}" ]] || continue
+    if [[ ! -e "$managed_target" && ! -L "$managed_target" ]]; then
+      remove_manifest_entry "$managed_target"
+    elif [[ ! -L "$managed_target" && -f "$managed_target" &&
+      "$(sha256_file "$managed_target")" == "$installed_hash" ]]; then
+      rm -f "$managed_target"
+      remove_manifest_entry "$managed_target"
+      note "Removed obsolete managed file: $managed_target"
+    else
+      warn "preserving modified obsolete Quickshell file: $managed_target"
+    fi
+  done < <(cp "$manifest_path" /dev/stdout)
+  find "$quickshell_target" -depth -type d -empty -delete 2>/dev/null || true
+fi
+
 note "Installed XENEON EDGE user integration."
 note "Config: $config_target"
 if ((!activate)); then
@@ -252,3 +399,4 @@ fi
 if ((!apply_production)); then
   note "Physical gate remains closed; run detect-hardware.sh before production commissioning."
 fi
+rollback_hypr=0

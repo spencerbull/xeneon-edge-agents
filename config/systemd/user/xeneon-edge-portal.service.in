@@ -2,8 +2,9 @@
 Description=XENEON EDGE Quickshell portal
 Documentation=https://github.com/spencerbull/xeneon-edge-agents
 Requires=xeneon-agentd.service
-After=xeneon-agentd.service
+After=graphical-session.target xeneon-agentd.service
 PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
 
 [Service]
 Type=simple
