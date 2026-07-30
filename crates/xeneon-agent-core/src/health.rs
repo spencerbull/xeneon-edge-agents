@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -197,10 +198,15 @@ fn gpu_temperature(sys_root: &Path) -> Option<f64> {
 
 fn first_number_matching(root: &Path, file_name: &str, divisor: f64) -> Option<f64> {
     let mut stack = vec![root.to_path_buf()];
+    let mut seen = HashSet::new();
     let mut visited = 0;
     while let Some(path) = stack.pop() {
         if visited >= 512 {
             break;
+        }
+        let canonical = fs::canonicalize(&path).ok()?;
+        if !seen.insert(canonical) {
+            continue;
         }
         visited += 1;
         let entries = fs::read_dir(&path).ok()?;
@@ -211,7 +217,7 @@ fn first_number_matching(root: &Path, file_name: &str, divisor: f64) -> Option<f
             {
                 return Some(value);
             }
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            if fs::metadata(&child).is_ok_and(|metadata| metadata.is_dir()) {
                 stack.push(child);
             }
         }
@@ -241,7 +247,7 @@ fn sorted_dirs(root: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, thread, time::Duration};
+    use std::{fs, os::unix::fs::symlink, thread, time::Duration};
 
     use super::*;
 
@@ -298,5 +304,20 @@ mod tests {
         assert!(second.cpu.available);
         assert!(second.network_down.available);
         assert!(second.network_up.available);
+    }
+
+    #[test]
+    fn follows_drm_class_symlink_without_looping() {
+        let root = tempfile::tempdir().unwrap();
+        let device = root.path().join("devices/gpu");
+        write(&device.join("gpu_busy_percent"), "37\n");
+        let drm = root.path().join("sys/class/drm");
+        fs::create_dir_all(&drm).unwrap();
+        symlink(&device, drm.join("card1")).unwrap();
+
+        assert_eq!(
+            first_number_matching(&drm, "gpu_busy_percent", 1.0),
+            Some(37.0)
+        );
     }
 }

@@ -428,6 +428,18 @@ impl DaemonRuntime {
                 "agent session is disconnected",
             );
         };
+        let enabled = match command.action {
+            ActionKind::Open => agent.actions.open,
+            ActionKind::Zoom => agent.actions.zoom,
+            ActionKind::Approve | ActionKind::Interrupt | ActionKind::RestoreFocus => true,
+        };
+        if !enabled {
+            return action_error(
+                &command.request_id,
+                "target_unavailable",
+                "action is not available for the current agent",
+            );
+        }
         if !command_capability_matches(&command, &agent) {
             return action_error(
                 &command.request_id,
