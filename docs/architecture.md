@@ -22,8 +22,10 @@ Herdr public sockets        /proc, /sys, Hyprland
 The daemon has no network listener. It discovers all running local Herdr
 sessions with `herdr session list --json`, uses one-shot public socket requests
 for reads and actions, and keeps one acknowledged event subscription per
-session. It reconciles an authoritative snapshot after subscription and every
-five seconds.
+session. It subscribes to lifecycle, focus, and agent-state events, omitting
+high-volume pane-content, layout, and metadata updates. Related event bursts
+are coalesced for 200 ms before one authoritative reconciliation; a five-second
+reconciliation remains as the repair path.
 
 ## Identity and stale-state handling
 

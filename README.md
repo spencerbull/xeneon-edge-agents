@@ -75,7 +75,8 @@ First capture the connected hardware identity without changing anything:
 scripts/detect-hardware.sh
 ```
 
-Production installation requires all five values together:
+Production installation requires the complete output and touch identity
+together:
 
 ```bash
 scripts/install.sh \
@@ -94,9 +95,13 @@ scripts/install.sh \
 Use `--touch-uniq` instead of `--touch-phys` when the device exposes a stable
 non-empty `uniq`; providing both is allowed and requires both to match. A live
 production install performs the full output and touchscreen check before
-changing any user file. Add `--activate` only after that exact identity passes
-while the device is connected. The generated Hyprland module uses a per-device
-output mapping and leaves Omarchy's `monitors.lua` ownership untouched.
+changing any user file. Without `--activate`, it stages the generated module
+but deliberately leaves `hyprland.lua` and both service states untouched. Add
+`--activate` only after that exact identity passes while the device is
+connected. Activation inserts the one user-owned require, validates and
+reloads Hyprland, and starts or restarts both services. The generated module
+uses a per-device output mapping and leaves Omarchy's `monitors.lua` ownership
+untouched.
 
 The remaining physical checklist covers touch coordinates, focus restoration,
 hotplug, DPMS, suspend/resume, lock-screen privacy, and read-only DDC discovery.

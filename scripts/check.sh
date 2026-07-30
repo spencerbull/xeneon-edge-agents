@@ -146,20 +146,27 @@ if [[ -f "$commissioning_target" ]]; then
       esac
 
       monitors_payload=
+      monitors_inventory_available=0
       if [[ -n "$hypr_monitors_json" ]]; then
         if [[ -r "$hypr_monitors_json" ]]; then
           monitors_payload=$(<"$hypr_monitors_json")
+          monitors_inventory_available=1
         else
           printf 'blocked: Hyprland monitor fixture is unreadable\n'
           failures=$((failures + 1))
         fi
       elif command -v hyprctl >/dev/null 2>&1; then
-        monitors_payload=$(hyprctl -j monitors all 2>/dev/null || true)
+        if monitors_payload=$(hyprctl -j monitors all 2>/dev/null); then
+          monitors_inventory_available=1
+        else
+          printf 'blocked: hyprctl monitor query failed\n'
+          failures=$((failures + 1))
+        fi
       else
         printf 'blocked: hyprctl is required to prove screen serial and model\n'
         failures=$((failures + 1))
       fi
-      if [[ -n "$monitors_payload" ]]; then
+      if ((monitors_inventory_available)); then
         monitor_match_count=$(
           python3 -c '
 import json
@@ -210,21 +217,28 @@ print(sum(
       failures=$((failures + 1))
     else
       devices_payload=
+      devices_inventory_available=0
       if [[ -n "$hypr_devices_json" ]]; then
         if [[ -r "$hypr_devices_json" ]]; then
           devices_payload=$(<"$hypr_devices_json")
+          devices_inventory_available=1
         else
           printf 'blocked: Hyprland touch-device fixture is unreadable\n'
           failures=$((failures + 1))
         fi
       elif command -v hyprctl >/dev/null 2>&1; then
-        devices_payload=$(hyprctl -j devices 2>/dev/null || true)
+        if devices_payload=$(hyprctl -j devices 2>/dev/null); then
+          devices_inventory_available=1
+        else
+          printf 'blocked: hyprctl touch-device query failed\n'
+          failures=$((failures + 1))
+        fi
       else
         printf 'blocked: hyprctl is required to prove the touch-device identity\n'
         failures=$((failures + 1))
       fi
 
-      if [[ -n "$devices_payload" ]]; then
+      if ((devices_inventory_available)); then
         touch_match_count=$(
           python3 -c '
 import json
@@ -361,7 +375,11 @@ print(sum(1 for device in touch if device.get("name") == wanted))
         END { print count+0 }
       ' "$hyprland_target")
       module_count=$(grep -Ec '^[[:space:]]*require\("hypr\.xeneon_edge_agents"\)[[:space:]]*$' "$hyprland_target" || true)
-      if ((adjacent_count != 1 || module_count != 1)); then
+      if ((module_count == 0 && adjacent_count == 0)); then
+        printf 'ok: Hyprland integration is staged but not active\n'
+      elif ((module_count == 1 && adjacent_count == 1)); then
+        printf 'ok: Hyprland integration is active\n'
+      else
         printf 'unsafe: expected exactly one XENEON require immediately after hypr.input\n'
         failures=$((failures + 1))
       fi

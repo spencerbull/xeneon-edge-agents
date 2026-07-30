@@ -84,6 +84,13 @@ resolve_xdg_paths() {
   data_home=$(canonical_dir "$data_home")
   state_home=$(canonical_dir "$state_home")
   bin_home=$(canonical_dir "$bin_home")
+  for pair in \
+    "canonical config home:$config_home" "canonical data home:$data_home" \
+    "canonical state home:$state_home" "canonical bin home:$bin_home"; do
+    label=${pair%%:*}
+    value=${pair#*:}
+    validate_path_argument "$label" "$value"
+  done
   [[ "$bin_home" != *:* ]] || die "bin home may not contain ':'"
 
   if [[ -z "$root_arg" ]] &&

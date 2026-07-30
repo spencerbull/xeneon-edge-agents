@@ -10,9 +10,10 @@ There are three distinct modes:
 3. Production activation requires a connected display identity, a per-device
    touch mapping, successful offline validation, and explicit `--activate`.
 
-No mode edits `/usr/share/omarchy`. The production installer adds one
-`require("hypr.xeneon_edge_agents")` immediately after the existing
-`require("hypr.input")` in the user Hyprland entrypoint. It does not modify
+No mode edits `/usr/share/omarchy`. Production staging writes the generated
+module without changing the active Hyprland entrypoint. Explicit activation
+adds one `require("hypr.xeneon_edge_agents")` immediately after the existing
+`require("hypr.input")` in the user entrypoint. It does not modify
 `monitors.lua`.
 
 ## Capture identity
@@ -62,12 +63,12 @@ On a live user installation, the script first builds the candidate files in an
 isolated temporary root and checks the requested identity against real DRM,
 Hyprland, and input-device inventories. If any identity is absent or ambiguous,
 it exits before changing a user file. Without `--activate`, a passing install
-stages configuration only. Inspect and verify it:
+stages configuration and the generated Hyprland module, but does not add its
+require or alter either service state. Inspect and verify it:
 
 ```bash
 scripts/check.sh
-luac -p "$HOME/.config/hypr/hyprland.lua"
-hyprctl configerrors
+luac -p "$HOME/.config/hypr/xeneon_edge_agents.lua"
 ```
 
 The portal service receives connector, serial, and model independently of the
@@ -101,6 +102,10 @@ xeneon-agentctl doctor
 hyprctl configerrors
 ```
 
+Activation validates the candidate files, reloads Hyprland, and starts new
+services or restarts already-active services so the commissioned identity is
+effective immediately.
+
 Physical acceptance requires all of the following:
 
 - only the EDGE receives the portal surface;
@@ -119,7 +124,10 @@ Physical acceptance requires all of the following:
 scripts/uninstall.sh
 ```
 
-The uninstaller disables the two user services, removes unchanged
+The uninstaller disables installer-owned services, removes unchanged
 installer-recorded files, and removes the Hyprland require only when the
-installer recorded inserting it. Modified files and pre-existing requires are
-preserved.
+installer recorded inserting it. It refuses to proceed when a managed service
+unit was modified, so a live service cannot be left running after its
+dependencies are removed. Modified non-service files and pre-existing requires
+are preserved. When the entrypoint changes, the live path reloads Hyprland and
+checks `hyprctl configerrors`.

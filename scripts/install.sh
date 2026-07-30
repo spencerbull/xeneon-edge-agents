@@ -103,16 +103,40 @@ fi
 
 temp_dir=$(mktemp -d)
 rollback_hypr=0
+rollback_services=0
+rollback_artifacts=0
+rollback_daemon_reload=0
 hyprland_backup=
 module_backup=
 module_existed=0
 module_previous_manifest_hash=
 marker_existed=0
 hyprland_mode=0644
+activation_manifest_backup=
+activation_manifest_existed=0
+activation_artifact_targets=()
+activation_artifact_backups=()
+activation_artifact_existed=()
+service_units=(xeneon-agentd.service xeneon-edge-portal.service)
+service_previous_active=()
+service_previous_enabled=()
 
 cleanup() {
   local status=$?
   trap - EXIT
+  if ((status != 0 && rollback_artifacts)); then
+    warn "restoring prior managed files after failed activation"
+    for index in "${!activation_artifact_targets[@]}"; do
+      target=${activation_artifact_targets[$index]}
+      backup=${activation_artifact_backups[$index]}
+      if ((${activation_artifact_existed[$index]})); then
+        mkdir -p "$(dirname "$target")"
+        cp -p -- "$backup" "$target"
+      else
+        rm -f -- "$target"
+      fi
+    done
+  fi
   if ((status != 0 && rollback_hypr)); then
     warn "rolling back Hyprland integration after failed commissioning"
     if [[ -n "$hyprland_backup" && -f "$hyprland_backup" ]]; then
@@ -140,10 +164,60 @@ cleanup() {
         warn "Hyprland reload failed after rollback; run hyprctl reload"
     fi
   fi
+  if ((status != 0 && rollback_artifacts)); then
+    if ((activation_manifest_existed)); then
+      mkdir -p "$install_state_dir"
+      cp -p -- "$activation_manifest_backup" "$manifest_path"
+    else
+      rm -f -- "$manifest_path"
+    fi
+  fi
+  if ((status != 0 && rollback_daemon_reload)); then
+    systemctl --user daemon-reload >/dev/null 2>&1 ||
+      warn "user service daemon-reload failed during rollback"
+  fi
+  if ((status != 0 && rollback_services)); then
+    warn "restoring prior user-service state after failed activation"
+    for index in "${!service_units[@]}"; do
+      unit=${service_units[$index]}
+      if [[ "${service_previous_active[$index]}" == active ]]; then
+        systemctl --user restart "$unit" >/dev/null 2>&1 ||
+          warn "could not restore active state for $unit"
+      else
+        systemctl --user stop "$unit" >/dev/null 2>&1 ||
+          warn "could not stop newly activated $unit"
+      fi
+      case "${service_previous_enabled[$index]}" in
+        enabled|enabled-runtime|linked|linked-runtime|alias)
+          systemctl --user enable "$unit" >/dev/null 2>&1 ||
+            warn "could not restore enabled state for $unit"
+          ;;
+        *)
+          systemctl --user disable "$unit" >/dev/null 2>&1 ||
+            warn "could not remove newly enabled state for $unit"
+          ;;
+      esac
+    done
+  fi
   rm -rf "$temp_dir"
   exit "$status"
 }
 trap cleanup EXIT
+
+snapshot_activation_artifact() {
+  local target=$1
+  local index=${#activation_artifact_targets[@]}
+  local backup=$temp_dir/activation-artifact-$index
+
+  activation_artifact_targets+=("$target")
+  activation_artifact_backups+=("$backup")
+  if [[ -f "$target" && ! -L "$target" ]]; then
+    cp -p -- "$target" "$backup"
+    activation_artifact_existed+=(1)
+  else
+    activation_artifact_existed+=(0)
+  fi
+}
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
@@ -162,6 +236,12 @@ commissioning_target=$config_dir/commissioning.toml
 module_target=$hypr_dir/xeneon_edge_agents.lua
 hyprland_target=$hypr_dir/hyprland.lua
 quickshell_target=$config_home/quickshell/xeneon-edge-agents
+
+if [[ -f "$commissioning_target" ]] &&
+  [[ "$(top_level_toml_value "$commissioning_target" mode)" == production ]] &&
+  ((!apply_production)); then
+  die "existing production commissioning requires --apply-production with its exact identity"
+fi
 
 # Preflight every managed overwrite before making any change. A collision
 # therefore leaves no partial installation to roll back.
@@ -250,6 +330,8 @@ if ((apply_production)); then
     ' "$hyprland_target")
     ((adjacent_count == 1)) ||
       die "existing XENEON require must immediately follow require(\"hypr.input\")"
+    ((activate)) ||
+      die "production staging cannot retain an active XENEON require; rerun with --activate"
   fi
 fi
 
@@ -267,8 +349,9 @@ if ((apply_production && !isolated_root)); then
 
   preflight_root=$temp_dir/live-hardware-preflight
   mkdir -p "$preflight_root/.config/hypr" "$preflight_root/.local/bin"
-  install -m 0644 "$hyprland_target" \
-    "$preflight_root/.config/hypr/hyprland.lua"
+  awk '
+    $0 !~ /^[[:space:]]*require\("hypr\.xeneon_edge_agents"\)[[:space:]]*$/
+  ' "$hyprland_target" >"$preflight_root/.config/hypr/hyprland.lua"
   ln -s "$bin_home/xeneon-agentd" \
     "$preflight_root/.local/bin/xeneon-agentd"
   ln -s "$bin_home/xeneon-agentctl" \
@@ -300,6 +383,29 @@ if ((apply_production && !isolated_root)); then
   note "Verified live XENEON output and touchscreen identity before installation."
 fi
 
+if ((activate)); then
+  snapshot_activation_artifact "$daemon_target"
+  snapshot_activation_artifact "$portal_target"
+  for target in "${quickshell_targets[@]}"; do
+    snapshot_activation_artifact "$target"
+  done
+  if ((apply_production)); then
+    snapshot_activation_artifact "$config_target"
+    snapshot_activation_artifact "$commissioning_target"
+  else
+    [[ -e "$config_target" || -L "$config_target" ]] ||
+      snapshot_activation_artifact "$config_target"
+    [[ -e "$commissioning_target" || -L "$commissioning_target" ]] ||
+      snapshot_activation_artifact "$commissioning_target"
+  fi
+  if [[ -f "$manifest_path" ]]; then
+    activation_manifest_backup=$temp_dir/managed.tsv.backup
+    cp -p -- "$manifest_path" "$activation_manifest_backup"
+    activation_manifest_existed=1
+  fi
+  rollback_artifacts=1
+fi
+
 install_managed_file "$daemon_unit" "$daemon_target"
 install_managed_file "$portal_unit" "$portal_target"
 for index in "${!quickshell_sources[@]}"; do
@@ -311,37 +417,42 @@ if ((apply_production)); then
   install_managed_file "$production_config" "$config_target" 0600
   install_managed_file "$production_commissioning" "$commissioning_target" 0600
 
-  hyprland_backup=$temp_dir/hyprland.lua.backup
-  cp -p "$hyprland_target" "$hyprland_backup"
-  hyprland_mode=$(stat -c '%a' "$hyprland_target")
-  if [[ -f "$module_target" ]]; then
-    module_existed=1
-    module_backup=$temp_dir/xeneon_edge_agents.lua.backup
-    cp -p "$module_target" "$module_backup"
-    module_previous_manifest_hash=$(manifest_hash "$module_target" 2>/dev/null || true)
-  fi
-  [[ -f "$hypr_marker_path" ]] && marker_existed=1
-  rollback_hypr=1
-
-  install_managed_file "$production_module" "$module_target"
-
-  if ((module_count == 0)); then
-    hypr_temp=$temp_dir/hyprland.lua
-    awk '
-      { print }
-      /^[[:space:]]*require\("hypr\.input"\)[[:space:]]*$/ {
-        print "require(\"hypr.xeneon_edge_agents\")"
-      }
-    ' "$hyprland_target" >"$hypr_temp"
-    install -m "$hyprland_mode" "$hypr_temp" "$hyprland_target"
-    mkdir -p "$install_state_dir"
-    : >"$hypr_marker_path"
-  else
-    if [[ -f "$hypr_marker_path" ]]; then
-      note "Hyprland require is already installer-managed."
-    else
-      note "Preserved existing Hyprland require (not claimed by installer)."
+  if ((activate)); then
+    hyprland_backup=$temp_dir/hyprland.lua.backup
+    cp -p "$hyprland_target" "$hyprland_backup"
+    hyprland_mode=$(stat -c '%a' "$hyprland_target")
+    if [[ -f "$module_target" ]]; then
+      module_existed=1
+      module_backup=$temp_dir/xeneon_edge_agents.lua.backup
+      cp -p "$module_target" "$module_backup"
+      module_previous_manifest_hash=$(manifest_hash "$module_target" 2>/dev/null || true)
     fi
+    [[ -f "$hypr_marker_path" ]] && marker_existed=1
+    rollback_hypr=1
+
+    install_managed_file "$production_module" "$module_target"
+
+    if ((module_count == 0)); then
+      hypr_temp=$temp_dir/hyprland.lua
+      awk '
+        { print }
+        /^[[:space:]]*require\("hypr\.input"\)[[:space:]]*$/ {
+          print "require(\"hypr.xeneon_edge_agents\")"
+        }
+      ' "$hyprland_target" >"$hypr_temp"
+      install -m "$hyprland_mode" "$hypr_temp" "$hyprland_target"
+      mkdir -p "$install_state_dir"
+      : >"$hypr_marker_path"
+    else
+      if [[ -f "$hypr_marker_path" ]]; then
+        note "Hyprland require is already installer-managed."
+      else
+        note "Preserved existing Hyprland require (not claimed by installer)."
+      fi
+    fi
+  else
+    install_managed_file "$production_module" "$module_target"
+    note "Staged Hyprland module without changing the active entrypoint."
   fi
 else
   seed_user_file \
@@ -366,8 +477,37 @@ if ((activate)); then
     [[ -z "$config_errors" ]] ||
       die "Hyprland reported config errors: $config_errors"
   fi
+  rollback_daemon_reload=1
   systemctl --user daemon-reload
-  systemctl --user enable --now xeneon-agentd.service xeneon-edge-portal.service
+  for unit in "${service_units[@]}"; do
+    active_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+    case "$active_state" in
+      active|inactive|failed) ;;
+      *) die "could not determine stable active state for $unit" ;;
+    esac
+    service_previous_active+=("$active_state")
+
+    enabled_state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
+    case "$enabled_state" in
+      enabled|enabled-runtime|linked|linked-runtime|alias|disabled) ;;
+      *) die "could not determine stable enabled state for $unit" ;;
+    esac
+    service_previous_enabled+=("$enabled_state")
+  done
+  rollback_services=1
+  systemctl --user enable "${service_units[@]}"
+  for index in "${!service_units[@]}"; do
+    unit=${service_units[$index]}
+    if [[ "${service_previous_active[$index]}" == active ]]; then
+      systemctl --user restart "$unit"
+    else
+      systemctl --user start "$unit"
+    fi
+  done
+  rollback_services=0
+  rollback_daemon_reload=0
+  rollback_hypr=0
+  rollback_artifacts=0
 fi
 
 # Retire files removed or renamed in the packaged Quickshell tree. Only paths
@@ -400,3 +540,6 @@ if ((!apply_production)); then
   note "Physical gate remains closed; run detect-hardware.sh before production commissioning."
 fi
 rollback_hypr=0
+rollback_services=0
+rollback_artifacts=0
+rollback_daemon_reload=0
