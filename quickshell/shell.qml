@@ -5,6 +5,8 @@ import "state"
 
 ShellRoot {
     id: root
+    property bool fatalExitRequested: false
+    property bool previewClosing: false
 
     readonly property bool previewMode:
         String(Quickshell.env("XENEON_EDGE_PREVIEW") || "") === "1"
@@ -132,6 +134,18 @@ ShellRoot {
         minimumSize: Qt.size(960, 270)
         color: "#02050b"
         surfaceFormat.opaque: true
+
+        onClosed: {
+            root.previewClosing = true
+            if (root.previewMode && !root.fatalExitRequested)
+                Qt.quit()
+        }
+        onResourcesLost: {
+            if (root.previewMode && !root.previewClosing) {
+                root.fatalExitRequested = true
+                Qt.exit(1)
+            }
+        }
 
         PortalViewport {
             anchors.fill: parent

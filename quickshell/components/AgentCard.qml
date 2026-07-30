@@ -5,11 +5,21 @@ Item {
 
     property var agent: null
     property bool reducedMotion: false
+    property double snapshotSequence: -1
+    property bool actionsEnabled: true
 
     signal openRequested(string agentId)
     signal zoomRequested(string agentId)
-    signal approveRequested(string agentId, string capabilityId)
-    signal interruptRequested(string agentId, string capabilityId)
+    signal approveRequested(
+        string agentId,
+        string capabilityId,
+        double sequence
+    )
+    signal interruptRequested(
+        string agentId,
+        string capabilityId,
+        double sequence
+    )
     signal interacted()
 
     readonly property string agentState:
@@ -47,7 +57,7 @@ Item {
     }
 
     function canAction(action) {
-        if (agent === null || agent.actions === null
+        if (!actionsEnabled || agent === null || agent.actions === null
                 || agent.actions === undefined)
             return false
         if (action === "open" || action === "zoom")
@@ -98,6 +108,22 @@ Item {
         }
     }
 
+    function requestOpen() {
+        if (agent === null || !canAction("open"))
+            return false
+        interacted()
+        openRequested(String(agent.id))
+        return true
+    }
+
+    function requestZoom() {
+        if (agent === null || !canAction("zoom"))
+            return false
+        interacted()
+        zoomRequested(String(agent.id))
+        return true
+    }
+
     scale: openHandler.pressed ? 0.988 : 1
     opacity: agent === null ? 0 : 1
 
@@ -115,6 +141,7 @@ Item {
     Accessible.description: agent === null
         ? ""
         : stateLabel(agentState) + ". " + statusSummary()
+    Accessible.onPressAction: root.requestOpen()
 
     Rectangle {
         id: cardSurface
@@ -203,11 +230,13 @@ Item {
             }
 
             Text {
+                objectName: "agentDisplayName"
                 width: titleRow.width - statePill.width - 36
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.agent === null
                     ? ""
                     : String(root.agent.display_name || "")
+                textFormat: Text.PlainText
                 color: "#f3fbff"
                 elide: Text.ElideRight
                 font {
@@ -233,6 +262,7 @@ Item {
 
                     anchors.centerIn: parent
                     text: root.stateLabel(root.agentState)
+                    textFormat: Text.PlainText
                     color: root.accent
                     font {
                         family: "monospace"
@@ -257,6 +287,7 @@ Item {
             text: root.agent === null
                 ? ""
                 : root.statusSummary()
+            textFormat: Text.PlainText
             color: "#b8cce2"
             wrapMode: Text.Wrap
             maximumLineCount: 2
@@ -282,6 +313,7 @@ Item {
                 text: root.agent === null
                     ? ""
                     : String(root.agent.agent || "Agent").toUpperCase()
+                textFormat: Text.PlainText
                 color: "#6f8aa7"
                 elide: Text.ElideRight
                 font {
@@ -296,6 +328,7 @@ Item {
                 text: root.agent === null
                     ? ""
                     : String(root.agent.workspace || "LOCAL")
+                textFormat: Text.PlainText
                 color: "#6f8aa7"
                 elide: Text.ElideMiddle
                 horizontalAlignment: Text.AlignHCenter
@@ -310,6 +343,7 @@ Item {
                 text: root.agent === null
                     ? ""
                     : String(root.agent.session || "HERDR")
+                textFormat: Text.PlainText
                 color: "#6f8aa7"
                 elide: Text.ElideLeft
                 horizontalAlignment: Text.AlignRight
@@ -325,10 +359,7 @@ Item {
 
             enabled: root.agent !== null && root.canAction("open")
             gesturePolicy: TapHandler.DragThreshold
-            onTapped: {
-                root.interacted()
-                root.openRequested(String(root.agent.id))
-            }
+            onTapped: root.requestOpen()
         }
     }
 
@@ -358,10 +389,12 @@ Item {
 
             Accessible.role: Accessible.Button
             Accessible.name: "Zoom agent pane"
+            Accessible.onPressAction: root.requestZoom()
 
             Text {
                 anchors.centerIn: parent
                 text: "ZOOM"
+                textFormat: Text.PlainText
                 color: "#9bdcff"
                 font {
                     family: "monospace"
@@ -376,10 +409,7 @@ Item {
 
                 enabled: root.agent !== null && root.canAction("zoom")
                 gesturePolicy: TapHandler.ReleaseWithinBounds
-                onTapped: {
-                    root.interacted()
-                    root.zoomRequested(String(root.agent.id))
-                }
+                onTapped: root.requestZoom()
             }
         }
 
@@ -394,11 +424,13 @@ Item {
             label: "HOLD APPROVE"
             accent: "#6cf7b0"
             reducedMotion: root.reducedMotion
+            targetAgentId: root.agent === null ? "" : String(root.agent.id)
+            targetCapabilityId: root.capabilityId("approve")
+            targetSequence: root.snapshotSequence
             onInteracted: root.interacted()
-            onConfirmed: root.approveRequested(
-                String(root.agent.id),
-                root.capabilityId("approve")
-            )
+            onConfirmed: function(agentId, capabilityId, sequence) {
+                root.approveRequested(agentId, capabilityId, sequence)
+            }
         }
 
         HoldControl {
@@ -412,11 +444,13 @@ Item {
             label: "HOLD INTERRUPT"
             accent: "#ff5d83"
             reducedMotion: root.reducedMotion
+            targetAgentId: root.agent === null ? "" : String(root.agent.id)
+            targetCapabilityId: root.capabilityId("interrupt")
+            targetSequence: root.snapshotSequence
             onInteracted: root.interacted()
-            onConfirmed: root.interruptRequested(
-                String(root.agent.id),
-                root.capabilityId("interrupt")
-            )
+            onConfirmed: function(agentId, capabilityId, sequence) {
+                root.interruptRequested(agentId, capabilityId, sequence)
+            }
         }
     }
 }

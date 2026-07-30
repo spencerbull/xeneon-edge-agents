@@ -8,16 +8,89 @@ Item {
     property bool reducedMotion: false
     property bool completed: false
     property bool armed: false
+    property string targetAgentId: ""
+    property string targetCapabilityId: ""
+    property double targetSequence: -1
+    property string heldAgentId: ""
+    property string heldCapabilityId: ""
+    property double heldSequence: -1
 
-    signal confirmed()
+    signal confirmed(
+        string agentId,
+        string capabilityId,
+        double snapshotSequence
+    )
     signal cancelled()
     signal interacted()
+    signal accessibleHoldRequested()
 
     implicitHeight: 48
 
     Accessible.role: Accessible.Button
     Accessible.name: label
-    Accessible.description: "Press and hold for 800 milliseconds"
+    Accessible.description:
+        "Touch and hold for 800 milliseconds; a press action cannot confirm"
+    Accessible.onPressAction: root.accessibleHoldRequested()
+
+    onTargetAgentIdChanged: invalidateChangedTarget()
+    onTargetCapabilityIdChanged: invalidateChangedTarget()
+    onTargetSequenceChanged: invalidateChangedTarget()
+
+    function guardMatches() {
+        return heldAgentId === targetAgentId
+                && heldCapabilityId === targetCapabilityId
+                && heldSequence === targetSequence
+    }
+
+    function beginHold() {
+        completed = false
+        heldAgentId = targetAgentId
+        heldCapabilityId = targetCapabilityId
+        heldSequence = targetSequence
+        armed = enabled
+                && heldAgentId !== ""
+                && heldCapabilityId !== ""
+                && isFinite(heldSequence)
+                && heldSequence >= 0
+        if (armed)
+            interacted()
+        return armed
+    }
+
+    function cancelHold() {
+        if (!armed || completed)
+            return false
+        armed = false
+        completed = false
+        cancelled()
+        return true
+    }
+
+    function invalidateChangedTarget() {
+        if (armed && !guardMatches())
+            cancelHold()
+    }
+
+    function confirmHold() {
+        if (!armed || completed || !guardMatches()) {
+            cancelHold()
+            return false
+        }
+
+        completed = true
+        confirmed(heldAgentId, heldCapabilityId, heldSequence)
+        return true
+    }
+
+    function finishHold() {
+        if (armed && !completed)
+            cancelled()
+        armed = false
+        completed = false
+        heldAgentId = ""
+        heldCapabilityId = ""
+        heldSequence = -1
+    }
 
     Rectangle {
         anchors.fill: parent
@@ -44,7 +117,7 @@ Item {
         )
         radius: 7
         color: Qt.alpha(root.accent, 0.26)
-        visible: holdHandler.pressed
+        visible: holdHandler.pressed && root.armed
     }
 
     Rectangle {
@@ -62,6 +135,7 @@ Item {
     Text {
         anchors.centerIn: parent
         text: root.label
+        textFormat: Text.PlainText
         color: root.enabled ? "#edfaff" : "#718096"
         font {
             family: "monospace"
@@ -80,30 +154,17 @@ Item {
         acceptedButtons: Qt.LeftButton
 
         onPressedChanged: {
-            if (pressed) {
-                root.completed = false
-                root.armed = true
-                root.interacted()
-            } else if (root.armed) {
-                if (!root.completed)
-                    root.cancelled()
-                root.armed = false
-                root.completed = false
-            }
+            if (pressed)
+                root.beginHold()
+            else
+                root.finishHold()
         }
 
-        onLongPressed: {
-            if (!root.completed) {
-                root.completed = true
-                root.confirmed()
-            }
-        }
+        onLongPressed: root.confirmHold()
 
         onCanceled: {
-            if (root.armed && !root.completed)
-                root.cancelled()
-            root.armed = false
-            root.completed = false
+            root.cancelHold()
+            root.finishHold()
         }
     }
 }

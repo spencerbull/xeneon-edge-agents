@@ -8,6 +8,7 @@ QtObject {
     property string daemonEpoch: ""
     property double generatedAtMs: 0
     property bool hasSnapshot: false
+    property bool freshSnapshotRequired: true
 
     property string transportState: "starting"
     property string transportDetail: ""
@@ -25,6 +26,8 @@ QtObject {
     property var lastActionResult: null
     property var lastNotice: null
     property string activitySignature: ""
+    property var pendingRequestActions: ({})
+    property var pendingRequestOrder: []
 
     signal snapshotAccepted(var snapshot)
     signal semanticActivityChanged(string signature)
@@ -59,6 +62,7 @@ QtObject {
         daemonEpoch = ""
         generatedAtMs = 0
         hasSnapshot = false
+        freshSnapshotRequired = true
         transportState = "starting"
         transportDetail = ""
         protocolError = ""
@@ -72,6 +76,8 @@ QtObject {
         lastActionResult = null
         lastNotice = null
         activitySignature = ""
+        pendingRequestActions = {}
+        pendingRequestOrder = []
     }
 
     function safeString(value, fallback, limit) {
@@ -257,8 +263,10 @@ QtObject {
                 && typeof value === "object"
                 ? value
                 : {}
+        var numericValue = source.value
         var available = source.available === true
-        var numericValue = finiteNumber(source.value, 0)
+                && typeof numericValue === "number"
+                && isFinite(numericValue)
         return {
             "available": available,
             "value": available ? numericValue : null,
@@ -324,6 +332,58 @@ QtObject {
         return false
     }
 
+    function awaitFreshSnapshot(state, detail) {
+        transportState = safeString(state, "starting", 24)
+        transportDetail = safeString(detail, "", 120)
+        freshSnapshotRequired = true
+        protocolError = ""
+    }
+
+    function trackCommand(command) {
+        if (command === null || command === undefined
+                || typeof command !== "object")
+            return false
+
+        var requestId = safeString(command.request_id, "", 128)
+        var action = safeString(command.action, "", 32)
+        if (requestId === "" || action === "")
+            return false
+
+        var actions = Object.assign({}, pendingRequestActions)
+        var order = pendingRequestOrder.slice()
+        if (actions[requestId] === undefined)
+            order.push(requestId)
+        actions[requestId] = action
+
+        while (order.length > 128) {
+            var expiredId = order.shift()
+            delete actions[expiredId]
+        }
+
+        pendingRequestActions = actions
+        pendingRequestOrder = order
+        return true
+    }
+
+    function takeTrackedAction(requestId) {
+        var normalizedId = safeString(requestId, "", 128)
+        if (normalizedId === ""
+                || pendingRequestActions[normalizedId] === undefined)
+            return ""
+
+        var actions = Object.assign({}, pendingRequestActions)
+        var order = pendingRequestOrder.slice()
+        var action = safeString(actions[normalizedId], "", 32)
+        delete actions[normalizedId]
+
+        var index = order.indexOf(normalizedId)
+        if (index !== -1)
+            order.splice(index, 1)
+        pendingRequestActions = actions
+        pendingRequestOrder = order
+        return action
+    }
+
     function ingestEnvelope(envelope) {
         if (envelope === null || envelope === undefined
                 || typeof envelope !== "object")
@@ -361,9 +421,20 @@ QtObject {
         if (hasSnapshot && nextEpoch === daemonEpoch) {
             if (nextSequence < sequence)
                 return false
-            if (nextSequence === sequence
-                    && nextGeneratedAtMs <= generatedAtMs)
-                return false
+            if (nextSequence === sequence) {
+                if (nextGeneratedAtMs < generatedAtMs)
+                    return false
+                if (nextGeneratedAtMs > generatedAtMs) {
+                    generatedAtMs = nextGeneratedAtMs
+                    health = normalizeHealth(snapshot.health)
+                } else if (!freshSnapshotRequired) {
+                    return false
+                }
+                freshSnapshotRequired = false
+                protocolError = ""
+                snapshotAccepted(snapshot)
+                return true
+            }
         }
 
         var hadSnapshot = hasSnapshot
@@ -380,6 +451,7 @@ QtObject {
         health = normalizeHealth(snapshot.health)
         activitySignature = nextSignature
         hasSnapshot = true
+        freshSnapshotRequired = false
         protocolError = ""
 
         snapshotAccepted(snapshot)
@@ -397,6 +469,7 @@ QtObject {
 
         var result = {
             "request_id": requestId,
+            "action": takeTrackedAction(requestId),
             "ok": envelope.ok,
             "code": code,
             "message": safeString(envelope.message, "", 120)
@@ -430,7 +503,7 @@ QtObject {
     function surfaceState() {
         if (transportState === "disconnected")
             return "disconnected"
-        if (!hasSnapshot)
+        if (freshSnapshotRequired || !hasSnapshot)
             return "loading"
         if (connection.state === "offline")
             return "disconnected"

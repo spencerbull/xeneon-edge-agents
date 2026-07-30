@@ -5,6 +5,8 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
 fixture=${1:-snapshot.ndjson}
+preview_app_id="org.xeneon-edge.agent-portal-preview.$BASHPID"
+preview_pid=
 
 if ! [[ "$fixture" =~ ^[a-z0-9_-]+\.ndjson$ ]]; then
   printf 'error: fixture must be a filename such as snapshot.ndjson\n' >&2
@@ -15,6 +17,69 @@ if [[ ! -f "$repo_root/quickshell/fixtures/$fixture" ]]; then
   exit 1
 fi
 
+forward_signal() {
+  if [[ -n "$preview_pid" ]] && kill -0 "$preview_pid" 2>/dev/null; then
+    kill -TERM "$preview_pid" 2>/dev/null || true
+  fi
+}
+
+apply_hyprland_geometry() {
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || return 0
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local address=
+  local attempt
+  for ((attempt = 0; attempt < 40; attempt += 1)); do
+    kill -0 "$preview_pid" 2>/dev/null || return 0
+    address=$(
+      hyprctl -j clients 2>/dev/null |
+        jq -r \
+          --arg app_id "$preview_app_id" \
+          --argjson pid "$preview_pid" \
+          '[
+            .[] |
+            select(
+              .pid == $pid and
+              (.class == $app_id or .initialClass == $app_id)
+            )
+          ] | if length == 1 then .[0].address else empty end'
+    ) || address=
+    [[ -n "$address" ]] && break
+    sleep 0.05
+  done
+
+  if ! [[ "$address" =~ ^0x[0-9a-fA-F]+$ ]]; then
+    printf 'warning: preview window was not uniquely identified; geometry unchanged\n' >&2
+    return 0
+  fi
+
+  # Exact-address dispatches affect only this window and leave no rule or
+  # persistent Hyprland configuration behind.
+  local window_selector="address:$address"
+  local geometry_code
+  geometry_code=$(
+    printf '%s' \
+      "hl.dispatch(hl.dsp.window.float({ action = \"set\", window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.resize({ x = 1280, y = 360, relative = false, window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.center({ window = \"$window_selector\" }))"
+  )
+  if ! hyprctl eval "$geometry_code" >/dev/null 2>&1; then
+    printf 'warning: Hyprland preview geometry could not be applied\n' >&2
+  fi
+}
+
+trap forward_signal HUP INT TERM
+
+QS_APP_ID=$preview_app_id \
 XENEON_EDGE_PREVIEW=1 \
 XENEON_EDGE_FIXTURE=$fixture \
-  exec quickshell --no-duplicate --path "$repo_root/quickshell"
+  quickshell --no-duplicate --path "$repo_root/quickshell" &
+preview_pid=$!
+
+apply_hyprland_geometry
+
+preview_status=0
+wait "$preview_pid" || preview_status=$?
+trap - HUP INT TERM
+exit "$preview_status"

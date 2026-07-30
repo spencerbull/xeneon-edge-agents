@@ -164,10 +164,22 @@ TestCase {
         )
         refresh.generated_at_ms = 3000
         refresh.health.cpu.value = 67
+        refresh.connection = "offline"
+        refresh.sessions = []
+        refresh.agents = [agent("retargeted", 0, "blocked")]
+        refresh.agents[0].actions.approve.capability_id = "replacement"
         verify(store.ingestEnvelope(refresh))
         compare(store.sequence, 10)
         compare(store.generatedAtMs, 3000)
         compare(store.health.cpu.value, 67)
+        compare(store.connection.state, "connected")
+        compare(store.sessions.length, 1)
+        compare(store.agents.length, 1)
+        compare(store.agents[0].id, "health-agent")
+        compare(
+            store.agents[0].actions.approve.capability_id,
+            "approve-health-agent"
+        )
         compare(semanticActivitySpy.count, 0)
 
         verify(!store.ingestEnvelope(refresh))
@@ -238,6 +250,10 @@ TestCase {
     }
 
     function test_actionResultAndNoticeAreNormalized() {
+        verify(store.trackCommand({
+            "request_id": "request-1",
+            "action": "approve"
+        }))
         verify(store.ingestEnvelope({
             "schema_version": 1,
             "type": "action_result",
@@ -249,6 +265,7 @@ TestCase {
         }))
         compare(store.lastActionResult.ok, true)
         compare(store.lastActionResult.code, "ok")
+        compare(store.lastActionResult.action, "approve")
         compare(store.lastActionResult.raw_output, undefined)
 
         verify(store.ingestEnvelope({
@@ -267,6 +284,99 @@ TestCase {
             "type": "action_result",
             "request_id": "missing-result-fields"
         }))
+    }
+
+    function test_restoreFocusResultsRemainSeparatelyCorrelated() {
+        verify(store.trackCommand({
+            "request_id": "guarded-request",
+            "action": "interrupt"
+        }))
+        verify(store.trackCommand({
+            "request_id": "restore-request",
+            "action": "restore_focus"
+        }))
+        store.awaitFreshSnapshot("disconnected", "Bridge exited (1)")
+
+        verify(store.ingestEnvelope({
+            "schema_version": 1,
+            "type": "action_result",
+            "request_id": "guarded-request",
+            "ok": false,
+            "code": "stale_capability",
+            "message": "The guarded action failed"
+        }))
+        compare(store.lastActionResult.action, "interrupt")
+        compare(store.lastActionResult.ok, false)
+
+        verify(store.ingestEnvelope({
+            "schema_version": 1,
+            "type": "action_result",
+            "request_id": "restore-request",
+            "ok": true,
+            "code": "focus_restored",
+            "message": "Focus restored"
+        }))
+        compare(store.lastActionResult.action, "restore_focus")
+        compare(store.pendingRequestOrder.length, 0)
+    }
+
+    function test_invalidAvailableMetricBecomesUnavailable() {
+        var invalid = snapshot(
+            20,
+            "epoch-invalid-health",
+            [agent("health", 0, "working")]
+        )
+        invalid.health.cpu = {"available": true, "unit": "%"}
+        invalid.health.gpu = {
+            "available": true,
+            "value": "73",
+            "unit": "%"
+        }
+
+        verify(store.ingestEnvelope(invalid))
+        compare(store.health.cpu.available, false)
+        compare(store.health.cpu.value, null)
+        compare(store.health.gpu.available, false)
+        compare(store.health.gpu.value, null)
+        compare(store.health.status, "partial")
+    }
+
+    function test_reconnectRequiresFreshNonstaleSnapshot() {
+        verify(store.ingestEnvelope(snapshot(
+            8,
+            "epoch-reconnect",
+            [agent("before-exit", 0, "working")]
+        )))
+        compare(store.surfaceState(), "ready")
+
+        store.awaitFreshSnapshot("disconnected", "Bridge exited (1)")
+        compare(store.surfaceState(), "disconnected")
+        compare(store.sequence, 8)
+        compare(store.agents[0].id, "before-exit")
+
+        store.awaitFreshSnapshot("streaming", "Waiting for snapshot")
+        compare(store.surfaceState(), "loading")
+        verify(!store.ingestEnvelope(snapshot(
+            7,
+            "epoch-reconnect",
+            [agent("stale", 0, "blocked")]
+        )))
+        compare(store.surfaceState(), "loading")
+
+        verify(store.ingestEnvelope(snapshot(
+            8,
+            "epoch-reconnect",
+            [agent("fresh", 0, "idle")]
+        )))
+        compare(store.surfaceState(), "ready")
+        compare(store.agents[0].id, "before-exit")
+
+        verify(store.ingestEnvelope(snapshot(
+            9,
+            "epoch-reconnect",
+            [agent("fresh", 0, "idle")]
+        )))
+        compare(store.agents[0].id, "fresh")
     }
 
     function test_offlineAndEmptyStates() {

@@ -11,17 +11,15 @@ QtObject {
         "restore_focus"
     ]
 
-    property double snapshotSequence: 0
     property int requestCounter: 0
     property string lastError: ""
 
     function reset() {
-        snapshotSequence = 0
         requestCounter = 0
         lastError = ""
     }
 
-    function build(action, agentId, capabilityId) {
+    function build(action, agentId, capabilityId, pinnedSequence) {
         lastError = ""
 
         if (allowedActions.indexOf(action) === -1) {
@@ -31,6 +29,12 @@ QtObject {
 
         var normalizedAgentId = String(agentId || "")
         var normalizedCapabilityId = String(capabilityId || "")
+        var normalizedSequence = Number(pinnedSequence)
+
+        if (!isFinite(normalizedSequence) || normalizedSequence < 0) {
+            lastError = "Command requires a valid snapshot sequence"
+            return null
+        }
 
         if (action === "restore_focus") {
             if (normalizedAgentId !== ""
@@ -60,7 +64,7 @@ QtObject {
             "schema_version": 1,
             "type": "command",
             "request_id": "xep-" + Date.now() + "-" + requestCounter,
-            "sequence": Math.max(0, Math.floor(snapshotSequence)),
+            "sequence": Math.floor(normalizedSequence),
             "action": action
         }
 

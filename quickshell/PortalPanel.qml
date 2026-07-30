@@ -13,6 +13,8 @@ PanelWindow {
     property bool reducedMotion: false
     property bool recoveryVisible: true
     property int recoveryAttempts: 0
+    property bool awaitingRecovery: false
+    readonly property int maximumRecoveryDelayMs: 2000
 
     screen: modelData
     visible: recoveryVisible
@@ -34,14 +36,30 @@ PanelWindow {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
     onResourcesLost: {
-        if (recoveryAttempts < 2) {
-            recoveryVisible = false
-            recoveryTimer.restart()
-        }
+        recoveryStabilityTimer.stop()
+        recoveryWatchdog.stop()
+        awaitingRecovery = true
+        scheduleRecovery()
     }
 
     onWindowConnected: {
-        recoveryAttempts = 0
+        recoveryWatchdog.stop()
+        awaitingRecovery = false
+        recoveryStabilityTimer.restart()
+    }
+
+    function scheduleRecovery() {
+        recoveryAttempts += 1
+        if (recoveryAttempts > 2) {
+            Qt.exit(1)
+            return
+        }
+        recoveryVisible = false
+        recoveryTimer.interval = Math.min(
+            maximumRecoveryDelayMs,
+            120 * Math.pow(2, Math.min(recoveryAttempts - 1, 4))
+        )
+        recoveryTimer.restart()
     }
 
     Timer {
@@ -49,9 +67,26 @@ PanelWindow {
         interval: 120
         repeat: false
         onTriggered: {
-            root.recoveryAttempts += 1
             root.recoveryVisible = true
+            root.recoveryWatchdog.restart()
         }
+    }
+
+    Timer {
+        id: recoveryWatchdog
+        interval: 1500
+        repeat: false
+        onTriggered: {
+            if (root.awaitingRecovery)
+                root.scheduleRecovery()
+        }
+    }
+
+    Timer {
+        id: recoveryStabilityTimer
+        interval: 5000
+        repeat: false
+        onTriggered: root.recoveryAttempts = 0
     }
 
     PortalViewport {

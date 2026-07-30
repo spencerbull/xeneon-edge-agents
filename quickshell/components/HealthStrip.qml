@@ -68,8 +68,14 @@ Item {
             : "BAT --"
     }
 
+    function toggleDetails() {
+        detailsVisible = !detailsVisible
+        interacted()
+    }
+
     Accessible.role: Accessible.Button
     Accessible.name: "System health strip"
+    Accessible.onPressAction: root.toggleDetails()
 
     Rectangle {
         anchors.fill: parent
@@ -118,6 +124,7 @@ Item {
                     ? String(root.connection.detail || "HERDR LINK")
                     : "HERDR // "
                         + String(root.connection.state || "UNKNOWN").toUpperCase()
+                textFormat: Text.PlainText
                 color: "#c9e4f5"
                 elide: Text.ElideRight
                 width: parent.width - 26
@@ -145,6 +152,7 @@ Item {
                         verticalCenter: parent.verticalCenter
                     }
                     text: String(modelData.label)
+                    textFormat: Text.PlainText
                     color: "#6386a5"
                     font {
                         family: "monospace"
@@ -192,6 +200,7 @@ Item {
                         ? "--"
                         : Math.round(Number(modelData.metric.value))
                             + String(modelData.metric.unit)
+                    textFormat: Text.PlainText
                     color: "#dff8ff"
                     horizontalAlignment: Text.AlignRight
                     font {
@@ -214,6 +223,7 @@ Item {
                     ? root.rateText("network_down", "↓")
                         + "  " + root.rateText("network_up", "↑")
                     : root.batteryText()
+                textFormat: Text.PlainText
                 color: "#7696b4"
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
@@ -227,9 +237,6 @@ Item {
 
     TapHandler {
         gesturePolicy: TapHandler.ReleaseWithinBounds
-        onTapped: {
-            root.detailsVisible = !root.detailsVisible
-            root.interacted()
-        }
+        onTapped: root.toggleDetails()
     }
 }

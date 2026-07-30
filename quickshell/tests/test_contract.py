@@ -136,6 +136,141 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("onSemanticActivityChanged", shell)
         self.assertNotIn("onSnapshotAccepted", shell)
 
+    def test_all_portal_text_is_explicitly_plain(self):
+        qml_sources = [
+            path.read_text(encoding="utf-8")
+            for path in ROOT.rglob("*.qml")
+            if "tests" not in path.parts
+        ]
+        text_blocks = sum(
+            len(re.findall(r"\bText\s*\{", contents))
+            for contents in qml_sources
+        )
+        plain_text = sum(
+            contents.count("textFormat: Text.PlainText")
+            for contents in qml_sources
+        )
+        self.assertGreater(text_blocks, 0)
+        self.assertEqual(text_blocks, plain_text)
+
+        interaction_test = source("tests/tst_interaction.qml")
+        self.assertIn("<img src=", interaction_test)
+        self.assertIn(
+            "compare(displayName.textFormat, Text.PlainText)",
+            interaction_test,
+        )
+
+    def test_guarded_hold_pins_identity_capability_and_sequence(self):
+        hold = source("components/HoldControl.qml")
+        card = source("components/AgentCard.qml")
+        portal = source("components/PortalView.qml")
+        bridge = source("state/PortalBridge.qml")
+        builder = source("state/CommandBuilder.qml")
+
+        for pinned_field in (
+            "heldAgentId",
+            "heldCapabilityId",
+            "heldSequence",
+        ):
+            self.assertIn(pinned_field, hold)
+        self.assertIn("guardMatches()", hold)
+        self.assertIn("onTargetAgentIdChanged", hold)
+        self.assertIn("onTargetCapabilityIdChanged", hold)
+        self.assertIn("onTargetSequenceChanged", hold)
+        self.assertIn("targetSequence: root.snapshotSequence", card)
+        self.assertIn("snapshotSequence: root.store.sequence", portal)
+        self.assertIn("restoreFocus(sequence)", portal)
+        self.assertIn(
+            "function build(action, agentId, capabilityId, pinnedSequence)",
+            builder,
+        )
+        self.assertNotIn("property double snapshotSequence", builder)
+        self.assertIn("pinnedSequence", bridge)
+
+    def test_accessible_controls_are_large_and_guarded_press_is_safe(self):
+        portal = source("components/PortalView.qml")
+        hold = source("components/HoldControl.qml")
+
+        self.assertIn("width: 58", portal)
+        self.assertIn("height: 48", portal)
+        self.assertIn('Accessible.name: "Show agent page "', portal)
+        self.assertIn(
+            "Accessible.onPressAction: root.selectPage(index)",
+            portal,
+        )
+        guarded_action = re.search(
+            r"Accessible\.onPressAction:\s*(?P<body>[^\n]+)",
+            hold,
+        )
+        self.assertIsNotNone(guarded_action)
+        self.assertIn("accessibleHoldRequested", guarded_action.group("body"))
+        self.assertNotIn("confirm", guarded_action.group("body").lower())
+
+    def test_restore_focus_results_are_correlated_and_suppressed(self):
+        store = source("state/PortalStore.qml")
+        portal = source("components/PortalView.qml")
+        bridge = source("state/PortalBridge.qml")
+
+        self.assertIn("pendingRequestActions", store)
+        self.assertIn('"action": takeTrackedAction(requestId)', store)
+        self.assertIn('result.action === "restore_focus"', portal)
+        self.assertIn("store.trackCommand(command)", bridge)
+        self.assertIn("restoreFocus(pinnedSequence)", bridge)
+
+    def test_bridge_restart_requires_fresh_snapshot_and_transport_copy_wins(self):
+        store = source("state/PortalStore.qml")
+        bridge = source("state/PortalBridge.qml")
+        portal = source("components/PortalView.qml")
+
+        self.assertIn("property bool freshSnapshotRequired: true", store)
+        self.assertGreaterEqual(bridge.count("awaitFreshSnapshot("), 2)
+        self.assertIn("if (store.freshSnapshotRequired)", bridge)
+        self.assertIn(
+            "actionsEnabled: !root.store.freshSnapshotRequired",
+            portal,
+        )
+        disconnected = re.search(
+            r'root\.surfaceState === "disconnected".*?'
+            r"root\.store\.transportDetail.*?"
+            r"root\.store\.connection\.detail",
+            portal,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(disconnected)
+
+    def test_resource_loss_exits_after_bounded_recovery_budget(self):
+        panel = source("PortalPanel.qml")
+        shell = source("shell.qml")
+
+        self.assertIn("recoveryAttempts > 2", panel)
+        self.assertIn("Qt.exit(1)", panel)
+        self.assertIn("recoveryStabilityTimer", panel)
+        self.assertIn("maximumRecoveryDelayMs", panel)
+        self.assertIn("onResourcesLost", shell)
+        self.assertIn("fatalExitRequested", shell)
+        self.assertIn("Qt.exit(1)", shell)
+
+    def test_preview_is_unique_closable_and_nonpersistent(self):
+        shell = source("shell.qml")
+        preview = (ROOT.parent / "scripts" / "preview").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("onClosed", shell)
+        self.assertIn("Qt.quit()", shell)
+        self.assertIn("QS_APP_ID=$preview_app_id", preview)
+        self.assertIn("$BASHPID", preview)
+        self.assertIn("hyprctl eval", preview)
+        self.assertIn("address:$address", preview)
+        self.assertNotIn("hyprctl keyword", preview)
+        self.assertNotIn(".config/hypr", preview)
+
+    def test_ambient_overlay_shields_input_until_fade_finishes(self):
+        ambient = source("components/AmbientView.qml")
+        self.assertIn("visible: active || opacity > 0", ambient)
+        self.assertIn("enabled: visible", ambient)
+        self.assertIn("duration: root.reducedMotion ? 0 : 480", ambient)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,10 +10,14 @@ Item {
 
     signal wakeRequested()
 
-    visible: opacity > 0
-    enabled: active
+    visible: active || opacity > 0
+    enabled: visible
     opacity: active ? 1 : 0
     z: 40
+
+    Accessible.role: Accessible.Button
+    Accessible.name: "Wake agent portal"
+    Accessible.onPressAction: root.wakeRequested()
 
     Behavior on opacity {
         NumberAnimation {
@@ -98,6 +102,7 @@ Item {
                     text: String(
                         parent.agent.display_name || "AGENT"
                     ).toUpperCase()
+                    textFormat: Text.PlainText
                     color: "#dff8ff"
                     horizontalAlignment: Text.AlignHCenter
                     elide: Text.ElideRight
@@ -119,6 +124,7 @@ Item {
         Text {
             anchors.horizontalCenter: parent.horizontalCenter
             text: "AMBIENT"
+            textFormat: Text.PlainText
             color: "#7beeff"
             font {
                 family: "monospace"
@@ -132,6 +138,7 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.agents.length + " AGENTS // "
                 + String(root.health.status || "UNKNOWN").toUpperCase()
+            textFormat: Text.PlainText
             color: "#6d8da9"
             font {
                 family: "monospace"
@@ -148,6 +155,7 @@ Item {
             bottomMargin: 30
         }
         text: "TOUCH TO WAKE"
+        textFormat: Text.PlainText
         color: "#7892ad"
         font {
             family: "monospace"

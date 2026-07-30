@@ -36,6 +36,13 @@ Item {
         bridge.restoreFocus()
     }
 
+    function selectPage(pageIndex) {
+        var nextPage = Math.max(0, Math.min(pageCount - 1, pageIndex))
+        currentPage = nextPage
+        pages.positionViewAtIndex(nextPage, ListView.SnapPosition)
+        notePassiveInteraction()
+    }
+
     function showToast(title, detail, success) {
         toastTitle = String(title || "")
         toastDetail = String(detail || "")
@@ -86,6 +93,7 @@ Item {
 
                 Text {
                     text: "XENEON // AGENT COMMAND"
+                    textFormat: Text.PlainText
                     color: "#ecfbff"
                     font {
                         family: "monospace"
@@ -99,6 +107,7 @@ Item {
                     text: root.store.agents.length + " AGENTS  ·  "
                         + root.store.sessions.length + " SESSIONS  ·  SEQ "
                         + Math.max(0, root.store.sequence)
+                    textFormat: Text.PlainText
                     color: "#6385a5"
                     font {
                         family: "monospace"
@@ -122,28 +131,38 @@ Item {
                 Rectangle {
                     required property int index
 
-                    width: index === root.currentPage ? 46 : 16
-                    height: 8
-                    radius: 4
-                    color: index === root.currentPage ? "#55e9ff" : "#29445f"
+                    width: 58
+                    height: 48
+                    color: "transparent"
 
-                    Behavior on width {
-                        NumberAnimation {
-                            duration: root.reducedMotion ? 0 : 180
-                            easing.type: Easing.OutCubic
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Show agent page " + (index + 1)
+                        + " of " + root.pageCount
+                    Accessible.description: index === root.currentPage
+                        ? "Current page"
+                        : "Switch pages"
+                    Accessible.onPressAction: root.selectPage(index)
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: parent.index === root.currentPage ? 46 : 16
+                        height: 8
+                        radius: 4
+                        color: parent.index === root.currentPage
+                            ? "#55e9ff"
+                            : "#29445f"
+
+                        Behavior on width {
+                            NumberAnimation {
+                                duration: root.reducedMotion ? 0 : 180
+                                easing.type: Easing.OutCubic
+                            }
                         }
                     }
 
                     TapHandler {
                         gesturePolicy: TapHandler.ReleaseWithinBounds
-                        onTapped: {
-                            root.currentPage = parent.index
-                            pages.positionViewAtIndex(
-                                parent.index,
-                                ListView.SnapPosition
-                            )
-                            root.notePassiveInteraction()
-                        }
+                        onTapped: root.selectPage(parent.index)
                     }
                 }
             }
@@ -192,6 +211,7 @@ Item {
                 text: String(
                     root.store.connection.state || "STARTING"
                 ).toUpperCase()
+                textFormat: Text.PlainText
                 color: "#cce8f5"
                 font {
                     family: "monospace"
@@ -225,6 +245,7 @@ Item {
                     || root.store.protocolError
                     || "PARTIAL TELEMETRY"
             ).toUpperCase()
+            textFormat: Text.PlainText
             color: "#ffc47c"
             elide: Text.ElideRight
             width: parent.width - 40
@@ -317,6 +338,8 @@ Item {
                         visible: agent !== null
                         enabled: visible
                         reducedMotion: root.reducedMotion
+                        snapshotSequence: root.store.sequence
+                        actionsEnabled: !root.store.freshSnapshotRequired
 
                         onInteracted: root.activity.noteUserActivity()
 
@@ -330,14 +353,30 @@ Item {
                             root.bridge.zoomAgent(agentId)
                         }
 
-                        onApproveRequested: function(agentId, capabilityId) {
-                            root.bridge.approveAgent(agentId, capabilityId)
-                            root.bridge.restoreFocus()
+                        onApproveRequested: function(
+                            agentId,
+                            capabilityId,
+                            sequence
+                        ) {
+                            root.bridge.approveAgent(
+                                agentId,
+                                capabilityId,
+                                sequence
+                            )
+                            root.bridge.restoreFocus(sequence)
                         }
 
-                        onInterruptRequested: function(agentId, capabilityId) {
-                            root.bridge.interruptAgent(agentId, capabilityId)
-                            root.bridge.restoreFocus()
+                        onInterruptRequested: function(
+                            agentId,
+                            capabilityId,
+                            sequence
+                        ) {
+                            root.bridge.interruptAgent(
+                                agentId,
+                                capabilityId,
+                                sequence
+                            )
+                            root.bridge.restoreFocus(sequence)
                         }
                     }
                 }
@@ -379,6 +418,7 @@ Item {
                     : root.surfaceState === "disconnected"
                         ? "HERDR DISCONNECTED"
                         : "NO ACTIVE AGENTS"
+                textFormat: Text.PlainText
                 color: root.surfaceState === "disconnected"
                     ? "#ff769a"
                     : "#77eaff"
@@ -396,11 +436,12 @@ Item {
                     ? "Waiting for the first schema v1 snapshot"
                     : root.surfaceState === "disconnected"
                         ? String(
-                            root.store.connection.detail
-                                || root.store.transportDetail
+                            root.store.transportDetail
+                                || root.store.connection.detail
                                 || "The bridge will reconnect automatically"
                         )
                         : "Herdr is connected and has no running local agents"
+                textFormat: Text.PlainText
                 color: "#718ca6"
                 font {
                     family: "sans-serif"
@@ -467,6 +508,7 @@ Item {
                 Text {
                     width: parent.width
                     text: root.toastTitle
+                    textFormat: Text.PlainText
                     color: "#e8fbff"
                     elide: Text.ElideRight
                     font {
@@ -480,6 +522,7 @@ Item {
                 Text {
                     width: parent.width
                     text: root.toastDetail
+                    textFormat: Text.PlainText
                     color: "#8eabc3"
                     elide: Text.ElideRight
                     font {
@@ -510,6 +553,8 @@ Item {
         target: root.store
 
         function onActionResultReceived(result) {
+            if (result.action === "restore_focus")
+                return
             root.showToast(
                 result.ok
                     ? "ACTION // ACCEPTED"

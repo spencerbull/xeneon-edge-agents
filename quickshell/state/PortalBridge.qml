@@ -12,9 +12,7 @@ QtObject {
     signal commandEmitted(var command)
     signal commandRejected(string reason)
 
-    property CommandBuilder commandBuilder: CommandBuilder {
-        snapshotSequence: Math.max(0, Number(root.store.sequence))
-    }
+    property CommandBuilder commandBuilder: CommandBuilder {}
 
     property Timer restartTimer: Timer {
         interval: 1500
@@ -48,14 +46,16 @@ QtObject {
         }
 
         onStarted: {
-            root.store.setTransportState(
+            root.store.awaitFreshSnapshot(
                 root.previewMode ? "fixture" : "streaming",
-                root.previewMode ? "Deterministic fixture stream" : ""
+                root.previewMode
+                    ? "Waiting for deterministic fixture snapshot"
+                    : "Waiting for a fresh bridge snapshot"
             )
         }
 
         onExited: function(exitCode, exitStatus) {
-            root.store.setTransportState(
+            root.store.awaitFreshSnapshot(
                 "disconnected",
                 "Bridge exited (" + exitCode + ")"
             )
@@ -76,14 +76,25 @@ QtObject {
         }
     }
 
-    function sendBuilt(action, agentId, capabilityId) {
-        var command = commandBuilder.build(action, agentId, capabilityId)
+    function sendBuilt(action, agentId, capabilityId, pinnedSequence) {
+        if (store.freshSnapshotRequired) {
+            commandRejected("Waiting for a fresh snapshot")
+            return false
+        }
+
+        var command = commandBuilder.build(
+            action,
+            agentId,
+            capabilityId,
+            pinnedSequence
+        )
         if (command === null) {
             commandRejected(commandBuilder.lastError)
             return false
         }
 
         if (previewMode) {
+            store.trackCommand(command)
             commandEmitted(command)
             return true
         }
@@ -93,28 +104,42 @@ QtObject {
             return false
         }
 
+        store.trackCommand(command)
         bridgeProcess.write(JSON.stringify(command) + "\n")
         commandEmitted(command)
         return true
     }
 
     function openAgent(agentId) {
-        return sendBuilt("open", agentId, "")
+        return sendBuilt("open", agentId, "", store.sequence)
     }
 
     function zoomAgent(agentId) {
-        return sendBuilt("zoom", agentId, "")
+        return sendBuilt("zoom", agentId, "", store.sequence)
     }
 
-    function approveAgent(agentId, capabilityId) {
-        return sendBuilt("approve", agentId, capabilityId)
+    function approveAgent(agentId, capabilityId, pinnedSequence) {
+        return sendBuilt(
+            "approve",
+            agentId,
+            capabilityId,
+            pinnedSequence
+        )
     }
 
-    function interruptAgent(agentId, capabilityId) {
-        return sendBuilt("interrupt", agentId, capabilityId)
+    function interruptAgent(agentId, capabilityId, pinnedSequence) {
+        return sendBuilt(
+            "interrupt",
+            agentId,
+            capabilityId,
+            pinnedSequence
+        )
     }
 
-    function restoreFocus() {
-        return sendBuilt("restore_focus", "", "")
+    function restoreFocus(pinnedSequence) {
+        var sequence = pinnedSequence === undefined
+            ? store.sequence
+            : pinnedSequence
+        return sendBuilt("restore_focus", "", "", sequence)
     }
 }
