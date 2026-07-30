@@ -23,7 +23,7 @@ artifacts.
 - [x] Installer/check/uninstall flows are reversible and preserve Omarchy and
       user-owned configuration.
 - [x] Automated checks and completed independent reviews pass.
-- [ ] An unpublished Arch package builds, installs, verifies, and uninstalls
+- [x] An unpublished Arch package builds, installs, verifies, and uninstalls
       without owning user configuration.
 - [ ] GitHub Actions validate source and package builds with pinned,
       least-privilege dependencies.
@@ -39,8 +39,8 @@ artifacts.
 | Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Complete locally at `8298f46`; not installed or pushed |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Omarchy integration | `main` | `config/`, `scripts/`, services, install tests | Complete at `995d123`; simulator installed |
-| Arch packaging | `agent/arch-package` worktree | `packaging/arch/`, package helper and tests | In progress |
-| GitHub automation | `agent/github-actions` worktree | `.github/`, CI documentation | In progress |
+| Arch packaging | `agent/arch-packaging-ci` | `packaging/arch/`, package helper and tests | Complete through `cdcd8db` |
+| GitHub automation | `agent/arch-packaging-ci` | `.github/`, CI documentation | Implemented through `76b3df8`; hosted rerun pending |
 
 ## Allowed actions
 
@@ -70,7 +70,7 @@ artifacts.
       Windows-bin clippy.
 - [x] QML gate: `qmllint`, 21 Python contract/fixture tests, 37 Qt tests,
       exact 1280x360 mapped preview, and inspected 1280x360 offscreen render.
-- [x] Installer gate: 24 temporary-XDG scenarios plus installed-unit
+- [x] Installer gate: 33 temporary-XDG scenarios plus installed-unit
       `systemd-analyze verify`.
 - [x] Independent Rust/API and PTY concurrency review.
 - [x] Independent QML/UX review.
@@ -79,20 +79,28 @@ artifacts.
 - [x] Integrated local simulator smoke: one Herdr 0.7.5/protocol-17 session,
       two active Codex agents, versioned snapshot, and expected open/zoom-only
       actions from the unchanged stable Herdr.
-- [ ] `makepkg`, source-package, package archive, and `namcap` validation.
-- [ ] Package install plus isolated simulator install/check/uninstall.
+- [x] `makepkg`, source-package, package archive, and `namcap` validation.
+- [x] Package install, pacman removal/reinstall, simulator
+      install/check/uninstall, and 77-file package integrity verification.
 - [ ] GitHub Actions syntax, policy, and live private-repository runs.
-- [ ] Independent package and workflow review.
+- [x] Independent package and workflow review.
 - [ ] Physical hardware gate (blocked: XENEON EDGE unavailable).
 
 ## Current local state
 
 - The reviewed implementation through `8578d44` is pushed to private
   `origin/main`.
-- Package and workflow work is isolated on `agent/arch-packaging-ci`.
-- The simulator-safe user install contains 23 hash-verified managed files.
+- Package and workflow work is pushed on `agent/arch-packaging-ci`; repository
+  Actions require full-SHA pins.
+- `xeneon-edge-agents 0.1.0-1` is installed from the local package. Pacman
+  reports 77 package files and zero altered files.
+- The simulator-safe package install contains three hash-verified user files;
+  QML and user units now resolve from package-owned `/usr` paths.
 - `xeneon-agentd.service` and `xeneon-edge-portal.service` are disabled and
-  inactive.
+  inactive, with no systemd drop-ins.
+- The two former manual XENEON binaries are checksum-verified in
+  `~/.local/state/xeneon-edge-agents/migration-backup/20260730-before-package`;
+  shell resolution is now package-owned `/usr/bin`.
 - `hyprland.lua` remains byte-identical to its pre-install hash, with no XENEON
   require or module.
 - The stable Herdr installation remains unchanged. Guarded interruption exists
@@ -106,6 +114,10 @@ artifacts.
 - Verify Hyprland's focused-monitor behavior under a physical finger.
 - Probe DDC/CI read-only and expose brightness only after exact restoration
   succeeds.
+- Exercise the `v*` private-release job only at an explicit release gate; no
+  tag or release was created during local packaging.
+- Enable immutable releases and protected tag rules before treating private
+  release assets as permanently locked.
 - Before proposing the Herdr branch upstream, satisfy its contribution gate
   (accepted issue and maintainer approval when required); do not replace the
   stable Herdr install during physical commissioning without a separate
