@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$repo_root"
+
+find quickshell -name '*.qml' -type f -print0 |
+  sort -z |
+  xargs -0 qmllint -I quickshell
+
+PYTHONDONTWRITEBYTECODE=1 \
+  python -m unittest discover -s quickshell/tests -p 'test_*.py' -v
+
+qml_test_runner=${QMLTESTRUNNER:-/usr/lib/qt6/bin/qmltestrunner}
+if [[ ! -x "$qml_test_runner" ]]; then
+  qml_test_runner=$(command -v qmltestrunner || true)
+fi
+[[ -n "$qml_test_runner" && -x "$qml_test_runner" ]] || {
+  printf 'error: qmltestrunner was not found\n' >&2
+  exit 1
+}
+
+QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-offscreen} \
+  "$qml_test_runner" \
+  -input quickshell/tests \
+  -import quickshell \
+  -import quickshell/state \
+  -v1

@@ -27,12 +27,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install portable integration dependencies
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
       - name: Validate JSON assets
         run: |
           find . -type f -name '*.json' -print0 |
             xargs -0 -r -n1 python3 -m json.tool >/dev/null
-      - name: Run portable integration tests
+      - name: Validate QML protocol fixtures and safety contracts
         run: |
-          if [[ -x tests/run-integration-tests ]]; then
-            tests/run-integration-tests
-          fi
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s quickshell/tests -p 'test_*.py' -v
+      - name: Run portable integration tests
+        run: tests/run-integration-tests

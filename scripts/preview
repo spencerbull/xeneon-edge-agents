@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+repo_root=$(cd "$script_dir/.." && pwd -P)
+fixture=${1:-snapshot.ndjson}
+
+if ! [[ "$fixture" =~ ^[a-z0-9_-]+\.ndjson$ ]]; then
+  printf 'error: fixture must be a filename such as snapshot.ndjson\n' >&2
+  exit 1
+fi
+if [[ ! -f "$repo_root/quickshell/fixtures/$fixture" ]]; then
+  printf 'error: fixture does not exist: %s\n' "$fixture" >&2
+  exit 1
+fi
+
+XENEON_EDGE_PREVIEW=1 \
+XENEON_EDGE_FIXTURE=$fixture \
+  exec quickshell --no-duplicate --path "$repo_root/quickshell"
