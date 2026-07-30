@@ -1,0 +1,14 @@
+[tools]
+just = "1.57.0"
+
+[tasks.check]
+description = "Run the complete local verification ladder"
+run = "just check"
+
+[tasks.preview]
+description = "Run the explicit 2560x720 fixture preview"
+run = "scripts/preview"
+
+[tasks.doctor]
+description = "Check the installed daemon protocol"
+run = "xeneon-agentctl doctor"
