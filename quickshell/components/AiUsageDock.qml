@@ -7,6 +7,7 @@ Item {
     property var agents: []
     property var sessions: []
     property bool reducedMotion: false
+    property int clockTick: 0
 
     readonly property var providerIds: ["claude", "codex", "opencode"]
 
@@ -33,14 +34,6 @@ Item {
         }
     }
 
-    function primaryWindow(provider) {
-        if (provider.primary !== null && provider.primary !== undefined)
-            return provider.primary
-        if (provider.secondary !== null && provider.secondary !== undefined)
-            return provider.secondary
-        return null
-    }
-
     function percent(window) {
         if (window === null)
             return 0
@@ -51,6 +44,7 @@ Item {
     }
 
     function resetLabel(window) {
+        clockTick
         if (window === null || Number(window.reset_at_ms || 0) <= 0)
             return "NO RESET"
         var remaining = Math.max(
@@ -84,6 +78,191 @@ Item {
         return focused > 0
             ? focused + " FOCUSED"
             : "NO FOCUSED AGENT"
+    }
+
+    function formatTokens(value) {
+        var count = Math.max(0, Number(value || 0))
+        if (count >= 1000000000)
+            return (count / 1000000000).toFixed(
+                count >= 10000000000 ? 1 : 2
+            ) + "B"
+        if (count >= 1000000)
+            return (count / 1000000).toFixed(
+                count >= 100000000 ? 0 : count >= 10000000 ? 1 : 2
+            ) + "M"
+        if (count >= 1000)
+            return (count / 1000).toFixed(count >= 100000 ? 0 : 1) + "K"
+        return Math.floor(count).toString()
+    }
+
+    function activitySummary(provider) {
+        var today = Math.max(0, Number(provider.today_tokens || 0))
+        var rate = Math.max(0, Number(provider.tokens_per_hour || 0))
+        var fields = []
+        if (today > 0)
+            fields.push("TODAY " + formatTokens(today))
+        if (rate > 0)
+            fields.push("RATE " + formatTokens(rate) + "/H")
+        if (fields.length > 0)
+            return fields.join(" · ")
+        if (String(provider.model || "") !== "")
+            return String(provider.model).toUpperCase()
+        return provider.available
+            ? "NO RECENT TOKEN ACTIVITY"
+            : "CAPACITY UNAVAILABLE"
+    }
+
+    function updatedLabel(provider) {
+        clockTick
+        var updated = Number(provider.last_updated_ms || 0)
+        if (updated <= 0)
+            return "UPDATE UNKNOWN"
+        var minutes = Math.max(
+            0,
+            Math.floor((Date.now() - updated) / 60000)
+        )
+        if (minutes < 1)
+            return "UPDATED NOW"
+        if (minutes < 60)
+            return "UPDATED " + minutes + "M AGO"
+        if (minutes < 1440)
+            return "UPDATED " + Math.floor(minutes / 60) + "H AGO"
+        return "UPDATED " + Math.floor(minutes / 1440) + "D AGO"
+    }
+
+    function providerStatus(provider) {
+        if (!provider.available) {
+            if (provider.status === "rejected")
+                return "LIMIT REACHED"
+            if (provider.status === "blocked")
+                return "BLOCKED"
+            if (provider.source === "unknown")
+                return "UNTRUSTED"
+            return "NO DATA"
+        }
+        if (provider.stale)
+            return "STALE"
+        if (provider.status === "allowed_warning")
+            return "WARNING"
+        return "LIVE"
+    }
+
+    function providerDetail(provider) {
+        var plan = String(provider.plan || "").trim()
+        if (plan !== "")
+            return plan.toUpperCase()
+        return provider.kind === "local_budget"
+            ? "LOCAL BUDGET"
+            : "PROVIDER QUOTA"
+    }
+
+    function statusColor(provider, accent) {
+        var state = providerStatus(provider)
+        if (state === "LIVE")
+            return accent
+        if (state === "WARNING" || state === "STALE")
+            return "#e8b56d"
+        if (state === "NO DATA")
+            return "#647787"
+        return "#e08a68"
+    }
+
+    Timer {
+        interval: 60000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root.clockTick += 1
+    }
+
+    component UsageLine: Item {
+        property var usageWindow: null
+        property bool providerAvailable: false
+        property color accent: "#6f8aa7"
+        property bool reducedMotion: false
+
+        visible: usageWindow !== null
+        width: parent ? parent.width : 0
+        height: visible ? 18 : 0
+
+        Row {
+            anchors.fill: parent
+            spacing: 8
+
+            Text {
+                width: 72
+                anchors.verticalCenter: parent.verticalCenter
+                text: usageWindow === null
+                    ? ""
+                    : String(usageWindow.label || "USAGE").toUpperCase()
+                textFormat: Text.PlainText
+                color: "#8aa8bd"
+                elide: Text.ElideRight
+                font {
+                    family: "monospace"
+                    pixelSize: 10
+                    weight: Font.DemiBold
+                    letterSpacing: 0.4
+                }
+            }
+
+            Rectangle {
+                width: Math.max(60, parent.width - 72 - 42 - 122 - 24)
+                height: 6
+                anchors.verticalCenter: parent.verticalCenter
+                radius: 3
+                color: "#162333"
+
+                Rectangle {
+                    width: parent.width * (
+                        providerAvailable
+                            ? root.percent(usageWindow) / 100
+                            : 0
+                    )
+                    height: parent.height
+                    radius: parent.radius
+                    color: accent
+
+                    Behavior on width {
+                        NumberAnimation {
+                            duration: reducedMotion ? 0 : 280
+                            easing.type: Easing.OutCubic
+                        }
+                    }
+                }
+            }
+
+            Text {
+                width: 42
+                anchors.verticalCenter: parent.verticalCenter
+                text: providerAvailable
+                    ? root.percent(usageWindow) + "%"
+                    : "—"
+                textFormat: Text.PlainText
+                color: providerAvailable ? accent : "#647787"
+                horizontalAlignment: Text.AlignRight
+                font {
+                    family: "monospace"
+                    pixelSize: 11
+                    weight: Font.Bold
+                }
+            }
+
+            Text {
+                width: 122
+                anchors.verticalCenter: parent.verticalCenter
+                text: root.resetLabel(usageWindow)
+                textFormat: Text.PlainText
+                color: "#617f99"
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignRight
+                font {
+                    family: "monospace"
+                    pixelSize: 9
+                    letterSpacing: 0.3
+                }
+            }
+        }
     }
 
     Row {
@@ -148,14 +327,24 @@ Item {
             Rectangle {
                 required property string modelData
                 readonly property var provider: root.provider(modelData)
-                readonly property var window: root.primaryWindow(provider)
-                readonly property int usagePercent: root.percent(window)
+                readonly property var primaryUsage:
+                    provider.primary === undefined ? null : provider.primary
+                readonly property var secondaryUsage:
+                    provider.secondary === undefined ? null : provider.secondary
+                readonly property int primaryPercent: root.percent(primaryUsage)
+                readonly property int secondaryPercent:
+                    root.percent(secondaryUsage)
+                readonly property string statusLabel:
+                    root.providerStatus(provider)
+                readonly property string activityLabel:
+                    root.activitySummary(provider)
                 readonly property color accent: modelData === "claude"
                     ? "#e89562"
                     : modelData === "codex"
                         ? "#63e6ba"
                         : "#a998ff"
 
+                objectName: "usageCard_" + modelData
                 width: (root.width - 286 - 42) / 3
                 height: parent.height
                 radius: 16
@@ -166,18 +355,21 @@ Item {
                     : "#263847"
 
                 Row {
+                    id: providerHeader
+
                     anchors {
                         left: parent.left
                         right: parent.right
                         top: parent.top
                         leftMargin: 18
                         rightMargin: 18
-                        topMargin: 13
+                        topMargin: 10
                     }
-                    height: 25
+                    height: 22
+                    spacing: 9
 
                     Text {
-                        width: parent.width - percentText.width
+                        width: Math.min(132, implicitWidth)
                         text: String(parent.parent.provider.label || "").toUpperCase()
                         textFormat: Text.PlainText
                         color: "#dceff7"
@@ -191,117 +383,107 @@ Item {
                     }
 
                     Text {
-                        id: percentText
-                        text: parent.parent.provider.available
-                            ? parent.parent.usagePercent + "%"
-                            : "—"
+                        width: Math.max(
+                            60,
+                            parent.width - statusText.width - x - 9
+                        )
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.providerDetail(parent.parent.provider)
                         textFormat: Text.PlainText
-                        color: parent.parent.provider.available
-                            ? parent.parent.accent
-                            : "#647787"
+                        color: "#5f7f9c"
+                        elide: Text.ElideRight
                         font {
                             family: "monospace"
-                            pixelSize: 18
+                            pixelSize: 9
+                            letterSpacing: 0.4
+                        }
+                    }
+
+                    Text {
+                        id: statusText
+
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: parent.parent.statusLabel
+                        textFormat: Text.PlainText
+                        color: root.statusColor(
+                            parent.parent.provider,
+                            parent.parent.accent
+                        )
+                        font {
+                            family: "monospace"
+                            pixelSize: 9
                             weight: Font.Bold
+                            letterSpacing: 0.6
                         }
                     }
                 }
 
-                Rectangle {
+                Column {
                     anchors {
                         left: parent.left
                         right: parent.right
-                        top: parent.top
+                        top: providerHeader.bottom
                         leftMargin: 18
                         rightMargin: 18
-                        topMargin: 43
+                        topMargin: 4
                     }
-                    height: 7
-                    radius: 4
-                    color: "#162333"
+                    spacing: 3
 
-                    Rectangle {
+                    UsageLine {
                         width: parent.width
-                            * (parent.parent.provider.available
-                                ? parent.parent.usagePercent / 100
-                                : 0)
-                        height: parent.height
-                        radius: parent.radius
-                        color: parent.parent.accent
+                        usageWindow: parent.parent.primaryUsage
+                        providerAvailable: parent.parent.provider.available
+                        accent: parent.parent.accent
+                        reducedMotion: root.reducedMotion
+                    }
 
-                        Behavior on width {
-                            NumberAnimation {
-                                duration: root.reducedMotion ? 0 : 280
-                                easing.type: Easing.OutCubic
-                            }
-                        }
+                    UsageLine {
+                        width: parent.width
+                        usageWindow: parent.parent.secondaryUsage
+                        providerAvailable: parent.parent.provider.available
+                        accent: parent.parent.accent
+                        reducedMotion: root.reducedMotion
                     }
                 }
 
                 Row {
+                    id: providerFooter
+
                     anchors {
                         left: parent.left
                         right: parent.right
                         bottom: parent.bottom
                         leftMargin: 18
                         rightMargin: 18
-                        bottomMargin: 11
+                        bottomMargin: 9
                     }
+                    spacing: 10
 
                     Text {
-                        width: parent.width * 0.52
-                        text: {
-                            var provider = parent.parent.provider
-                            var window = parent.parent.window
-                            if (!provider.available) {
-                                if (provider.status === "blocked"
-                                        || provider.status === "rejected")
-                                    return String(provider.status).toUpperCase()
-                                if (provider.source === "unknown")
-                                    return "UNTRUSTED"
-                                return "NO DATA"
-                            }
-                            if (provider.stale)
-                                return "STALE"
-                            if (provider.kind === "local_budget")
-                                return "LOCAL BUDGET"
-                            return String(
-                                window === null ? "QUOTA" : window.label
-                            ).toUpperCase()
-                        }
+                        width: parent.width * 0.58
+                        text: parent.parent.activityLabel
                         textFormat: Text.PlainText
-                        color: !parent.parent.provider.available
-                                && (parent.parent.provider.status === "blocked"
-                                    || parent.parent.provider.status === "rejected"
-                                    || parent.parent.provider.source === "unknown")
-                            ? "#e08a68"
-                            : parent.parent.provider.stale
-                                ? "#d5a25f"
-                                : "#6888a2"
+                        color: "#7898ae"
                         elide: Text.ElideRight
                         font {
                             family: "monospace"
-                            pixelSize: 10
+                            pixelSize: 9
                             weight: Font.DemiBold
-                            letterSpacing: 0.5
+                            letterSpacing: 0.3
                         }
                     }
 
                     Text {
-                        width: parent.width * 0.48
-                        text: parent.parent.provider.kind === "local_budget"
-                            ? String(
-                                parent.parent.provider.model || "LOCAL ACTIVITY"
-                            ).toUpperCase()
-                            : root.resetLabel(parent.parent.window)
+                        width: parent.width - parent.children[0].width - 10
+                        text: root.updatedLabel(parent.parent.provider)
                         textFormat: Text.PlainText
-                        color: "#6888a2"
+                        color: "#54728c"
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         font {
                             family: "monospace"
-                            pixelSize: 10
-                            letterSpacing: 0.4
+                            pixelSize: 9
+                            letterSpacing: 0.3
                         }
                     }
                 }

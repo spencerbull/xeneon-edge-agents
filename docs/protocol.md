@@ -28,8 +28,11 @@ versions must be rejected.
         "available": true,
         "stale": false,
         "source": "rpc",
-        "status": "ok",
-        "primary": {"label": "WEEKLY", "utilization": 0.74}
+        "status": "allowed",
+        "plan": "pro",
+        "primary": {"label": "WEEKLY", "utilization": 0.74},
+        "today_tokens": 53960987620,
+        "tokens_per_hour": 1778512401
       }
     ]
   },
@@ -56,12 +59,14 @@ Voice state is exactly `idle`, `recording`, `processing`, `error`, or
 dictation marker; snapshots never carry transcripts, tooltips, command output,
 or voice errors from stderr.
 
-`usage` exposes only normalized provider capacity. Utilization is a fraction
-from 0 through 1; reset timestamps, plan, and model are optional bounded
-metadata. It never includes credentials, raw counters, cache file contents, or
-provider response bodies. `micro` is a read-only normalized view of the local
-Codex Micro connection and optional device status. It never exposes the Micro
-socket protocol to QML.
+`usage` exposes only normalized provider capacity and coarse aggregate
+activity. Utilization is a fraction from 0 through 1; reset timestamps, plan,
+model, `today_tokens`, and `tokens_per_hour` are optional bounded metadata.
+The aggregate token fields are provider-wide local activity totals, not
+per-request records. Usage never includes credentials, prompts, per-model
+history, cache file contents, or provider response bodies. `micro` is a
+read-only normalized view of the local Codex Micro connection and optional
+device status. It never exposes the Micro socket protocol to QML.
 
 These additive v1 fields are optional for compatibility with older recorded
 fixtures. Clients default voice to unavailable, review-ready and launch-pending

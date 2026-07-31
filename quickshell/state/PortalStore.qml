@@ -400,6 +400,13 @@ QtObject {
         }
     }
 
+    function normalizeAggregateTokens(value) {
+        if (typeof value !== "number" || !isFinite(value)
+                || value < 0 || value > 1000000000000000)
+            return null
+        return Math.floor(value)
+    }
+
     function normalizeUsage(value) {
         var source = value !== null
                 && value !== undefined
@@ -433,6 +440,12 @@ QtObject {
                 "model": safeString(provider.model, "", 80),
                 "primary": normalizeUsageWindow(provider.primary),
                 "secondary": normalizeUsageWindow(provider.secondary),
+                "today_tokens": normalizeAggregateTokens(
+                    provider.today_tokens
+                ),
+                "tokens_per_hour": normalizeAggregateTokens(
+                    provider.tokens_per_hour
+                ),
                 "last_updated_ms": Math.max(
                     0,
                     finiteNumber(provider.last_updated_ms, 0)

@@ -179,6 +179,16 @@
         "model": { "type": "string", "maxLength": 80 },
         "primary": { "$ref": "#/$defs/usageWindow" },
         "secondary": { "$ref": "#/$defs/usageWindow" },
+        "today_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+        },
+        "tokens_per_hour": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000000000
+        },
         "last_updated_ms": { "type": "integer", "minimum": 0 }
       }
     },

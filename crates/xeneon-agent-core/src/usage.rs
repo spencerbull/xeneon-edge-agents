@@ -10,6 +10,7 @@ use crate::model::{AiUsageSnapshot, ProviderUsage, UsageKind, UsageWindow};
 
 const FRESH_FOR: Duration = Duration::from_secs(15 * 60);
 const MAX_CACHE_BYTES: u64 = 64 * 1024;
+const MAX_AGGREGATE_TOKENS: u64 = 1_000_000_000_000_000;
 
 #[derive(Debug, Clone)]
 pub struct UsageCollector {
@@ -72,6 +73,8 @@ impl UsageCollector {
             model: bounded(value.get("_model").and_then(Value::as_str), 80),
             primary: None,
             secondary: None,
+            today_tokens: aggregate_tokens(value.get("_today_tokens")),
+            tokens_per_hour: aggregate_tokens(value.get("_rate_per_hour")),
             last_updated_ms,
         };
 
@@ -88,6 +91,8 @@ impl UsageCollector {
             provider.stale = true;
             provider.primary = None;
             provider.secondary = None;
+            provider.today_tokens = None;
+            provider.tokens_per_hour = None;
         }
         provider
     }
@@ -167,6 +172,14 @@ fn numeric(value: Option<&Value>) -> Option<f64> {
         .filter(|number: &f64| number.is_finite())
 }
 
+fn aggregate_tokens(value: Option<&Value>) -> Option<u64> {
+    let value = numeric(value)?;
+    if !(0.0..=MAX_AGGREGATE_TOKENS as f64).contains(&value) {
+        return None;
+    }
+    Some(value.floor() as u64)
+}
+
 fn bounded(value: Option<&str>, limit: usize) -> Option<String> {
     value
         .map(str::trim)
@@ -221,6 +234,8 @@ fn unavailable_provider(
         model: None,
         primary: None,
         secondary: None,
+        today_tokens: None,
+        tokens_per_hour: None,
         last_updated_ms,
     }
 }
@@ -247,11 +262,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn collector_normalizes_quota_and_local_budget_without_raw_counters() {
+    fn collector_normalizes_capacity_and_bounded_aggregate_activity() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join("claude-usage.json"),
-            r#"{"5h-utilization":"0.25","5h-reset":"1800000000","7d-utilization":"0.5","7d-reset":"1800100000","_source":"oauth","status":"allowed","_today_tokens":999}"#,
+            r#"{"5h-utilization":"0.25","5h-reset":"1800000000","7d-utilization":"0.5","7d-reset":"1800100000","_source":"oauth","status":"allowed","_today_tokens":999,"_rate_per_hour":"125.9"}"#,
         )
         .unwrap();
         fs::write(
@@ -277,8 +292,11 @@ mod tests {
         );
         assert_eq!(snapshot.providers[2].kind, UsageKind::LocalBudget);
         assert_eq!(snapshot.providers[2].model.as_deref(), Some("gpt-test"));
+        assert_eq!(snapshot.providers[0].today_tokens, Some(999));
+        assert_eq!(snapshot.providers[0].tokens_per_hour, Some(125));
         let encoded = serde_json::to_string(&snapshot).unwrap();
-        assert!(!encoded.contains("today_tokens"));
+        assert!(encoded.contains("\"today_tokens\":999"));
+        assert!(encoded.contains("\"tokens_per_hour\":125"));
         assert!(!encoded.contains("_models"));
     }
 
@@ -300,7 +318,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join("claude-usage.json"),
-            r#"{"5h-utilization":"0.25","_source":"oauth","status":"blocked"}"#,
+            r#"{"5h-utilization":"0.25","_source":"oauth","status":"blocked","_today_tokens":123,"_rate_per_hour":45}"#,
         )
         .unwrap();
         fs::write(
@@ -315,10 +333,32 @@ mod tests {
         assert!(!claude.available);
         assert!(claude.stale);
         assert!(claude.primary.is_none());
+        assert_eq!(claude.today_tokens, None);
+        assert_eq!(claude.tokens_per_hour, None);
         let codex = &snapshot.providers[1];
         assert_eq!(codex.source, "unknown");
         assert!(!codex.available);
         assert!(codex.stale);
         assert!(codex.primary.is_none());
+    }
+
+    #[test]
+    fn aggregate_activity_rejects_negative_non_finite_and_oversized_values() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("claude-usage.json"),
+            format!(
+                r#"{{"5h-utilization":"0.25","_source":"oauth","status":"allowed","_today_tokens":-1,"_rate_per_hour":{}}}"#,
+                MAX_AGGREGATE_TOKENS + 1
+            ),
+        )
+        .unwrap();
+
+        let snapshot = UsageCollector::new(temp.path()).sample();
+        let claude = &snapshot.providers[0];
+        assert!(claude.available);
+        assert_eq!(claude.today_tokens, None);
+        assert_eq!(claude.tokens_per_hour, None);
+        assert_eq!(aggregate_tokens(Some(&Value::String("NaN".into()))), None);
     }
 }

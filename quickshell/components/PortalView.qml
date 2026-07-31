@@ -744,7 +744,7 @@ Item {
             rightMargin: 24
             bottomMargin: 16
         }
-        height: 82
+        height: 106
         usage: root.store.usage
         agents: root.store.agents
         sessions: root.store.sessions

@@ -58,9 +58,11 @@ scripts/preview --live --ambient-after 6
 
 The control center shows safe Herdr identity, state duration, repository and
 worktree context, plus the Omarchy AI module's normalized Claude, Codex, and
-OpenCode capacity. Header controls use typed daemon actions to focus or launch
-the fixed ChatGPT Desktop and Claude Desktop entries. The Micro control opens a
-read-only virtual projection of the connected device and current agent slots.
+OpenCode capacity. The AI footer shows both reported usage windows, resets,
+plan/freshness state, and bounded today/hour token activity when available.
+Header controls use typed daemon actions to focus or launch the fixed ChatGPT
+Desktop and Claude Desktop entries. The Micro control opens a read-only virtual
+projection of the connected device and current agent slots.
 The upper-right Motion and Screen controls are shared by the command-center
 and Ambient views. Motion snaps the ambient constellation to fixed positions
 and removes perimeter/trail animation; Screen applies a reversible near-black
