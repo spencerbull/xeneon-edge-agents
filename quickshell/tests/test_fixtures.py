@@ -6,7 +6,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "fixtures"
 
-SNAPSHOT_KEYS = {
+REQUIRED_SNAPSHOT_KEYS = {
     "schema_version",
     "type",
     "sequence",
@@ -17,6 +17,7 @@ SNAPSHOT_KEYS = {
     "agents",
     "health",
 }
+SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {"voice", "usage", "micro"}
 REQUIRED_AGENT_KEYS = {
     "id",
     "display_name",
@@ -28,6 +29,12 @@ REQUIRED_AGENT_KEYS = {
     "observed_for_seconds",
     "source_order",
     "actions",
+}
+AGENT_KEYS = REQUIRED_AGENT_KEYS | {
+    "review_ready",
+    "launch_pending",
+    "repository",
+    "worktree",
 }
 HEALTH_KEYS = {
     "cpu",
@@ -95,7 +102,11 @@ class FixtureContractTests(unittest.TestCase):
                 if envelope["type"] != "snapshot":
                     continue
                 with self.subTest(path=path.name):
-                    self.assertEqual(set(envelope), SNAPSHOT_KEYS)
+                    self.assertLessEqual(
+                        REQUIRED_SNAPSHOT_KEYS,
+                        set(envelope),
+                    )
+                    self.assertLessEqual(set(envelope), SNAPSHOT_KEYS)
                     self.assertIn(
                         envelope["connection"],
                         CONNECTION_STATES,
@@ -103,6 +114,54 @@ class FixtureContractTests(unittest.TestCase):
                     self.assertIsInstance(envelope["sessions"], list)
                     self.assertIsInstance(envelope["agents"], list)
                     self.assertEqual(set(envelope["health"]), HEALTH_KEYS)
+                    if "voice" in envelope:
+                        self.assertIn(
+                            envelope["voice"]["state"],
+                            {
+                                "idle",
+                                "recording",
+                                "processing",
+                                "error",
+                                "unavailable",
+                            },
+                        )
+                        self.assertIsInstance(
+                            envelope["voice"]["owned"],
+                            bool,
+                        )
+                    if "usage" in envelope:
+                        providers = envelope["usage"]["providers"]
+                        self.assertLessEqual(len(providers), 3)
+                        self.assertEqual(
+                            [provider["id"] for provider in providers],
+                            ["claude", "codex", "opencode"][: len(providers)],
+                        )
+                        for provider in providers:
+                            self.assertIn(
+                                provider["kind"],
+                                {"quota", "local_budget"},
+                            )
+                            self.assertIsInstance(provider["available"], bool)
+                            self.assertIsInstance(provider["stale"], bool)
+                            for name in ("primary", "secondary"):
+                                window = provider.get(name)
+                                if window is None:
+                                    continue
+                                self.assertGreaterEqual(
+                                    window["utilization"],
+                                    0,
+                                )
+                                self.assertLessEqual(
+                                    window["utilization"],
+                                    1,
+                                )
+                    if "micro" in envelope:
+                        micro = envelope["micro"]
+                        self.assertIsInstance(micro["connected"], bool)
+                        self.assertIsInstance(micro["charging"], bool)
+                        if "battery" in micro:
+                            self.assertGreaterEqual(micro["battery"], 0)
+                            self.assertLessEqual(micro["battery"], 100)
 
                     for session in envelope["sessions"]:
                         self.assertTrue(session["name"])
@@ -113,8 +172,19 @@ class FixtureContractTests(unittest.TestCase):
                             REQUIRED_AGENT_KEYS,
                             set(agent),
                         )
+                        self.assertLessEqual(set(agent), AGENT_KEYS)
                         self.assertIn(agent["status"], AGENT_STATUSES)
                         self.assertIsInstance(agent["focused"], bool)
+                        if "review_ready" in agent:
+                            self.assertIsInstance(
+                                agent["review_ready"],
+                                bool,
+                            )
+                        if "launch_pending" in agent:
+                            self.assertIsInstance(
+                                agent["launch_pending"],
+                                bool,
+                            )
                         self.assertEqual(
                             set(agent["actions"]),
                             {"open", "zoom", "approve", "interrupt"},
@@ -175,6 +245,8 @@ class FixtureContractTests(unittest.TestCase):
         empty = envelopes(FIXTURES / "empty.ndjson")[0]
         disconnected = envelopes(FIXTURES / "disconnected.ndjson")[0]
         action_envelopes = envelopes(FIXTURES / "action_result.ndjson")
+        voice = envelopes(FIXTURES / "voice.ndjson")[0]
+        home = envelopes(FIXTURES / "home.ndjson")[0]
 
         self.assertEqual(snapshot["type"], "snapshot")
         self.assertEqual(len(snapshot["agents"]), 6)
@@ -184,25 +256,53 @@ class FixtureContractTests(unittest.TestCase):
         self.assertEqual(empty["agents"], [])
         self.assertEqual(empty["connection"], "connected")
         self.assertEqual(disconnected["connection"], "offline")
+        self.assertEqual(voice["voice"]["state"], "recording")
+        self.assertTrue(voice["voice"]["owned"])
+        self.assertEqual(
+            [provider["id"] for provider in home["usage"]["providers"]],
+            ["claude", "codex", "opencode"],
+        )
+        self.assertTrue(home["micro"]["connected"])
+        self.assertTrue(voice["agents"][0]["review_ready"])
+        self.assertEqual(
+            [
+                voice["voice"]["state"],
+                envelopes(FIXTURES / "voice_processing.ndjson")[0]["voice"][
+                    "state"
+                ],
+                envelopes(FIXTURES / "voice_error.ndjson")[0]["voice"]["state"],
+                envelopes(FIXTURES / "voice_idle.ndjson")[0]["voice"]["state"],
+            ],
+            ["recording", "processing", "error", "idle"],
+        )
         self.assertTrue(
             any(item["type"] == "action_result" for item in action_envelopes)
         )
 
     def test_agents_are_attention_ranked_like_the_daemon(self):
-        status_rank = {
-            "blocked": 0,
-            "done": 1,
-            "working": 2,
-            "idle": 3,
-            "unknown": 4,
-        }
+        def attention_rank(agent):
+            status = agent["status"]
+            review_ready = agent.get(
+                "review_ready",
+                status == "done",
+            )
+            if status == "blocked":
+                return 0
+            if review_ready and status in {"done", "idle"}:
+                return 1
+            if status == "working":
+                return 2
+            if status in {"done", "idle"}:
+                return 3
+            return 4
+
         for path in sorted(FIXTURES.glob("*.ndjson")):
             for envelope in envelopes(path):
                 if envelope["type"] != "snapshot":
                     continue
                 actual = [
                     (
-                        status_rank[agent["status"]],
+                        attention_rank(agent),
                         agent["source_order"],
                         agent["id"],
                     )

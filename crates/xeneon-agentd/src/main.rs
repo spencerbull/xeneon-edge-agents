@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use xeneon_agent_core::{Config, DaemonRuntime, socket_path};
+use xeneon_agent_core::{Config, DaemonRuntime, cleanup_owned_dictation, socket_path};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "XENEON EDGE Herdr state and action daemon")]
@@ -15,6 +15,10 @@ struct Args {
     /// Override the user-only daemon socket.
     #[arg(long, env = "XENEON_AGENT_SOCKET")]
     socket: Option<PathBuf>,
+
+    /// Clean up a portal-owned Voxtype recording and exit.
+    #[arg(long, hide = true)]
+    cleanup_dictation: bool,
 }
 
 #[tokio::main]
@@ -27,6 +31,9 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     let config = Config::load(args.config.as_deref())?;
+    if args.cleanup_dictation {
+        return cleanup_owned_dictation(&config).await;
+    }
     let path = socket_path(args.socket.as_deref())?;
     let (runtime, invalidations) = DaemonRuntime::new(config)?;
     runtime.run(&path, invalidations).await

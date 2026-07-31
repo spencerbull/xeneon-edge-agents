@@ -1,6 +1,10 @@
 herdr_bin = "herdr"
+voxtype_bin = "voxtype"
 herdr_refresh_ms = 5000
 health_refresh_ms = 1000
+voice_refresh_ms = 250
+usage_refresh_ms = 30000
+micro_refresh_ms = 5000
 
 [screen]
 connector = "@OUTPUT_CONNECTOR@"

@@ -23,6 +23,23 @@ QtObject {
     property var sessions: []
     property var agents: []
     property var health: ({})
+    property var voice: ({
+        "available": false,
+        "state": "unavailable",
+        "owned": false
+    })
+    property var usage: ({
+        "providers": []
+    })
+    property var micro: ({
+        "connected": false,
+        "firmware": "",
+        "battery": -1,
+        "charging": false,
+        "layer": -1,
+        "profile": -1,
+        "last_updated_ms": 0
+    })
     property var lastActionResult: null
     property var lastNotice: null
     property string activitySignature: ""
@@ -57,6 +74,14 @@ QtObject {
         "offline"
     ]
 
+    readonly property var allowedVoiceStates: [
+        "unavailable",
+        "idle",
+        "recording",
+        "processing",
+        "error"
+    ]
+
     function reset() {
         sequence = -1
         daemonEpoch = ""
@@ -73,6 +98,21 @@ QtObject {
         sessions = []
         agents = []
         health = {}
+        voice = {
+            "available": false,
+            "state": "unavailable",
+            "owned": false
+        }
+        usage = {"providers": []}
+        micro = {
+            "connected": false,
+            "firmware": "",
+            "battery": -1,
+            "charging": false,
+            "layer": -1,
+            "profile": -1,
+            "last_updated_ms": 0
+        }
         lastActionResult = null
         lastNotice = null
         activitySignature = ""
@@ -115,16 +155,16 @@ QtObject {
         }
     }
 
-    function statePriority(state) {
+    function statePriority(state, reviewReady) {
         switch (state) {
         case "blocked":
             return 0
         case "done":
-            return 1
+            return reviewReady === true ? 1 : 3
         case "working":
             return 2
         case "idle":
-            return 3
+            return reviewReady === true ? 1 : 3
         default:
             return 4
         }
@@ -163,6 +203,9 @@ QtObject {
             "worktree": safeString(value.worktree, "", 128),
             "session": safeString(value.session, "", 64),
             "focused": value.focused === true,
+            "launch_pending": value.launch_pending === true,
+            "review_ready": value.review_ready === true
+                || (value.review_ready === undefined && status === "done"),
             "observed_for_seconds": Math.max(
                 0,
                 Math.floor(finiteNumber(value.observed_for_seconds, 0))
@@ -195,8 +238,10 @@ QtObject {
         }
 
         normalized.sort(function(left, right) {
-            var priorityDifference = statePriority(left.status)
-                    - statePriority(right.status)
+            var priorityDifference = statePriority(
+                left.status,
+                left.review_ready
+            ) - statePriority(right.status, right.review_ready)
             if (priorityDifference !== 0)
                 return priorityDifference
             if (left.source_order !== right.source_order)
@@ -317,11 +362,126 @@ QtObject {
         return normalized
     }
 
-    function semanticSignature(connectionView, agentViews) {
-        var fields = [connectionView.state]
+    function normalizeVoice(value) {
+        var source = value !== null
+                && value !== undefined
+                && typeof value === "object"
+            ? value
+            : {}
+        var state = safeString(source.state, "unavailable", 24)
+                .toLowerCase()
+        if (allowedVoiceStates.indexOf(state) === -1)
+            state = "error"
+        var available = state !== "unavailable"
+            && source.available !== false
+        if (!available)
+            state = "unavailable"
+        return {
+            "available": available,
+            "state": state,
+            "owned": available && source.owned === true
+        }
+    }
+
+    function normalizeUsageWindow(value) {
+        if (value === null || value === undefined
+                || typeof value !== "object")
+            return null
+        var utilization = finiteNumber(value.utilization, -1)
+        if (utilization < 0)
+            return null
+        return {
+            "label": safeString(value.label, "Usage", 24),
+            "utilization": Math.max(0, Math.min(1, utilization)),
+            "reset_at_ms": Math.max(
+                0,
+                finiteNumber(value.reset_at_ms, 0)
+            )
+        }
+    }
+
+    function normalizeUsage(value) {
+        var source = value !== null
+                && value !== undefined
+                && typeof value === "object"
+            ? value
+            : {}
+        var providers = Array.isArray(source.providers)
+            ? source.providers
+            : []
+        var normalized = []
+        var allowedIds = ["claude", "codex", "opencode"]
+        for (var index = 0; index < providers.length; index += 1) {
+            var provider = providers[index]
+            if (provider === null || provider === undefined
+                    || typeof provider !== "object")
+                continue
+            var id = safeString(provider.id, "", 24).toLowerCase()
+            if (allowedIds.indexOf(id) === -1)
+                continue
+            normalized.push({
+                "id": id,
+                "label": safeString(provider.label, id, 24),
+                "kind": provider.kind === "local_budget"
+                    ? "local_budget"
+                    : "quota",
+                "available": provider.available === true,
+                "stale": provider.stale === true,
+                "source": safeString(provider.source, "unknown", 24),
+                "status": safeString(provider.status, "unknown", 24),
+                "plan": safeString(provider.plan, "", 32),
+                "model": safeString(provider.model, "", 80),
+                "primary": normalizeUsageWindow(provider.primary),
+                "secondary": normalizeUsageWindow(provider.secondary),
+                "last_updated_ms": Math.max(
+                    0,
+                    finiteNumber(provider.last_updated_ms, 0)
+                )
+            })
+        }
+        normalized.sort(function(left, right) {
+            return allowedIds.indexOf(left.id) - allowedIds.indexOf(right.id)
+        })
+        return {"providers": normalized}
+    }
+
+    function normalizeMicro(value) {
+        var source = value !== null
+                && value !== undefined
+                && typeof value === "object"
+            ? value
+            : {}
+        var battery = Math.floor(finiteNumber(source.battery, -1))
+        return {
+            "connected": source.connected === true,
+            "firmware": safeString(source.firmware, "", 32),
+            "battery": battery >= 0 && battery <= 100 ? battery : -1,
+            "charging": source.charging === true,
+            "layer": Math.max(
+                -1,
+                Math.floor(finiteNumber(source.layer, -1))
+            ),
+            "profile": Math.max(
+                -1,
+                Math.floor(finiteNumber(source.profile, -1))
+            ),
+            "last_updated_ms": Math.max(
+                0,
+                finiteNumber(source.last_updated_ms, 0)
+            )
+        }
+    }
+
+    function semanticSignature(connectionView, agentViews, voiceView) {
+        var fields = [
+            connectionView.state,
+            voiceView.state,
+            voiceView.owned === true
+        ]
         for (var index = 0; index < agentViews.length; index += 1) {
             fields.push(agentViews[index].id)
             fields.push(agentViews[index].status)
+            fields.push(agentViews[index].review_ready === true)
         }
         return JSON.stringify(fields)
     }
@@ -425,8 +585,22 @@ QtObject {
                 if (nextGeneratedAtMs < generatedAtMs)
                     return false
                 if (nextGeneratedAtMs > generatedAtMs) {
+                    var previousSignature = activitySignature
+                    var nextVoice = normalizeVoice(snapshot.voice)
+                    var nextUsage = normalizeUsage(snapshot.usage)
+                    var nextMicro = normalizeMicro(snapshot.micro)
                     generatedAtMs = nextGeneratedAtMs
                     health = normalizeHealth(snapshot.health)
+                    voice = nextVoice
+                    usage = nextUsage
+                    micro = nextMicro
+                    activitySignature = semanticSignature(
+                        connection,
+                        agents,
+                        nextVoice
+                    )
+                    if (activitySignature !== previousSignature)
+                        semanticActivityChanged(activitySignature)
                 } else if (!freshSnapshotRequired) {
                     return false
                 }
@@ -441,7 +615,14 @@ QtObject {
         var previousSignature = activitySignature
         var nextConnection = normalizeConnection(snapshot.connection)
         var nextAgents = normalizeAgents(snapshot.agents)
-        var nextSignature = semanticSignature(nextConnection, nextAgents)
+        var nextVoice = normalizeVoice(snapshot.voice)
+        var nextUsage = normalizeUsage(snapshot.usage)
+        var nextMicro = normalizeMicro(snapshot.micro)
+        var nextSignature = semanticSignature(
+            nextConnection,
+            nextAgents,
+            nextVoice
+        )
         daemonEpoch = nextEpoch
         sequence = nextSequence
         generatedAtMs = nextGeneratedAtMs
@@ -449,6 +630,9 @@ QtObject {
         sessions = normalizeSessions(snapshot.sessions)
         agents = nextAgents
         health = normalizeHealth(snapshot.health)
+        voice = nextVoice
+        usage = nextUsage
+        micro = nextMicro
         activitySignature = nextSignature
         hasSnapshot = true
         freshSnapshotRequired = false

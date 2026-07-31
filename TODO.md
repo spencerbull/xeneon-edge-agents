@@ -4,8 +4,25 @@
 
 Implement a simulator-first, touch-oriented XENEON EDGE portal for all running
 local Herdr sessions, with host health, fail-closed output placement, and
-guarded quick actions. Complete every software gate now and leave physical
-hardware commissioning explicitly pending while the device is unavailable.
+guarded quick actions. Complete every software gate and commission the
+connected physical display without weakening exact output or touch identity.
+
+The current UX checkpoint corrects Herdr agent naming and brings the existing
+Codex Micro state language to the portal: shared state colors, observable
+Omarchy voice states, and a dynamic ambient perimeter treatment. This work is
+isolated from the package-review checkout and must not weaken the production
+output or action boundaries.
+
+The current visual checkpoint uses `herdr-xeneon-edge-concept.mp4` as a motion
+reference: an opaque dashboard crossfade, center-out radar reveal, quiet
+constellation hold, and bounded state-colored orbital trails. The exact
+storyboard and product boundaries are recorded in `docs/concept-motion.md`.
+
+The active home-command checkpoint replaces the host-health footer with
+agent-command information: adaptive Herdr cards, normalized AI provider
+capacity, fixed native desktop launch/focus actions, and a read-only Codex
+Micro projection. QML remains presentation-only; cache parsing, socket reads,
+and desktop actions stay in `xeneon-agentd`.
 
 ## Done criteria
 
@@ -18,7 +35,35 @@ hardware commissioning explicitly pending while the device is unavailable.
 - [x] Installer/check/uninstall flows are reversible and preserve Omarchy and
       user-owned configuration.
 - [x] Automated checks and completed independent reviews pass.
-- [ ] Physical EDGE display/touch/focus/privacy/power checks pass.
+- [x] Portal cards use the same public agent names as Herdr's Agents section.
+- [x] Agent colors, voice states, and ambient perimeter behavior match the
+      reviewed Codex Micro state contract with reduced-motion support.
+- [x] Ambient transition and orbital motion match the concept timing and
+      hierarchy without changing portal action authority.
+- [x] Revised live laptop preview is visually compared with rectified concept
+      frames at the same 1280x360 viewport.
+- [x] One native perimeter halo uses two opposing clockwise runners while an
+      agent is working or blocked, and disappears for idle or empty rosters.
+- [x] The perimeter runners render as a Gaussian-style GPU bloom with bounded
+      particle motes instead of stacked moving bars.
+- [x] The control-center header uses the uppercase live hostname, removes the
+      redundant connection pill, and replaces the AI Capacity label tile with
+      authoritative Herdr agent/session/focus counts.
+- [x] Control-center cards expose only authoritative Herdr lifecycle,
+      repository/worktree, focus, and state-age metadata.
+- [x] Each ordinary agent card is one full-surface Herdr focus target; the
+      redundant Open and Zoom controls are removed while capability-gated hold
+      actions remain isolated when present.
+- [x] The footer shows normalized Claude, Codex, and OpenCode usage with
+      freshness and quota/local-budget semantics.
+- [x] ChatGPT and Claude buttons focus or launch only their fixed native
+      desktop IDs through daemon-owned actions.
+- [x] A right-side read-only Micro drawer shows fresh device status, projected
+      agent slots, and the shared voice/aggregate state language.
+- [x] Focused Rust/QML tests, live laptop interaction, visual QA, and an
+      independent review pass complete for the home-command checkpoint.
+- [ ] Physical EDGE display/touch/focus/privacy/power checks pass (display,
+      exact touch mapping, Ambient wake, and card focus are now confirmed).
 
 ## Streams
 
@@ -27,7 +72,10 @@ hardware commissioning explicitly pending while the device is unavailable.
 | Foundation and Rust adapter | `main` | Rust workspace, schemas, fixtures | Complete through `c32b5cd` |
 | Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Complete locally at `8298f46`; not installed or pushed |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
-| Omarchy integration | `main` | `config/`, `scripts/`, services, install tests | Complete at `995d123`; simulator installed |
+| Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
+| Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
+| Agent-command home redesign | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized safe metadata, usage/Micro collectors, fixed app actions, control-center QML | Software complete, live-previewed, and independently reviewed |
+| Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
 ## Allowed actions
 
@@ -53,35 +101,105 @@ hardware commissioning explicitly pending while the device is unavailable.
       Windows-bin clippy.
 - [x] QML gate: `qmllint`, 21 Python contract/fixture tests, 37 Qt tests,
       exact 1280x360 mapped preview, and inspected 1280x360 offscreen render.
-- [x] Installer gate: 24 temporary-XDG scenarios plus installed-unit
+- [x] Installer gate: 25 temporary-XDG scenarios plus installed-unit
       `systemd-analyze verify`.
 - [x] Independent Rust/API and PTY concurrency review.
 - [x] Independent QML/UX review.
 - [x] Independent packaging/safety review with no remaining high/medium
       findings.
+- [x] Naming/voice/ring focused Rust and QML tests: 43 core plus 1 CLI, strict
+      clippy/fmt, 22 Python contracts/fixtures, and 51 Qt tests.
+- [x] Live laptop preview using real Herdr agents and observable voice-state
+      transitions, without installing or activating production display config.
+- [x] Independent review of the naming/privacy boundary, voice-state
+      ownership, animation lifecycle, and reduced-motion behavior.
+- [x] Concept-motion QML gate: 22 Python contract/fixture tests and 65 Qt tests,
+      with `qmllint`, reduced-motion, bounded trails, reverse-transition,
+      accessibility-shield, and live-state coverage.
+- [x] Visual QA against four perspective-rectified concept states at 1280x360;
+      post-fix result is recorded as passed in `design-qa.md`.
+- [x] Independent concept-motion re-review approved after phase-wrap and
+      fade-shield lifecycle fixes; no actionable findings remain.
+- [x] Independent reverse-transition re-review approved after forward-coast,
+      full-duration staging, bounded trail-cost, and accessibility action
+      shielding fixes; no P0, P1, or P2 findings remain.
 - [x] Integrated local simulator smoke: one Herdr 0.7.5/protocol-17 session,
       two active Codex agents, versioned snapshot, and expected open/zoom-only
       actions from the unchanged stable Herdr.
-- [ ] Physical hardware gate (blocked: XENEON EDGE unavailable).
+- [x] Agent-command home gates: 52 core plus 1 CLI test, strict fmt/clippy,
+      23 Python contracts/fixtures, 72 Qt tests with `qmllint`, schema parse,
+      shell syntax, and the isolated installer suite.
+- [x] Agent-command home live 1280x360 visual QA used real Herdr names, live
+      provider capacity, verified Micro status, a real ChatGPT focus result,
+      and a real Claude launch plus mapped-client focus result.
+- [x] Perimeter halo live QA captured the two runners moving clockwise through
+      rounded corners on command-center and ambient views; the native Shape
+      implementation remained responsive after the Canvas prototype was
+      rejected for excessive paint cost.
+- [x] Perimeter bloom live QA captured two frames in both command-center and
+      ambient views: the runners remained opposing and clockwise, the blur
+      stayed soft at corners, particle trails remained bounded, and the mapped
+      preview stayed responsive.
+- [x] Independent QML re-review caught and verified the production hostname
+      pass-through; the final focused review found no remaining P0/P1/P2
+      issues.
+- [x] Card-focus QA verified the full-size target contract, the fixed
+      `agent.focus` action against the live preview daemon, and the resulting
+      authoritative focused-agent update for `seform-codex`.
+- [x] Physical EDGE display and touch QA identified `DP-2` / serial
+      `066626215698` / EDID SHA-256
+      `311920e1e0982803ea7ec8aee0a1688630095944e025ece9bc741ebb8ac70dc5`,
+      enabled native 2560x720 at 2x scale, mapped only
+      `wch.cn-touchscreen-1` (`0003:27c0:0859`, uniq
+      `9LQ0172005164`), captured a real touch sequence, woke Ambient, tapped
+      `herdr-xeneon`, and observed Herdr report that exact agent focused.
+- [x] Production activation verified both user services active with zero
+      restarts, a mode-`0600` daemon socket inside a mode-`0700`
+      systemd-owned runtime directory, a connected Herdr protocol-17 snapshot
+      with five real agents, live provider/Micro telemetry, and one
+      `xeneon-edge-agent-portal` layer surface on `DP-2` only.
+- [x] Physical runtime fixes were independently reviewed before reactivation:
+      the daemon now uses `RuntimeDirectory=`, Quickshell receives narrowly
+      writable shared runtime paths, Qt's unavailable Wayland EDID serial is
+      tolerated only after the installer verifies the configured serial
+      through Hyprland, and the unique connector/model match remains
+      fail-closed.
+- [x] Agent-command home independent Rust/QML review resolved launch
+      coalescing, collector non-blocking behavior, verified Micro identity, and
+      fail-closed usage; final re-review found no remaining P0/P1/P2 issues.
+- [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
+      guarded-hold behavior, and DDC restore remain).
 
 ## Current local state
 
-- The implementation is committed locally, with packaging at `995d123`; no
-  branch was pushed.
-- The simulator-safe user install contains 23 hash-verified managed files.
-- `xeneon-agentd.service` and `xeneon-edge-portal.service` are disabled and
-  inactive.
-- `hyprland.lua` remains byte-identical to its pre-install hash, with no XENEON
-  require or module.
+- The base implementation is committed locally through packaging at
+  `995d123`; the current physical-commissioning and UX diff remains
+  uncommitted and no branch was pushed.
+- The naming/voice/ring UX is an uncommitted, reviewed diff in the isolated
+  `agent/portal-voice-ring` worktree; it is installed in user-owned XDG paths
+  on this host and is not pushed.
+- The final live preview showed the current Herdr public labels
+  `seform-codex`, `wifi7`, `herdr-xeneon`, and `herdr-xeneon-design`; prior
+  voice validation observed recording/idle ownership transitions,
+  automatically cancelled a recording when its bridge client disconnected,
+  and restored the prior ChatGPT window before laptop voice actions.
+- `xeneon-agentd.service` and `xeneon-edge-portal.service` are enabled,
+  active, and running without restarts after the runtime sandbox fix.
+- `hyprland.lua` contains the installer-managed XENEON require, and the
+  generated module maps only `wch.cn-touchscreen-1` to `DP-2`.
+- The persisted home layout places the 1280x360 logical EDGE at `560,1350`,
+  centered below the 2400x1350 logical external display, with the laptop
+  immediately to its right at `1840,1350`. The external display is running at
+  120 Hz instead of 240 Hz so the third display fits the available link
+  bandwidth.
 - The stable Herdr installation remains unchanged. Guarded interruption exists
   only on the local Herdr branch; approval and Windows guarded actions remain
   unavailable.
 
 ## Open checkpoints
 
-- Capture the real EDID/serial, connector, USB IDs, libinput name, and touch
-  coordinates when hardware arrives.
-- Verify Hyprland's focused-monitor behavior under a physical finger.
+- Capture calibrated corner coordinates and guarded-hold cancellation.
+- Verify hotplug, DPMS, suspend/resume, and privacy behavior.
 - Probe DDC/CI read-only and expose brightness only after exact restoration
   succeeds.
 - Before proposing the Herdr branch upstream, satisfy its contribution gate

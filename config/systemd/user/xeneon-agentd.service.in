@@ -9,9 +9,14 @@ Type=simple
 Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
 Environment="XDG_STATE_HOME=@STATE_HOME@"
 Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
+ExecStartPre="@BIN_HOME@/xeneon-agentd" --config "@CONFIG_HOME@/xeneon-edge-agents/config.toml" --cleanup-dictation
 ExecStart="@BIN_HOME@/xeneon-agentd" --config "@CONFIG_HOME@/xeneon-edge-agents/config.toml"
+ExecStopPost=-"@BIN_HOME@/xeneon-agentd" --config "@CONFIG_HOME@/xeneon-edge-agents/config.toml" --cleanup-dictation
 Restart=on-failure
 RestartSec=2s
+UMask=0077
+RuntimeDirectory=xeneon-edge-agents
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

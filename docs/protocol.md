@@ -18,11 +18,55 @@ versions must be rejected.
   "connection": "connected",
   "sessions": [],
   "agents": [],
+  "voice": {"state": "unavailable", "owned": false},
+  "usage": {
+    "providers": [
+      {
+        "id": "codex",
+        "label": "CODEX",
+        "kind": "quota",
+        "available": true,
+        "stale": false,
+        "source": "rpc",
+        "status": "ok",
+        "primary": {"label": "WEEKLY", "utilization": 0.74}
+      }
+    ]
+  },
+  "micro": {"connected": true, "battery": 45, "charging": false},
   "health": {}
 }
 ```
 
 Agent statuses are exactly `blocked`, `done`, `working`, `idle`, or `unknown`.
+`review_ready` is a separate attention latch: explicit `done` and
+`working`→`idle` set it, authoritative `blocked`, `working`, or `unknown`
+clear it, and `idle` otherwise preserves it. A new Herdr focus transition to
+that agent or a successful portal `open` acknowledges it.
+
+Agent `display_name` comes from the matching nonblank Herdr tab label, then the
+safe `display_agent`, agent `name`, and canonical agent identifier fallbacks.
+Terminal titles and prompt-derived content are never display-name sources.
+Optional `repository` and `worktree` values are sanitized checkout identity,
+not terminal content. `launch_pending` means Herdr has observed a launch request
+without yet observing a live agent; it is not treated as an agent state.
+
+Voice state is exactly `idle`, `recording`, `processing`, `error`, or
+`unavailable`. `owned` says only whether this daemon instance owns the private
+dictation marker; snapshots never carry transcripts, tooltips, command output,
+or voice errors from stderr.
+
+`usage` exposes only normalized provider capacity. Utilization is a fraction
+from 0 through 1; reset timestamps, plan, and model are optional bounded
+metadata. It never includes credentials, raw counters, cache file contents, or
+provider response bodies. `micro` is a read-only normalized view of the local
+Codex Micro connection and optional device status. It never exposes the Micro
+socket protocol to QML.
+
+These additive v1 fields are optional for compatibility with older recorded
+fixtures. Clients default voice to unavailable, review-ready and launch-pending
+to false (except a legacy raw `done` agent), usage to an empty provider list,
+and Micro to disconnected.
 Connection and action failures are separate fields, not invented agent states.
 Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
@@ -42,7 +86,8 @@ never encoded as a false zero.
 
 Stable failure codes include `invalid_command`, `stale_snapshot`,
 `capability_expired`, `agent_state_changed`, `unsupported_protocol`,
-`session_disconnected`, `target_unavailable`, and `command_error`.
+`session_disconnected`, `target_unavailable`, `voice_unavailable`,
+`voice_busy`, `voice_not_owned`, and `command_error`.
 
 ## Client commands
 
@@ -65,6 +110,25 @@ The only actions are:
   current snapshot. The daemon forwards only that opaque ID.
 - `restore_focus`: takes no agent or capability and restores a previously
   observed non-EDGE window if it still exists.
+- `voice_start`: takes no agent or capability, requires Voxtype to report
+  `idle`, claims the daemon's private ownership marker, and starts typed
+  dictation without automatic submission.
+- `voice_stop`: takes no agent or capability and stops only a recording owned
+  by this daemon instance.
+- `voice_cancel`: takes no agent or capability and discards only a recording
+  owned by this daemon instance.
+- `chatgpt_desktop`: takes no agent or capability and focuses the single exact
+  ChatGPT Desktop compositor client, or launches its fixed desktop entry when
+  none exists.
+- `claude_desktop`: takes no agent or capability and applies the same
+  focus-or-launch policy to the fixed Claude Desktop identity.
 
 There is no method, key, text, shell-command, prompt, close, or server-control
-passthrough.
+passthrough. Desktop actions do not accept a desktop ID, executable, title,
+class, or argument from QML, and ambiguous compositor matches fail closed.
+Voice actions are single-attempt operations and return only
+bounded static result messages. Host commands have a ten-second ceiling; a
+failed or timed-out start may issue one distinct cancel cleanup attempt but is
+never retried. Their `sequence` field is carried for one
+command shape but is not used as a stale gate: a press/release hold may span
+unrelated snapshots, and ownership plus live Voxtype state are authoritative.

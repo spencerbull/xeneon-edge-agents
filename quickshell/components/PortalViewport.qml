@@ -8,6 +8,9 @@ Item {
     required property var activity
     property bool reducedMotion: false
     property bool previewMode: false
+    property bool restoreVoiceFocus: false
+    property bool previewMicroOpen: false
+    property string hostName: "LOCAL"
 
     readonly property real designWidth: 2560
     readonly property real designHeight: 720
@@ -40,6 +43,9 @@ Item {
             activity: root.activity
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
+            restoreVoiceFocus: root.restoreVoiceFocus
+            previewMicroOpen: root.previewMicroOpen
+            hostName: root.hostName
         }
     }
 }

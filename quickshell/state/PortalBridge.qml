@@ -79,7 +79,7 @@ QtObject {
     function sendBuilt(action, agentId, capabilityId, pinnedSequence) {
         if (store.freshSnapshotRequired) {
             commandRejected("Waiting for a fresh snapshot")
-            return false
+            return ""
         }
 
         var command = commandBuilder.build(
@@ -90,24 +90,24 @@ QtObject {
         )
         if (command === null) {
             commandRejected(commandBuilder.lastError)
-            return false
+            return ""
         }
 
         if (previewMode) {
             store.trackCommand(command)
             commandEmitted(command)
-            return true
+            return command.request_id
         }
 
         if (!bridgeProcess.running) {
             commandRejected("Bridge is disconnected")
-            return false
+            return ""
         }
 
         store.trackCommand(command)
         bridgeProcess.write(JSON.stringify(command) + "\n")
         commandEmitted(command)
-        return true
+        return command.request_id
     }
 
     function openAgent(agentId) {
@@ -141,5 +141,25 @@ QtObject {
             ? store.sequence
             : pinnedSequence
         return sendBuilt("restore_focus", "", "", sequence)
+    }
+
+    function openChatGptDesktop() {
+        return sendBuilt("chatgpt_desktop", "", "", store.sequence)
+    }
+
+    function openClaudeDesktop() {
+        return sendBuilt("claude_desktop", "", "", store.sequence)
+    }
+
+    function startVoice() {
+        return sendBuilt("voice_start", "", "", store.sequence)
+    }
+
+    function stopVoice() {
+        return sendBuilt("voice_stop", "", "", store.sequence)
+    }
+
+    function cancelVoice() {
+        return sendBuilt("voice_cancel", "", "", store.sequence)
     }
 }

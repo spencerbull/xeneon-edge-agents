@@ -166,10 +166,7 @@ async fn fixture_action_result(line: &str, stdout: &mut io::Stdout) -> Result<()
         request_id,
         ok: true,
         code: "fixture".into(),
-        message: format!(
-            "fixture accepted {}",
-            command["action"].as_str().unwrap_or("unknown")
-        ),
+        message: "fixture action accepted".into(),
     };
     let message = ServerMessage::ActionResult { result };
     stdout

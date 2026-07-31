@@ -84,6 +84,8 @@ struct HerdrSnapshot {
     #[serde(default)]
     workspaces: Vec<HerdrWorkspace>,
     #[serde(default)]
+    tabs: Vec<HerdrTab>,
+    #[serde(default)]
     agents: Vec<HerdrAgent>,
 }
 
@@ -91,6 +93,23 @@ struct HerdrSnapshot {
 struct HerdrWorkspace {
     workspace_id: String,
     number: u32,
+    label: String,
+    #[serde(default)]
+    worktree: Option<HerdrWorkspaceWorktree>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HerdrWorkspaceWorktree {
+    repo_name: String,
+    checkout_path: PathBuf,
+    #[serde(default)]
+    is_linked_worktree: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct HerdrTab {
+    tab_id: String,
+    #[serde(default)]
     label: String,
 }
 
@@ -100,11 +119,9 @@ struct HerdrAgent {
     #[serde(default)]
     agent: Option<String>,
     #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
     display_agent: Option<String>,
     #[serde(default)]
-    terminal_title_stripped: Option<String>,
+    name: Option<String>,
     #[serde(default)]
     agent_status: AgentStatus,
     workspace_id: String,
@@ -113,6 +130,8 @@ struct HerdrAgent {
     pane_id: String,
     #[serde(default)]
     focused: bool,
+    #[serde(default)]
+    launch_pending: bool,
     #[serde(default)]
     state_change_seq: u64,
     #[serde(default)]
@@ -177,6 +196,13 @@ impl HerdrClient {
             .into_iter()
             .map(|workspace| (workspace.workspace_id.clone(), workspace))
             .collect();
+        let tabs: HashMap<_, _> = response
+            .result
+            .snapshot
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.tab_id, tab.label))
+            .collect();
         let mut targets = HashMap::new();
         let mut pane_ids = Vec::new();
         let mut agents = Vec::new();
@@ -188,17 +214,20 @@ impl HerdrClient {
                 || raw.workspace_id.clone(),
                 |workspace| format!("{} · {}", workspace.number, workspace.label),
             );
-            let agent_name = raw.agent.clone().unwrap_or_else(|| "agent".into());
-            let display_name = raw
-                .display_agent
-                .clone()
-                .or(raw.title.clone())
-                .or(raw.terminal_title_stripped.clone())
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| agent_name.clone());
+            let agent_name = nonblank(raw.agent.as_deref()).unwrap_or("agent").to_owned();
+            let display_name = display_name(&raw, &tabs, &agent_name);
             let cwd = raw.foreground_cwd.as_ref().or(raw.cwd.as_ref());
-            let repository = cwd
-                .and_then(|path| path.file_name())
+            let repository = workspace
+                .and_then(|workspace| workspace.worktree.as_ref())
+                .map(|worktree| worktree.repo_name.clone())
+                .or_else(|| {
+                    cwd.and_then(|path| path.file_name())
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
+            let worktree = workspace
+                .and_then(|workspace| workspace.worktree.as_ref())
+                .filter(|worktree| worktree.is_linked_worktree)
+                .and_then(|worktree| worktree.checkout_path.file_name())
                 .map(|name| name.to_string_lossy().into_owned());
             let actions = actions_from_extra(&raw.extra, raw.revision);
 
@@ -219,13 +248,11 @@ impl HerdrClient {
                 display_name,
                 agent: agent_name,
                 status: raw.agent_status,
+                review_ready: false,
+                launch_pending: raw.launch_pending,
                 workspace: workspace_label,
                 repository,
-                worktree: raw
-                    .extra
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
+                worktree,
                 session: descriptor.name.clone(),
                 focused: raw.focused,
                 observed_for_seconds: 0,
@@ -236,8 +263,6 @@ impl HerdrClient {
                     ..actions
                 },
             });
-
-            let _ = &raw.tab_id;
         }
 
         Ok(SessionObservation {
@@ -272,7 +297,12 @@ impl HerdrClient {
                 let capability_id = capability_id.ok_or_else(|| anyhow!("missing capability"))?;
                 json!({"id": request_id(), "method": "agent.perform_action", "params": {"capability_id": capability_id}})
             }
-            ActionKind::RestoreFocus => bail!("restore focus is a desktop action"),
+            ActionKind::RestoreFocus | ActionKind::ChatgptDesktop | ActionKind::ClaudeDesktop => {
+                bail!("action is owned by the desktop adapter")
+            }
+            ActionKind::VoiceStart | ActionKind::VoiceStop | ActionKind::VoiceCancel => {
+                bail!("voice action is not a Herdr action")
+            }
         };
         let response: Value = request(&target.socket_path, payload).await?;
         if let Some(error) = response.get("error") {
@@ -300,6 +330,19 @@ impl HerdrClient {
         });
         (handle, ready_rx)
     }
+}
+
+fn display_name(raw: &HerdrAgent, tabs: &HashMap<String, String>, agent_name: &str) -> String {
+    tabs.get(&raw.tab_id)
+        .and_then(|label| nonblank(Some(label)))
+        .or_else(|| nonblank(raw.display_agent.as_deref()))
+        .or_else(|| nonblank(raw.name.as_deref()))
+        .unwrap_or(agent_name)
+        .to_owned()
+}
+
+fn nonblank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 fn actions_from_extra(extra: &HashMap<String, Value>, revision: u64) -> AgentActions {
@@ -537,6 +580,73 @@ mod tests {
                 value.expected_revision
             )),
             Some(("interrupt-1", 101, 8))
+        );
+    }
+
+    #[test]
+    fn tab_label_is_deserialized_and_wins_card_identity() {
+        let response: SnapshotResponse = serde_json::from_value(json!({
+            "result": {
+                "snapshot": {
+                    "tabs": [{"tab_id": "w1:t2", "label": "  review portal  "}],
+                    "agents": [{
+                        "terminal_id": "term",
+                        "agent": "codex",
+                        "name": "agent name",
+                        "display_agent": "display agent",
+                        "title": "private prompt title",
+                        "terminal_title_stripped": "private terminal title",
+                        "workspace_id": "w1",
+                        "tab_id": "w1:t2",
+                        "pane_id": "w1:p2"
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+        let raw = &response.result.snapshot.agents[0];
+        let tabs = response
+            .result
+            .snapshot
+            .tabs
+            .into_iter()
+            .map(|tab| (tab.tab_id, tab.label))
+            .collect();
+
+        assert_eq!(display_name(raw, &tabs, "codex"), "review portal");
+    }
+
+    #[test]
+    fn card_identity_uses_only_safe_fallback_fields() {
+        let raw: HerdrAgent = serde_json::from_value(json!({
+            "terminal_id": "term",
+            "agent": "codex",
+            "name": "named agent",
+            "display_agent": "  ",
+            "title": "private prompt title",
+            "terminal_title_stripped": "private terminal title",
+            "workspace_id": "w1",
+            "tab_id": "missing",
+            "pane_id": "w1:p1"
+        }))
+        .unwrap();
+        assert_eq!(display_name(&raw, &HashMap::new(), "codex"), "named agent");
+
+        let canonical_only: HerdrAgent = serde_json::from_value(json!({
+            "terminal_id": "term",
+            "agent": "codex",
+            "name": " ",
+            "display_agent": "",
+            "title": "private prompt title",
+            "terminal_title_stripped": "private terminal title",
+            "workspace_id": "w1",
+            "tab_id": "missing",
+            "pane_id": "w1:p1"
+        }))
+        .unwrap();
+        assert_eq!(
+            display_name(&canonical_only, &HashMap::new(), "codex"),
+            "codex"
         );
     }
 

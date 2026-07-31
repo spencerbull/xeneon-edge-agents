@@ -17,7 +17,10 @@ class QmlSafetyContractTests(unittest.TestCase):
             "matchingScreens.length === 1 ? matchingScreens : []",
             shell,
         )
-        self.assertIn("model: root.previewMode ? [] : root.targetScreens", shell)
+        self.assertIn(
+            "model: root.previewWindowMode ? [] : root.targetScreens",
+            shell,
+        )
         self.assertNotRegex(shell, r"Quickshell\.screens\s*\[\s*0\s*\]")
         self.assertNotRegex(shell, r"primary(Screen|Output|Monitor)")
         self.assertIn("screenMatches", shell)
@@ -34,6 +37,14 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn('targetModel !== ""', gate_body)
         self.assertEqual(gate_body.count("&&"), 2)
         self.assertNotIn("||", gate_body)
+        self.assertIn(
+            'var runtimeSerial = String(screen.serialNumber || "")',
+            shell,
+        )
+        self.assertIn(
+            'if (runtimeSerial !== "" && runtimeSerial !== targetSerial)',
+            shell,
+        )
 
     def test_panel_has_exact_layer_surface_contract(self):
         panel = source("PortalPanel.qml")
@@ -58,9 +69,11 @@ class QmlSafetyContractTests(unittest.TestCase):
         )
         self.assertEqual(len(re.findall(r"\bProcess\s*\{", qml)), 1)
         shell = source("shell.qml")
-        self.assertEqual(len(re.findall(r"\bScope\s*\{", shell)), 1)
+        self.assertEqual(shell.count("id: runtime"), 1)
+        self.assertEqual(shell.count("PortalBridge {"), 1)
         self.assertIn("FloatingWindow", shell)
         self.assertIn("XENEON_EDGE_PREVIEW", shell)
+        self.assertIn("XENEON_EDGE_LIVE_PREVIEW", shell)
 
     def test_commands_are_allowlisted_ndjson_without_raw_input(self):
         builder = source("state/CommandBuilder.qml")
@@ -77,6 +90,11 @@ class QmlSafetyContractTests(unittest.TestCase):
             "approve",
             "interrupt",
             "restore_focus",
+            "chatgpt_desktop",
+            "claude_desktop",
+            "voice_start",
+            "voice_stop",
+            "voice_cancel",
         ):
             self.assertIn(f'"{action}"', builder)
         self.assertIn('"type": "command"', builder)
@@ -85,23 +103,22 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertNotIn("send_keys", qml)
         self.assertNotIn('["bash", "-c"', qml)
         self.assertNotIn('["sh", "-c"', qml)
+        self.assertNotIn('["voxtype"', qml)
 
-    def test_open_and_zoom_do_not_restore_focus(self):
+    def test_card_focus_is_single_action_and_does_not_restore_focus(self):
         portal = source("components/PortalView.qml")
-        open_handler = re.search(
-            r"onOpenRequested: function.*?\n\s*\}",
+        card = source("components/AgentCard.qml")
+        focus_handler = re.search(
+            r"onFocusRequested: function.*?\n\s*\}",
             portal,
             re.DOTALL,
         )
-        zoom_handler = re.search(
-            r"onZoomRequested: function.*?\n\s*\}",
-            portal,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(open_handler)
-        self.assertIsNotNone(zoom_handler)
-        self.assertNotIn("restoreFocus", open_handler.group(0))
-        self.assertNotIn("restoreFocus", zoom_handler.group(0))
+        self.assertIsNotNone(focus_handler)
+        self.assertNotIn("restoreFocus", focus_handler.group(0))
+        self.assertIn("function requestFocus()", card)
+        self.assertNotIn("signal zoomRequested", card)
+        self.assertNotIn('text: "OPEN"', card)
+        self.assertNotIn('text: "ZOOM"', card)
         self.assertIsNotNone(
             re.search(
                 r"onApproveRequested: function.*?restoreFocus",
@@ -127,12 +144,15 @@ class QmlSafetyContractTests(unittest.TestCase):
     def test_paging_and_ambient_contracts_are_explicit(self):
         portal = source("components/PortalView.qml")
         activity = source("state/ActivityController.qml")
+        shell = source("shell.qml")
         self.assertIn("readonly property int pageSize: 6", portal)
         self.assertIn("ListView.Horizontal", portal)
         self.assertIn("ListView.SnapOneItem", portal)
         self.assertIn("property int inactivityMs: 60000", activity)
+        self.assertIn("previewAmbientTimeoutMs", shell)
+        self.assertIn("root.previewWindowMode", shell)
+        self.assertIn("XENEON_EDGE_AMBIENT_TIMEOUT_MS", shell)
         self.assertIn("property int eventWakeMs: 15000", activity)
-        shell = source("shell.qml")
         self.assertIn("onSemanticActivityChanged", shell)
         self.assertNotIn("onSnapshotAccepted", shell)
 
@@ -194,13 +214,12 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("width: 58", portal)
         self.assertIn("height: 48", portal)
         self.assertIn('Accessible.name: "Show agent page "', portal)
-        self.assertIn(
-            "Accessible.onPressAction: root.selectPage(index)",
-            portal,
-        )
+        self.assertIn("Accessible.ignored: !root.controlCenterInteractive", portal)
+        self.assertIn("if (root.controlCenterInteractive)", portal)
         guarded_action = re.search(
-            r"Accessible\.onPressAction:\s*(?P<body>[^\n]+)",
+            r"Accessible\.onPressAction:\s*\{(?P<body>.*?)\n\s*\}",
             hold,
+            re.DOTALL,
         )
         self.assertIsNotNone(guarded_action)
         self.assertIn("accessibleHoldRequested", guarded_action.group("body"))
@@ -260,16 +279,111 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("Qt.quit()", shell)
         self.assertIn("QS_APP_ID=$preview_app_id", preview)
         self.assertIn("$BASHPID", preview)
+        self.assertIn("--live)", preview)
+        self.assertIn("--ambient-after)", preview)
+        self.assertIn("XENEON_EDGE_AMBIENT_TIMEOUT_MS", preview)
+        self.assertIn("XENEON_AGENT_SOCKET=$preview_socket", preview)
         self.assertIn("hyprctl eval", preview)
         self.assertIn("address:$address", preview)
+        self.assertIn('prop = \\"opacity_inactive_override\\"', preview)
         self.assertNotIn("hyprctl keyword", preview)
         self.assertNotIn(".config/hypr", preview)
 
-    def test_ambient_overlay_shields_input_until_fade_finishes(self):
+    def test_ambient_fadeout_shields_hidden_card_actions(self):
         ambient = source("components/AmbientView.qml")
-        self.assertIn("visible: active || opacity > 0", ambient)
-        self.assertIn("enabled: visible", ambient)
-        self.assertIn("duration: root.reducedMotion ? 0 : 480", ambient)
+        portal = source("components/PortalView.qml")
+        self.assertIn("visible: active || revealProgress > 0 || exitShield", ambient)
+        self.assertIn("enabled: active || exitShield", ambient)
+        self.assertIn("enabled: root.enabled", ambient)
+        self.assertIn("readonly property int exitDurationMs: 1000", ambient)
+        self.assertIn("interval: root.exitDurationMs + 80", ambient)
+        self.assertIn("Behavior on revealProgress", ambient)
+        self.assertIn("duration: root.reducedMotion", ambient)
+        self.assertIn("readonly property bool controlCenterInteractive", portal)
+        self.assertIn("enabled: visible && root.controlCenterInteractive", portal)
+        self.assertIn("enabled: root.controlCenterInteractive", portal)
+        self.assertIn(
+            "Accessible.ignored: !root.controlCenterInteractive",
+            portal,
+        )
+        self.assertIn("if (root.controlCenterInteractive)", portal)
+
+        for component in (
+            "AgentCard.qml",
+            "DesktopAppButton.qml",
+            "HealthStrip.qml",
+            "HoldControl.qml",
+            "MicroDrawer.qml",
+            "VoiceControl.qml",
+        ):
+            self.assertIn(
+                "Accessible.ignored:",
+                source("components/" + component),
+                component,
+            )
+
+    def test_home_telemetry_and_app_controls_remain_presentation_only(self):
+        portal = source("components/PortalView.qml")
+        store = source("state/PortalStore.qml")
+        bridge = source("state/PortalBridge.qml")
+        usage = source("components/AiUsageDock.qml")
+        micro = source("components/MicroDrawer.qml")
+        shell = source("shell.qml")
+        panel = source("PortalPanel.qml")
+
+        self.assertIn("normalizeUsage", store)
+        self.assertIn("normalizeMicro", store)
+        self.assertIn('sendBuilt("chatgpt_desktop"', bridge)
+        self.assertIn('sendBuilt("claude_desktop"', bridge)
+        self.assertIn("AiUsageDock", portal)
+        self.assertIn("agents: root.store.agents", portal)
+        self.assertIn("sessions: root.store.sessions", portal)
+        self.assertIn("HERDR FLEET", usage)
+        self.assertNotIn("AI CAPACITY", usage)
+        self.assertNotIn("id: connectionLabel", portal)
+        self.assertIn("XENEON_EDGE_HOSTNAME", shell)
+        self.assertEqual(shell.count("hostName: root.hostName"), 2)
+        self.assertIn("property string hostName:", panel)
+        self.assertIn("hostName: root.hostName", panel)
+        self.assertIn("MicroDrawer", portal)
+        self.assertNotIn("Process {", usage)
+        self.assertNotIn("Process {", micro)
+        self.assertNotIn("terminal_text", portal)
+        self.assertNotIn("prompt_text", portal)
+
+    def test_voice_and_ring_stay_presentation_only_and_reduce_motion(self):
+        voice = source("components/VoiceControl.qml")
+        ring = source("components/AmbientRing.qml")
+        bridge = source("state/PortalBridge.qml")
+        portal = source("components/PortalView.qml")
+        shell = source("shell.qml")
+
+        self.assertIn("function beginPress()", voice)
+        self.assertIn("function finishPress()", voice)
+        self.assertIn("startRequested()", voice)
+        self.assertIn("stopRequested()", voice)
+        self.assertIn("cancelRequested()", voice)
+        self.assertIn('sendBuilt("voice_start"', bridge)
+        self.assertIn('sendBuilt("voice_stop"', bridge)
+        self.assertIn('sendBuilt("voice_cancel"', bridge)
+        self.assertEqual(portal.count("if (root.restoreVoiceFocus)"), 2)
+        self.assertIn("pendingVoiceFocus", portal)
+        self.assertIn("if (result.ok)", portal)
+        self.assertIn("VOICE // FOCUS REQUIRED", portal)
+        self.assertIn("restoreVoiceFocus: root.livePreviewMode", shell)
+        self.assertIn("&& !reducedMotion", ring)
+        self.assertIn("runnerCount: 2", ring)
+        self.assertIn("runnerOffset: 0.5", ring)
+        self.assertIn("import QtQuick.Effects", ring)
+        self.assertIn("MultiEffect", ring)
+        self.assertIn("blurEnabled: true", ring)
+        self.assertIn("particleCountPerRunner: 6", ring)
+        self.assertNotIn("Canvas", ring)
+        self.assertIn("Palette.perimeterMode(agents)", ring)
+        self.assertIn("dashOffset: root.phase", ring)
+        self.assertNotIn("id: topBeam", ring)
+        self.assertNotIn("Process {", voice)
+        self.assertNotIn("Process {", ring)
 
 
 if __name__ == "__main__":

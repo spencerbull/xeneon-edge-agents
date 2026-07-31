@@ -15,7 +15,7 @@ allow_primary_fallback = false
 device = ""
 output = ""
 enabled = false
-# Kernel identity binds the Hyprland name to the Corsair USB touchscreen.
+# Kernel identity binds the Hyprland name to the exact USB touchscreen.
 bustype = ""
 vendor = ""
 product = ""

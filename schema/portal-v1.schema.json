@@ -12,8 +12,22 @@
     "agentStatus": {
       "enum": ["blocked", "done", "working", "idle", "unknown"]
     },
+    "voiceState": {
+      "enum": ["idle", "recording", "processing", "error", "unavailable"]
+    },
     "actionKind": {
-      "enum": ["open", "zoom", "approve", "interrupt", "restore_focus"]
+      "enum": [
+        "open",
+        "zoom",
+        "approve",
+        "interrupt",
+        "restore_focus",
+        "chatgpt_desktop",
+        "claude_desktop",
+        "voice_start",
+        "voice_stop",
+        "voice_cancel"
+      ]
     },
     "capability": {
       "type": "object",
@@ -90,6 +104,8 @@
         "display_name": { "type": "string" },
         "agent": { "type": "string" },
         "status": { "$ref": "#/$defs/agentStatus" },
+        "review_ready": { "type": "boolean" },
+        "launch_pending": { "type": "boolean" },
         "workspace": { "type": "string" },
         "repository": { "type": "string" },
         "worktree": { "type": "string" },
@@ -123,6 +139,73 @@
         "message": { "type": "string" }
       }
     },
+    "voice": {
+      "type": "object",
+      "required": ["state", "owned"],
+      "properties": {
+        "state": { "$ref": "#/$defs/voiceState" },
+        "owned": { "type": "boolean" }
+      }
+    },
+    "usageWindow": {
+      "type": "object",
+      "required": ["label", "utilization"],
+      "properties": {
+        "label": { "type": "string", "maxLength": 24 },
+        "utilization": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reset_at_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "providerUsage": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "kind",
+        "available",
+        "stale",
+        "source",
+        "status"
+      ],
+      "properties": {
+        "id": { "enum": ["claude", "codex", "opencode"] },
+        "label": { "type": "string", "maxLength": 24 },
+        "kind": { "enum": ["quota", "local_budget"] },
+        "available": { "type": "boolean" },
+        "stale": { "type": "boolean" },
+        "source": { "type": "string", "maxLength": 24 },
+        "status": { "type": "string", "maxLength": 24 },
+        "plan": { "type": "string", "maxLength": 32 },
+        "model": { "type": "string", "maxLength": 80 },
+        "primary": { "$ref": "#/$defs/usageWindow" },
+        "secondary": { "$ref": "#/$defs/usageWindow" },
+        "last_updated_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["providers"],
+      "properties": {
+        "providers": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/providerUsage" }
+        }
+      }
+    },
+    "micro": {
+      "type": "object",
+      "required": ["connected", "charging"],
+      "properties": {
+        "connected": { "type": "boolean" },
+        "firmware": { "type": "string", "maxLength": 32 },
+        "battery": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "charging": { "type": "boolean" },
+        "layer": { "type": "integer", "minimum": 0 },
+        "profile": { "type": "integer", "minimum": 0 },
+        "last_updated_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
     "snapshotMessage": {
       "type": "object",
       "required": [
@@ -153,6 +236,9 @@
           "type": "array",
           "items": { "$ref": "#/$defs/agent" }
         },
+        "voice": { "$ref": "#/$defs/voice" },
+        "usage": { "$ref": "#/$defs/usage" },
+        "micro": { "$ref": "#/$defs/micro" },
         "health": { "$ref": "#/$defs/health" }
       }
     },

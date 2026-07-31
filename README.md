@@ -2,7 +2,8 @@
 
 A native Omarchy command center for the Corsair XENEON EDGE. It keeps Herdr as
 the session and interaction authority while providing a dedicated 2560x720
-touch surface for agent status, safe triage, and compact system health.
+touch surface for agent status, safe triage, provider capacity, and connected
+tool status.
 
 The software path is implemented and simulator-tested. Physical display and
 touch commissioning is still intentionally open because the XENEON EDGE was
@@ -12,10 +13,11 @@ exactly and uniquely.
 
 ## Components
 
-- `xeneon-agentd`: Rust user daemon for Herdr state, host health, safe actions,
+- `xeneon-agentd`: Rust user daemon for Herdr state, host health, normalized AI
+  usage and Codex Micro status, safe actions, optional Voxtype dictation,
   reconnects, and output/focus integration.
 - `xeneon-agentctl qml-bridge`: NDJSON bridge used by Quickshell.
-- `quickshell/`: standalone touch portal and deterministic fixture preview.
+- `quickshell/`: standalone touch portal plus deterministic and live previews.
 - `config/` and `scripts/`: reversible user-service and Omarchy integration.
 
 Herdr remains authoritative. The portal can never send arbitrary text, keys,
@@ -36,13 +38,44 @@ mise run preview
 ```
 
 The preview is a normal 1280x360 window on the current display and uses a
-deterministic fixture. It is the only path that may use the primary display.
-Other fixture states can be selected explicitly:
+deterministic fixture. Explicit preview windows are the only path that may use
+the primary display. Other fixture states can be selected explicitly:
 
 ```bash
 scripts/preview health.ndjson
 scripts/preview disconnected.ndjson
 ```
+
+A live source preview builds private development binaries, starts a temporary
+daemon/socket, and displays the same normalized Herdr and Voxtype state used by
+production without installing files, enabling services, or changing the
+fail-closed output identity:
+
+```bash
+scripts/preview --live
+scripts/preview --live --ambient-after 6
+```
+
+The control center shows safe Herdr identity, state duration, repository and
+worktree context, plus the Omarchy AI module's normalized Claude, Codex, and
+OpenCode capacity. Header controls use typed daemon actions to focus or launch
+the fixed ChatGPT Desktop and Claude Desktop entries. The Micro control opens a
+read-only virtual projection of the connected device and current agent slots.
+
+The live preview exposes the real narrow agent-focus, desktop-app, and voice
+actions. Voice
+dictation is push-to-talk: press starts a portal-owned Voxtype recording,
+release transcribes without automatic submission, and Cancel discards it. The
+floating preview restores the last exact non-portal window before voice start
+and stop so that window remains the laptop transcription target. The preview
+also applies exact per-window opaque compositor properties so desktop content
+cannot bleed through its dark surface.
+
+`--ambient-after` accepts 1 through 300 seconds and only changes the explicit
+preview window. It is useful for reviewing the staged dashboard-to-orbit
+animation without changing the production 60-second inactivity policy. The
+reference timing and motion breakdown live in
+[`docs/concept-motion.md`](docs/concept-motion.md).
 
 ## Install without activating
 
@@ -58,6 +91,16 @@ The default installer copies the named Quickshell configuration and rendered
 user units but does not enable either service, edit Hyprland, or match any
 production output. Existing user-owned or modified files are refused or
 preserved.
+
+The daemon reads Voxtype's runtime state when Omarchy Dictation is available.
+Portal voice start/stop/cancel requests remain typed daemon actions; QML never
+executes the `voxtype` CLI. Service startup and shutdown clean up only a
+portal-owned recording. The same cleanup can be invoked directly for a private
+preview daemon:
+
+```bash
+xeneon-agentd --config ~/.config/xeneon-edge-agents/config.toml --cleanup-dictation
+```
 
 ```bash
 scripts/check.sh
@@ -87,7 +130,7 @@ scripts/install.sh \
   --screen-model '<EXACT-SCREEN-MODEL>' \
   --touch-device '<EXACT-HYPRLAND-DEVICE-NAME>' \
   --touch-bustype '0003' \
-  --touch-vendor '1b1c' \
+  --touch-vendor '<EXACT-USB-VENDOR-ID>' \
   --touch-product '<EXACT-USB-PRODUCT-ID>' \
   --touch-phys '<EXACT-KERNEL-PHYS>'
 ```

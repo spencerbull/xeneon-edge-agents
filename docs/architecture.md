@@ -3,12 +3,15 @@
 ## Trust boundary
 
 Herdr owns terminal identity, agent detection, and agent actions.
-`xeneon-agentd` owns aggregation, reconnects, host health, desktop routing, and
-the portal's narrow action policy. Quickshell owns rendering and touch gesture
-state only.
+`xeneon-agentd` owns aggregation, reconnects, host health, normalized AI
+capacity, desktop routing, read-only Codex Micro status, and the portal's
+narrow action policy. It also owns the optional Voxtype start/stop/cancel
+boundary and a private per-daemon dictation marker.
+Quickshell owns rendering and touch gesture state only.
 
 ```text
-Herdr public sockets        /proc, /sys, Hyprland
+Herdr public sockets     /proc, /sys, Hyprland
+AI usage caches            Voxtype, microd
           \                    /
                  xeneon-agentd
                        |
@@ -34,13 +37,57 @@ and live terminal identity. The current pane ID remains private action-routing
 state. Restarting the daemon invalidates every ID. Herdr disconnects immediately
 remove action targets and guarded capabilities.
 
+Card names use Herdr's tab identity rather than terminal or prompt text. The
+daemon joins an agent's `tab_id` to the snapshot's tab label, with only
+`display_agent`, agent `name`, and canonical agent fallbacks.
+
+The review-ready latch follows the Codex Micro contract. A working agent that
+becomes idle remains review-ready until a new Herdr focus transition selects it
+or a portal open succeeds. Merely remaining focused does not acknowledge it.
+
 Snapshots carry an action-state sequence. Host-health refreshes do not advance
 that sequence, so an 800 ms hold is not invalidated by an unrelated CPU sample.
 Agent topology or state reconciliation does advance it.
 
+AI capacity and Micro refreshes do not advance the action sequence or count as
+portal interaction, so they cannot invalidate a guarded action or wake the
+ambient surface. Usage collection reads only the bounded normalized cache
+contracts already produced by the Omarchy Quickshell AI module. The daemon
+allowlists provider IDs, sources, status values, and safe metadata, clamps
+utilization, rejects oversized files, and never forwards credentials or raw
+provider payloads.
+
+Micro collection uses one fixed read-only `device.status` request on the
+user-private local microd socket. Connected state requires a valid device
+status object with the device firmware identity; a socket or malformed response
+never proves hardware presence. QML receives only bounded battery, firmware,
+layer, and profile fields and has no method for sending Micro commands.
+
 Input actions are never queued or replayed. Focus and zoom are resolved against
 the latest private pane target. Approval and interruption require an opaque,
 single-use capability issued and revalidated by a compatible Herdr server.
+
+## Voice boundary
+
+The low-cost voice collector reads only
+`$XDG_RUNTIME_DIR/voxtype/state`. `recording` stays recording,
+`streaming`/`transcribing` normalize to processing, and a missing or unreadable
+file is unavailable. Voice commands execute only the typed `voxtype record`
+operations. They are never retried and their output is discarded. Each process
+is bounded to ten seconds and killed on timeout; an ambiguous failed start gets
+one conservative cancel attempt before ownership is released.
+
+Before start, the daemon requires idle state and atomically creates
+`$XDG_STATE_HOME/xeneon-edge-agents/dictation-active`. Stop and cancel require
+the exact current daemon token. The service's start/stop cleanup path cancels a
+stale portal-owned recording before removing its marker. QML cannot execute
+Voxtype or arbitrary host commands.
+
+The production layer surface is non-focusable, so dictation keeps the
+previously focused application as its typing target. The explicit floating
+live preview restores the daemon's last exact non-portal focus before both
+voice start and stop, allowing laptop testing without making the preview
+window the transcription target.
 
 ## Desktop boundary
 
@@ -50,6 +97,13 @@ identity matches. It does not use a primary-screen fallback.
 Hyprland activation is session-specific. The daemon considers only compositor
 clients whose process trees contain the exact Herdr session or socket identity;
 ambiguous matches fail instead of focusing a generic window title.
+
+ChatGPT Desktop and Claude Desktop use separate fixed action kinds. The daemon
+matches exact known compositor classes: one match is focused, no match launches
+the corresponding fixed desktop entry through `uwsm-app`, and multiple matches
+fail closed. Launches are coalesced per app while the daemon waits a bounded
+time for exactly one mapped client, then focuses it before reporting success.
+QML cannot choose an executable, desktop entry, class, title, or arguments.
 
 Passive EDGE gestures may request restoration of the last observed non-EDGE
 window. The daemon first confirms that the exact window address still exists.

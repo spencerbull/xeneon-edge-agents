@@ -4,23 +4,147 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 repo_root=$(cd "$script_dir/.." && pwd -P)
-fixture=${1:-snapshot.ndjson}
+requested=snapshot.ndjson
+fixture=$requested
+live_preview=0
+fixture_selected=0
+ambient_timeout_ms=60000
 preview_app_id="org.xeneon-edge.agent-portal-preview.$BASHPID"
 preview_pid=
+daemon_pid=
+preview_runtime=
+preview_socket=
+preview_state_home=
+preview_host_name=$(hostname)
 
-if ! [[ "$fixture" =~ ^[a-z0-9_-]+\.ndjson$ ]]; then
+while (($# > 0)); do
+  case "$1" in
+  --live)
+    if ((fixture_selected == 1)); then
+      printf 'error: choose either --live or one fixture\n' >&2
+      exit 1
+    fi
+    live_preview=1
+    fixture=
+    ;;
+  --ambient-after)
+    shift
+    if (($# == 0)) || ! [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      printf 'error: --ambient-after requires seconds from 1 through 300\n' >&2
+      exit 1
+    fi
+    ambient_timeout_ms=$(awk -v seconds="$1" \
+      'BEGIN {
+        milliseconds = int(seconds * 1000 + 0.5)
+        if (milliseconds < 1000 || milliseconds > 300000)
+          exit 1
+        print milliseconds
+      }') || {
+      printf 'error: --ambient-after requires seconds from 1 through 300\n' >&2
+      exit 1
+    }
+    ;;
+  --help)
+    printf 'usage: %s [--live | FIXTURE.ndjson] [--ambient-after SECONDS]\n' \
+      "${0##*/}"
+    exit 0
+    ;;
+  -*)
+    printf 'error: unknown preview option: %s\n' "$1" >&2
+    exit 1
+    ;;
+  *)
+    if ((live_preview == 1 || fixture_selected == 1)); then
+      printf 'error: choose either --live or one fixture\n' >&2
+      exit 1
+    fi
+    fixture_selected=1
+    requested=$1
+    fixture=$requested
+    ;;
+  esac
+  shift
+done
+
+if ((live_preview == 1)); then
+  fixture=
+elif ! [[ "$fixture" =~ ^[a-z0-9_-]+\.ndjson$ ]]; then
   printf 'error: fixture must be a filename such as snapshot.ndjson\n' >&2
   exit 1
 fi
-if [[ ! -f "$repo_root/quickshell/fixtures/$fixture" ]]; then
+if ((live_preview == 0)) &&
+  [[ ! -f "$repo_root/quickshell/fixtures/$fixture" ]]; then
   printf 'error: fixture does not exist: %s\n' "$fixture" >&2
   exit 1
 fi
 
+# Called by the signal trap below.
+# shellcheck disable=SC2329
 forward_signal() {
   if [[ -n "$preview_pid" ]] && kill -0 "$preview_pid" 2>/dev/null; then
     kill -TERM "$preview_pid" 2>/dev/null || true
   fi
+  if [[ -n "$daemon_pid" ]] && kill -0 "$daemon_pid" 2>/dev/null; then
+    kill -TERM "$daemon_pid" 2>/dev/null || true
+  fi
+}
+
+# Called by the EXIT trap below.
+# shellcheck disable=SC2329
+cleanup_runtime() {
+  forward_signal
+  if [[ -n "$daemon_pid" ]]; then
+    wait "$daemon_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$preview_state_home" && -d "$preview_state_home" ]]; then
+    if ! XDG_STATE_HOME=$preview_state_home \
+      "$repo_root/target/debug/xeneon-agentd" \
+        --config "$repo_root/config/xeneon-edge-agents/config.toml.example" \
+        --cleanup-dictation; then
+      printf 'warning: live preview voice cleanup failed\n' >&2
+    fi
+    rmdir -- "$preview_state_home/xeneon-edge-agents" 2>/dev/null || true
+    rmdir -- "$preview_state_home" 2>/dev/null || true
+  fi
+  if [[ -n "$preview_socket" && -S "$preview_socket" ]]; then
+    rm -f -- "$preview_socket"
+  fi
+  if [[ -n "$preview_runtime" && -d "$preview_runtime" ]]; then
+    rmdir -- "$preview_runtime" 2>/dev/null || true
+  fi
+}
+
+start_live_daemon() {
+  command -v cargo >/dev/null 2>&1 ||
+    {
+      printf 'error: cargo is required for a live source preview\n' >&2
+      exit 1
+    }
+  : "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required for a live preview}"
+
+  cargo build --quiet --bins
+  preview_runtime=$(mktemp -d "$XDG_RUNTIME_DIR/xeneon-edge-preview.XXXXXX")
+  preview_socket=$preview_runtime/agentd.sock
+  preview_state_home=$preview_runtime/state
+  install -d -m 700 "$preview_state_home"
+  XDG_STATE_HOME=$preview_state_home \
+  XENEON_AGENT_SOCKET=$preview_socket \
+    "$repo_root/target/debug/xeneon-agentd" \
+      --config "$repo_root/config/xeneon-edge-agents/config.toml.example" &
+  daemon_pid=$!
+
+  local attempt
+  for ((attempt = 0; attempt < 100; attempt += 1)); do
+    kill -0 "$daemon_pid" 2>/dev/null ||
+      {
+        printf 'error: live preview daemon exited during startup\n' >&2
+        exit 1
+      }
+    [[ -S "$preview_socket" ]] && return 0
+    sleep 0.05
+  done
+  printf 'error: live preview daemon did not create its socket\n' >&2
+  exit 1
 }
 
 apply_hyprland_geometry() {
@@ -62,19 +186,37 @@ apply_hyprland_geometry() {
     printf '%s' \
       "hl.dispatch(hl.dsp.window.float({ action = \"set\", window = \"$window_selector\" })); " \
       "hl.dispatch(hl.dsp.window.resize({ x = 1280, y = 360, relative = false, window = \"$window_selector\" })); " \
-      "hl.dispatch(hl.dsp.window.center({ window = \"$window_selector\" }))"
+      "hl.dispatch(hl.dsp.window.center({ window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.set_prop({ prop = \"opacity\", value = \"1\", window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.set_prop({ prop = \"opacity_inactive\", value = \"1\", window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.set_prop({ prop = \"opacity_override\", value = \"1\", window = \"$window_selector\" })); " \
+      "hl.dispatch(hl.dsp.window.set_prop({ prop = \"opacity_inactive_override\", value = \"1\", window = \"$window_selector\" }))"
   )
   if ! hyprctl eval "$geometry_code" >/dev/null 2>&1; then
     printf 'warning: Hyprland preview geometry could not be applied\n' >&2
   fi
 }
 
+trap cleanup_runtime EXIT
 trap forward_signal HUP INT TERM
 
-QS_APP_ID=$preview_app_id \
-XENEON_EDGE_PREVIEW=1 \
-XENEON_EDGE_FIXTURE=$fixture \
-  quickshell --no-duplicate --path "$repo_root/quickshell" &
+if ((live_preview == 1)); then
+  start_live_daemon
+  PATH="$repo_root/target/debug:$PATH" \
+  QS_APP_ID=$preview_app_id \
+  XENEON_AGENT_SOCKET=$preview_socket \
+  XENEON_EDGE_LIVE_PREVIEW=1 \
+  XENEON_EDGE_AMBIENT_TIMEOUT_MS=$ambient_timeout_ms \
+  XENEON_EDGE_HOSTNAME=$preview_host_name \
+    quickshell --no-duplicate --path "$repo_root/quickshell" &
+else
+  QS_APP_ID=$preview_app_id \
+  XENEON_EDGE_PREVIEW=1 \
+  XENEON_EDGE_FIXTURE=$fixture \
+  XENEON_EDGE_AMBIENT_TIMEOUT_MS=$ambient_timeout_ms \
+  XENEON_EDGE_HOSTNAME=$preview_host_name \
+    quickshell --no-duplicate --path "$repo_root/quickshell" &
+fi
 preview_pid=$!
 
 apply_hyprland_geometry

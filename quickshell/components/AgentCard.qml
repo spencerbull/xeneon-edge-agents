@@ -1,4 +1,5 @@
 import QtQuick
+import "PortalPalette.js" as Palette
 
 Item {
     id: root
@@ -8,8 +9,7 @@ Item {
     property double snapshotSequence: -1
     property bool actionsEnabled: true
 
-    signal openRequested(string agentId)
-    signal zoomRequested(string agentId)
+    signal focusRequested(string agentId)
     signal approveRequested(
         string agentId,
         string capabilityId,
@@ -22,33 +22,29 @@ Item {
     )
     signal interacted()
 
-    readonly property string agentState:
-        agent === null ? "unknown" : String(agent.status || "unknown")
-    readonly property color accent: stateColor(agentState)
-
-    function stateColor(state) {
-        switch (state) {
-        case "blocked":
-            return "#ff9d52"
-        case "done":
-            return "#b98cff"
-        case "working":
-            return "#4fe9ff"
-        case "idle":
-            return "#6cf7b0"
-        default:
-            return "#7fa1c6"
-        }
-    }
+    readonly property string agentState: Palette.effectiveAgentState(agent)
+    readonly property color accent: Palette.agentColor(agent)
+    readonly property color readableAccent:
+        agentState === "idle" || agentState === "unknown"
+            ? "#a9b7c7"
+            : accent
+    readonly property bool hasApproveAction:
+        capability("approve") !== null
+    readonly property bool hasInterruptAction:
+        capability("interrupt") !== null
+    readonly property bool hasGuardedActions:
+        hasApproveAction || hasInterruptAction
 
     function stateLabel(state) {
+        if (agent !== null && agent.launch_pending === true)
+            return "LAUNCHING"
         switch (state) {
         case "working":
-            return "IN FLIGHT"
+            return "WORKING"
         case "blocked":
-            return "BLOCKED"
-        case "done":
-            return "DONE"
+            return "WAITING"
+        case "review":
+            return "REVIEW READY"
         case "idle":
             return "READY"
         default:
@@ -87,70 +83,74 @@ Item {
         return Math.floor(elapsed) + "S"
     }
 
-    function statusSummary() {
+    function processLine() {
         if (agent === null)
             return ""
-        var location = String(agent.session || "Herdr")
-        var duration = observedDuration(agent.observed_for_seconds)
-        if (agent.focused)
-            return "Focused in " + location + " · observed " + duration
-        switch (agentState) {
-        case "blocked":
-            return "Waiting for interaction in " + location
-        case "done":
-            return "Completed activity observed " + duration + " ago"
-        case "working":
-            return "Active in " + location + " · observed " + duration
-        case "idle":
-            return "Ready in " + location + " · observed " + duration
-        default:
-            return "State unavailable · " + location
-        }
+        return stateLabel(agentState) + "  ·  "
+            + observedDuration(agent.observed_for_seconds) + " IN STATE"
     }
 
-    function requestOpen() {
-        if (agent === null || !canAction("open"))
+    function contextLine() {
+        if (agent === null)
+            return ""
+        var context = []
+        var repository = String(agent.repository || "").trim()
+        var worktree = String(agent.worktree || "").trim()
+        var workspace = String(agent.workspace || "").trim()
+        if (repository !== "")
+            context.push(repository)
+        if (worktree !== "" && worktree !== repository)
+            context.push(worktree)
+        if (workspace !== ""
+                && workspace !== repository
+                && (repository === "" || workspace.indexOf(repository) < 0))
+            context.push(workspace)
+        return context.length > 0 ? context.join("  ·  ") : "LOCAL WORKSPACE"
+    }
+
+    function requestFocus() {
+        if (!root.enabled || agent === null || !canAction("open"))
             return false
         interacted()
-        openRequested(String(agent.id))
+        focusRequested(String(agent.id))
         return true
     }
 
-    function requestZoom() {
-        if (agent === null || !canAction("zoom"))
-            return false
-        interacted()
-        zoomRequested(String(agent.id))
-        return true
-    }
-
-    scale: openHandler.pressed ? 0.988 : 1
     opacity: agent === null ? 0 : 1
 
-    Behavior on scale {
-        NumberAnimation {
-            duration: root.reducedMotion ? 0 : 110
-            easing.type: Easing.OutCubic
-        }
-    }
-
     Accessible.role: Accessible.Button
+    Accessible.ignored: !root.enabled || root.agent === null
     Accessible.name: agent === null
         ? ""
-        : String(agent.display_name || "Agent")
+        : "Focus " + String(agent.display_name || "Agent") + " in Herdr"
     Accessible.description: agent === null
         ? ""
-        : stateLabel(agentState) + ". " + statusSummary()
-    Accessible.onPressAction: root.requestOpen()
+        : processLine() + ". " + contextLine() + ". Tap to focus in Herdr."
+    Accessible.onPressAction: root.requestFocus()
+
+    MouseArea {
+        id: focusHandler
+
+        objectName: "wholeCardFocusTarget"
+        anchors.fill: parent
+        z: 10
+        enabled: root.agent !== null
+            && root.canAction("open")
+            && !root.hasGuardedActions
+        onClicked: root.requestFocus()
+    }
 
     Rectangle {
-        id: cardSurface
-
         anchors.fill: parent
         radius: 18
-        color: "#0a101d"
-        border.width: 1
-        border.color: Qt.alpha(root.accent, 0.64)
+        color: focusHandler.pressed || guardedFocusHandler.pressed
+            ? "#0d1726"
+            : "#0a101d"
+        border.width: root.agent !== null && root.agent.focused ? 2 : 1
+        border.color: Qt.alpha(
+            root.accent,
+            root.agent !== null && root.agent.focused ? 0.95 : 0.58
+        )
     }
 
     Rectangle {
@@ -161,12 +161,10 @@ Item {
         radius: 15
         color: "transparent"
         border.width: 1
-        border.color: Qt.alpha(root.accent, 0.13)
+        border.color: Qt.alpha(root.accent, 0.12)
     }
 
     Rectangle {
-        id: pulseGlow
-
         anchors {
             left: parent.left
             top: parent.top
@@ -180,17 +178,47 @@ Item {
         SequentialAnimation on opacity {
             loops: Animation.Infinite
             running: !root.reducedMotion
-                && root.agentState === "working"
+                && (root.agentState === "working"
+                    || root.agentState === "blocked")
             NumberAnimation {
                 from: 0.42
                 to: 1
-                duration: 900
+                duration: root.agentState === "blocked" ? 520 : 900
                 easing.type: Easing.InOutSine
             }
             NumberAnimation {
                 from: 1
                 to: 0.42
-                duration: 900
+                duration: root.agentState === "blocked" ? 520 : 900
+                easing.type: Easing.InOutSine
+            }
+        }
+    }
+
+    Rectangle {
+        id: activitySweep
+
+        visible: !root.reducedMotion && root.agentState === "working"
+        width: Math.min(190, root.width * 0.28)
+        height: 2
+        radius: 1
+        y: 3
+        color: root.accent
+        opacity: 0.78
+
+        SequentialAnimation on x {
+            loops: Animation.Infinite
+            running: activitySweep.visible
+            NumberAnimation {
+                from: 14
+                to: Math.max(14, root.width - activitySweep.width - 14)
+                duration: 1450
+                easing.type: Easing.InOutSine
+            }
+            NumberAnimation {
+                from: Math.max(14, root.width - activitySweep.width - 14)
+                to: 14
+                duration: 1450
                 easing.type: Easing.InOutSine
             }
         }
@@ -203,11 +231,11 @@ Item {
             left: parent.left
             right: parent.right
             top: parent.top
-            bottom: actionRow.top
+            bottom: root.hasGuardedActions ? actionRow.top : parent.bottom
             leftMargin: 22
             rightMargin: 18
-            topMargin: 16
-            bottomMargin: 8
+            topMargin: 14
+            bottomMargin: root.hasGuardedActions ? 8 : 18
         }
 
         Row {
@@ -263,7 +291,7 @@ Item {
                     anchors.centerIn: parent
                     text: root.stateLabel(root.agentState)
                     textFormat: Text.PlainText
-                    color: root.accent
+                    color: root.readableAccent
                     font {
                         family: "monospace"
                         pixelSize: 12
@@ -275,92 +303,52 @@ Item {
         }
 
         Text {
-            id: summaryText
-
             anchors {
                 left: parent.left
                 right: parent.right
                 top: titleRow.bottom
-                topMargin: 12
+                topMargin: 9
             }
-            height: 52
-            text: root.agent === null
-                ? ""
-                : root.statusSummary()
+            text: root.processLine()
             textFormat: Text.PlainText
-            color: "#b8cce2"
-            wrapMode: Text.Wrap
-            maximumLineCount: 2
+            color: root.readableAccent
             elide: Text.ElideRight
             font {
-                family: "sans-serif"
-                pixelSize: 18
-                weight: Font.Medium
+                family: "monospace"
+                pixelSize: 17
+                weight: Font.DemiBold
+                letterSpacing: 0.7
             }
         }
 
-        Row {
+        Text {
             anchors {
                 left: parent.left
                 right: parent.right
                 bottom: parent.bottom
             }
-            height: 24
-            spacing: 18
-
-            Text {
-                width: parent.width * 0.31
-                text: root.agent === null
-                    ? ""
-                    : String(root.agent.agent || "Agent").toUpperCase()
-                textFormat: Text.PlainText
-                color: "#6f8aa7"
-                elide: Text.ElideRight
-                font {
-                    family: "monospace"
-                    pixelSize: 13
-                    letterSpacing: 0.6
-                }
-            }
-
-            Text {
-                width: parent.width * 0.35
-                text: root.agent === null
-                    ? ""
-                    : String(root.agent.workspace || "LOCAL")
-                textFormat: Text.PlainText
-                color: "#6f8aa7"
-                elide: Text.ElideMiddle
-                horizontalAlignment: Text.AlignHCenter
-                font {
-                    family: "monospace"
-                    pixelSize: 13
-                }
-            }
-
-            Text {
-                width: parent.width * 0.27
-                text: root.agent === null
-                    ? ""
-                    : String(root.agent.session || "HERDR")
-                textFormat: Text.PlainText
-                color: "#6f8aa7"
-                elide: Text.ElideLeft
-                horizontalAlignment: Text.AlignRight
-                font {
-                    family: "monospace"
-                    pixelSize: 13
-                }
+            text: root.contextLine()
+            textFormat: Text.PlainText
+            color: "#7894ae"
+            elide: Text.ElideMiddle
+            font {
+                family: "monospace"
+                pixelSize: 13
+                letterSpacing: 0.3
             }
         }
 
-        TapHandler {
-            id: openHandler
+        MouseArea {
+            id: guardedFocusHandler
 
-            enabled: root.agent !== null && root.canAction("open")
-            gesturePolicy: TapHandler.DragThreshold
-            onTapped: root.requestOpen()
+            anchors.fill: parent
+            z: 10
+            enabled: root.agent !== null
+                && root.canAction("open")
+                && root.hasGuardedActions
+            onClicked: root.requestFocus()
         }
+
     }
 
     Row {
@@ -370,56 +358,20 @@ Item {
             left: parent.left
             right: parent.right
             bottom: parent.bottom
-            margins: 12
             leftMargin: 20
+            rightMargin: 14
+            bottomMargin: 12
         }
-        height: 48
+        height: 46
         spacing: 8
-
-        Rectangle {
-            id: zoomButton
-
-            width: 88
-            height: parent.height
-            radius: 10
-            color: zoomHandler.pressed ? "#172c42" : "#0d1827"
-            border.width: 1
-            border.color: "#335775"
-            opacity: root.canAction("zoom") ? 1 : 0.35
-
-            Accessible.role: Accessible.Button
-            Accessible.name: "Zoom agent pane"
-            Accessible.onPressAction: root.requestZoom()
-
-            Text {
-                anchors.centerIn: parent
-                text: "ZOOM"
-                textFormat: Text.PlainText
-                color: "#9bdcff"
-                font {
-                    family: "monospace"
-                    pixelSize: 14
-                    weight: Font.DemiBold
-                    letterSpacing: 0.8
-                }
-            }
-
-            TapHandler {
-                id: zoomHandler
-
-                enabled: root.agent !== null && root.canAction("zoom")
-                gesturePolicy: TapHandler.ReleaseWithinBounds
-                onTapped: root.requestZoom()
-            }
-        }
+        visible: root.hasGuardedActions
 
         HoldControl {
-            width: root.capability("approve") !== null
-                    && root.capability("interrupt") !== null
-                ? (actionRow.width - 112) / 2
-                : actionRow.width - 104
+            width: root.hasApproveAction && root.hasInterruptAction
+                ? (actionRow.width - actionRow.spacing) / 2
+                : actionRow.width
             height: parent.height
-            visible: root.capability("approve") !== null
+            visible: root.hasApproveAction
             enabled: visible
             label: "HOLD APPROVE"
             accent: "#6cf7b0"
@@ -434,12 +386,11 @@ Item {
         }
 
         HoldControl {
-            width: root.capability("approve") !== null
-                    && root.capability("interrupt") !== null
-                ? (actionRow.width - 112) / 2
-                : actionRow.width - 104
+            width: root.hasApproveAction && root.hasInterruptAction
+                ? (actionRow.width - actionRow.spacing) / 2
+                : actionRow.width
             height: parent.height
-            visible: root.capability("interrupt") !== null
+            visible: root.hasInterruptAction
             enabled: visible
             label: "HOLD INTERRUPT"
             accent: "#ff5d83"

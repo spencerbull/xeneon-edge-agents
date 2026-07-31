@@ -8,6 +8,9 @@ Item {
     required property var activity
     property bool reducedMotion: false
     property bool previewMode: false
+    property bool restoreVoiceFocus: false
+    property bool previewMicroOpen: false
+    property string hostName: "LOCAL"
 
     readonly property int pageSize: 6
     readonly property int pageCount: Math.max(
@@ -15,20 +18,70 @@ Item {
         Math.ceil(store.agents.length / pageSize)
     )
     readonly property string surfaceState: store.surfaceState()
+    readonly property bool controlCenterInteractive:
+        !activity.ambientMode
+        && ambientView.controlCenterProgress >= 0.999
+        && !ambientView.exitShield
     property int currentPage: 0
     property bool userPaging: false
     property string toastTitle: ""
     property string toastDetail: ""
     property bool toastSuccess: true
     property bool toastVisible: false
+    property var pendingVoiceFocus: ({})
+    property var pendingDesktopActions: ({})
+    property bool microDrawerOpen: false
 
     clip: true
+
+    Component.onCompleted: {
+        if (previewMode && previewMicroOpen)
+            microDrawerOpen = true
+    }
 
     function agentAt(pageIndex, slotIndex) {
         var agentIndex = pageIndex * pageSize + slotIndex
         return agentIndex >= 0 && agentIndex < store.agents.length
             ? store.agents[agentIndex]
             : null
+    }
+
+    function pageAgentCount(pageIndex) {
+        return Math.max(
+            0,
+            Math.min(pageSize, store.agents.length - pageIndex * pageSize)
+        )
+    }
+
+    function pageColumns(pageIndex) {
+        var count = pageAgentCount(pageIndex)
+        if (count <= 2)
+            return Math.max(1, count)
+        return count <= 4 ? 2 : 3
+    }
+
+    function pageRows(pageIndex) {
+        return Math.max(
+            1,
+            Math.ceil(pageAgentCount(pageIndex) / pageColumns(pageIndex))
+        )
+    }
+
+    function attentionSummary() {
+        var working = 0
+        var review = 0
+        var waiting = 0
+        for (var index = 0; index < store.agents.length; index += 1) {
+            var agent = store.agents[index]
+            if (agent.review_ready === true)
+                review += 1
+            else if (agent.status === "blocked")
+                waiting += 1
+            else if (agent.status === "working")
+                working += 1
+        }
+        return working + " WORKING  ·  " + review + " REVIEW  ·  "
+            + waiting + " WAITING"
     }
 
     function notePassiveInteraction() {
@@ -51,15 +104,62 @@ Item {
         toastTimer.restart()
     }
 
+    function requestVoiceAfterFocus(action) {
+        var requestId = root.bridge.restoreFocus()
+        if (requestId === "")
+            return false
+        var pending = Object.assign({}, pendingVoiceFocus)
+        pending[requestId] = action
+        pendingVoiceFocus = pending
+        return true
+    }
+
+    function desktopActionPending(action) {
+        var requestIds = Object.keys(pendingDesktopActions)
+        for (var index = 0; index < requestIds.length; index += 1) {
+            if (pendingDesktopActions[requestIds[index]] === action)
+                return true
+        }
+        return false
+    }
+
+    function requestDesktop(action) {
+        if (desktopActionPending(action))
+            return false
+        var requestId = action === "chatgpt_desktop"
+            ? bridge.openChatGptDesktop()
+            : bridge.openClaudeDesktop()
+        if (requestId === "")
+            return false
+        var pending = Object.assign({}, pendingDesktopActions)
+        pending[requestId] = action
+        pendingDesktopActions = pending
+        return true
+    }
+
     onPageCountChanged: {
         currentPage = Math.min(currentPage, pageCount - 1)
         pages.positionViewAtIndex(currentPage, ListView.SnapPosition)
+    }
+
+    onControlCenterInteractiveChanged: {
+        if (!controlCenterInteractive)
+            microDrawerOpen = false
     }
 
     PortalBackground {
         anchors.fill: parent
         reducedMotion: root.reducedMotion
         ambientMode: root.activity.ambientMode
+    }
+
+    AmbientRing {
+        anchors.fill: parent
+        agents: root.store.agents
+        voice: root.store.voice
+        connectionState: root.store.connection.state
+        reducedMotion: root.reducedMotion
+        z: 50
     }
 
     Item {
@@ -73,6 +173,11 @@ Item {
             rightMargin: 34
         }
         height: 92
+        opacity: ambientView.controlCenterProgress
+
+        transform: Translate {
+            y: (1 - ambientView.controlCenterProgress) * -18
+        }
 
         Row {
             anchors {
@@ -92,7 +197,8 @@ Item {
                 spacing: 2
 
                 Text {
-                    text: "XENEON // AGENT COMMAND"
+                    text: String(root.hostName || "LOCAL").toUpperCase()
+                        + " // AGENT COMMAND"
                     textFormat: Text.PlainText
                     color: "#ecfbff"
                     font {
@@ -104,9 +210,7 @@ Item {
                 }
 
                 Text {
-                    text: root.store.agents.length + " AGENTS  ·  "
-                        + root.store.sessions.length + " SESSIONS  ·  SEQ "
-                        + Math.max(0, root.store.sequence)
+                    text: root.attentionSummary()
                     textFormat: Text.PlainText
                     color: "#6385a5"
                     font {
@@ -123,6 +227,7 @@ Item {
 
             anchors.centerIn: parent
             spacing: 12
+
             visible: root.pageCount > 1
 
             Repeater {
@@ -134,14 +239,19 @@ Item {
                     width: 58
                     height: 48
                     color: "transparent"
+                    enabled: root.controlCenterInteractive
 
                     Accessible.role: Accessible.Button
+                    Accessible.ignored: !root.controlCenterInteractive
                     Accessible.name: "Show agent page " + (index + 1)
                         + " of " + root.pageCount
                     Accessible.description: index === root.currentPage
                         ? "Current page"
                         : "Switch pages"
-                    Accessible.onPressAction: root.selectPage(index)
+                    Accessible.onPressAction: {
+                        if (root.controlCenterInteractive)
+                            root.selectPage(index)
+                    }
 
                     Rectangle {
                         anchors.centerIn: parent
@@ -168,58 +278,152 @@ Item {
             }
         }
 
-        Rectangle {
+        Row {
             anchors {
                 right: parent.right
                 verticalCenter: parent.verticalCenter
             }
-            width: connectionLabel.implicitWidth + 38
-            height: 40
-            radius: 20
-            color: "#0c1726"
-            border.width: 1
-            border.color: root.store.connection.state === "connected"
-                ? "#27735b"
-                : root.store.connection.state === "degraded"
-                    ? "#8d6735"
-                    : "#7a354e"
+            spacing: 12
+
+            DesktopAppButton {
+                width: 188
+                height: 58
+                anchors.verticalCenter: parent.verticalCenter
+                label: "CHATGPT"
+                accent: "#6cf7b0"
+                pending: root.desktopActionPending("chatgpt_desktop")
+                enabled: root.controlCenterInteractive
+                    && !root.store.freshSnapshotRequired
+                onInteracted: root.activity.noteUserActivity()
+                onTriggered: root.requestDesktop("chatgpt_desktop")
+            }
+
+            DesktopAppButton {
+                width: 188
+                height: 58
+                anchors.verticalCenter: parent.verticalCenter
+                label: "CLAUDE"
+                accent: "#e89562"
+                pending: root.desktopActionPending("claude_desktop")
+                enabled: root.controlCenterInteractive
+                    && !root.store.freshSnapshotRequired
+                onInteracted: root.activity.noteUserActivity()
+                onTriggered: root.requestDesktop("claude_desktop")
+            }
+
+            VoiceControl {
+                width: 320
+                height: 58
+                anchors.verticalCenter: parent.verticalCenter
+                voice: root.store.voice
+                reducedMotion: root.reducedMotion
+                enabled: root.controlCenterInteractive
+                actionsEnabled: root.controlCenterInteractive
+                    && !root.store.freshSnapshotRequired
+                onInteracted: root.activity.noteUserActivity()
+                onStartRequested: {
+                    if (root.restoreVoiceFocus)
+                        root.requestVoiceAfterFocus("start")
+                    else
+                        root.bridge.startVoice()
+                }
+                onStopRequested: {
+                    if (root.restoreVoiceFocus)
+                        root.requestVoiceAfterFocus("stop")
+                    else
+                        root.bridge.stopVoice()
+                }
+                onCancelRequested: root.bridge.cancelVoice()
+            }
 
             Rectangle {
-                width: 9
-                height: 9
-                radius: 5
-                anchors {
-                    left: parent.left
-                    leftMargin: 14
-                    verticalCenter: parent.verticalCenter
+                id: microButton
+
+                width: 218
+                height: 58
+                radius: 14
+                anchors.verticalCenter: parent.verticalCenter
+                color: microTap.pressed ? "#14283a" : "#0b1523"
+                border.width: 1
+                border.color: root.store.micro.connected
+                    ? "#3a8d83"
+                    : "#583b49"
+                enabled: root.controlCenterInteractive
+
+                function activate() {
+                    if (!enabled)
+                        return false
+                    root.activity.noteUserActivity()
+                    root.microDrawerOpen = !root.microDrawerOpen
+                    return true
                 }
-                color: root.store.connection.state === "connected"
-                    ? "#6cf7b0"
-                    : root.store.connection.state === "degraded"
-                        ? "#ffb45e"
-                        : "#ff5d83"
+
+                Accessible.role: Accessible.Button
+                Accessible.ignored: !enabled
+                Accessible.name: "Codex Micro virtual projection"
+                Accessible.description: root.store.micro.connected
+                    ? "Connected"
+                    : "Unavailable"
+                Accessible.onPressAction: activate()
+
+                Row {
+                    anchors.centerIn: parent
+                    spacing: 11
+
+                    Rectangle {
+                        width: 28
+                        height: 28
+                        radius: 14
+                        color: "transparent"
+                        border.width: 4
+                        border.color: root.store.micro.connected
+                            ? "#49e0cf"
+                            : "#604253"
+                    }
+
+                    Column {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 1
+
+                        Text {
+                            text: "MICRO"
+                            textFormat: Text.PlainText
+                            color: "#e8f8fc"
+                            font {
+                                family: "monospace"
+                                pixelSize: 15
+                                weight: Font.Bold
+                                letterSpacing: 0.7
+                            }
+                        }
+
+                        Text {
+                            text: root.store.micro.connected
+                                ? Number(root.store.micro.battery) >= 0
+                                    ? root.store.micro.battery + "% · CONNECTED"
+                                    : "CONNECTED"
+                                : "OFFLINE"
+                            textFormat: Text.PlainText
+                            color: root.store.micro.connected
+                                ? "#65d9c5"
+                                : "#b07888"
+                            font {
+                                family: "monospace"
+                                pixelSize: 9
+                                weight: Font.DemiBold
+                            }
+                        }
+                    }
+                }
+
+                TapHandler {
+                    id: microTap
+                    enabled: microButton.enabled
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: microButton.activate()
+                }
             }
 
-            Text {
-                id: connectionLabel
-
-                anchors {
-                    left: parent.left
-                    leftMargin: 30
-                    verticalCenter: parent.verticalCenter
-                }
-                text: String(
-                    root.store.connection.state || "STARTING"
-                ).toUpperCase()
-                textFormat: Text.PlainText
-                color: "#cce8f5"
-                font {
-                    family: "monospace"
-                    pixelSize: 13
-                    weight: Font.DemiBold
-                    letterSpacing: 0.8
-                }
-            }
         }
     }
 
@@ -237,6 +441,7 @@ Item {
         clip: true
         visible: height > 0
         z: 12
+        opacity: ambientView.controlCenterProgress
 
         Text {
             anchors.centerIn: parent
@@ -272,7 +477,7 @@ Item {
             left: parent.left
             right: parent.right
             top: header.bottom
-            bottom: healthStrip.top
+            bottom: commandDock.top
             topMargin: 7
             bottomMargin: 10
         }
@@ -282,9 +487,13 @@ Item {
         snapMode: ListView.SnapOneItem
         boundsBehavior: Flickable.StopAtBounds
         interactive: root.pageCount > 1 && root.surfaceState !== "disconnected"
+            && root.controlCenterInteractive
         highlightMoveDuration: root.reducedMotion ? 0 : 220
         cacheBuffer: width
         clip: true
+        opacity: ambientView.controlCenterProgress
+        scale: 0.985 + ambientView.controlCenterProgress * 0.015
+        transformOrigin: Item.Center
 
         onMovementStarted: {
             root.userPaging = true
@@ -322,7 +531,7 @@ Item {
                     topMargin: 8
                     bottomMargin: 4
                 }
-                columns: 3
+                columns: root.pageColumns(page.index)
                 columnSpacing: 16
                 rowSpacing: 16
 
@@ -332,25 +541,28 @@ Item {
                     AgentCard {
                         required property int index
 
-                        width: (cardGrid.width - cardGrid.columnSpacing * 2) / 3
-                        height: (cardGrid.height - cardGrid.rowSpacing) / 2
+                        width: (
+                            cardGrid.width
+                                - cardGrid.columnSpacing
+                                    * (cardGrid.columns - 1)
+                        ) / cardGrid.columns
+                        height: (
+                            cardGrid.height
+                                - cardGrid.rowSpacing
+                                    * (root.pageRows(page.index) - 1)
+                        ) / root.pageRows(page.index)
                         agent: root.agentAt(page.index, index)
                         visible: agent !== null
-                        enabled: visible
+                        enabled: visible && root.controlCenterInteractive
                         reducedMotion: root.reducedMotion
                         snapshotSequence: root.store.sequence
                         actionsEnabled: !root.store.freshSnapshotRequired
 
                         onInteracted: root.activity.noteUserActivity()
 
-                        onOpenRequested: function(agentId) {
-                            // Opening intentionally keeps focus in Herdr.
+                        onFocusRequested: function(agentId) {
+                            // Card activation intentionally focuses Herdr.
                             root.bridge.openAgent(agentId)
-                        }
-
-                        onZoomRequested: function(agentId) {
-                            // Zooming intentionally keeps focus in Herdr.
-                            root.bridge.zoomAgent(agentId)
                         }
 
                         onApproveRequested: function(
@@ -396,6 +608,7 @@ Item {
             || root.surfaceState === "disconnected"
             || root.surfaceState === "empty"
         z: 20
+        opacity: ambientView.controlCenterProgress
 
         Rectangle {
             anchors.fill: parent
@@ -451,8 +664,8 @@ Item {
         }
     }
 
-    HealthStrip {
-        id: healthStrip
+    AiUsageDock {
+        id: commandDock
 
         anchors {
             left: parent.left
@@ -462,10 +675,30 @@ Item {
             rightMargin: 24
             bottomMargin: 16
         }
-        height: 64
-        health: root.store.health
-        connection: root.store.connection
-        onInteracted: root.notePassiveInteraction()
+        height: 82
+        usage: root.store.usage
+        agents: root.store.agents
+        sessions: root.store.sessions
+        reducedMotion: root.reducedMotion
+        enabled: root.controlCenterInteractive
+        opacity: ambientView.controlCenterProgress
+        transform: Translate {
+            y: (1 - ambientView.controlCenterProgress) * 14
+        }
+    }
+
+    MicroDrawer {
+        anchors.fill: parent
+        opened: root.microDrawerOpen
+        interactive: root.controlCenterInteractive
+        reducedMotion: root.reducedMotion
+        micro: root.store.micro
+        agents: root.store.agents
+        voice: root.store.voice
+        z: 35
+        opacity: ambientView.controlCenterProgress
+        onInteracted: root.activity.noteUserActivity()
+        onCloseRequested: root.microDrawerOpen = false
     }
 
     Rectangle {
@@ -485,6 +718,7 @@ Item {
         clip: true
         visible: height > 0
         z: 60
+        opacity: ambientView.controlCenterProgress
 
         Row {
             anchors {
@@ -553,12 +787,55 @@ Item {
         target: root.store
 
         function onActionResultReceived(result) {
-            if (result.action === "restore_focus")
+            if (result.action === "restore_focus") {
+                var intent = root.pendingVoiceFocus[result.request_id]
+                if (intent !== undefined) {
+                    var pending = Object.assign(
+                        {},
+                        root.pendingVoiceFocus
+                    )
+                    delete pending[result.request_id]
+                    root.pendingVoiceFocus = pending
+                    if (result.ok) {
+                        if (intent === "start")
+                            root.bridge.startVoice()
+                        else if (intent === "stop")
+                            root.bridge.stopVoice()
+                    } else {
+                        root.showToast(
+                            "VOICE // FOCUS REQUIRED",
+                            "Choose a laptop typing target and try again",
+                            false
+                        )
+                    }
+                }
                 return
+            }
+            if (result.action === "chatgpt_desktop"
+                    || result.action === "claude_desktop") {
+                var desktopPending = Object.assign(
+                    {},
+                    root.pendingDesktopActions
+                )
+                delete desktopPending[result.request_id]
+                root.pendingDesktopActions = desktopPending
+                root.showToast(
+                    result.ok
+                        ? "DESKTOP // READY"
+                        : "DESKTOP // " + String(result.code).toUpperCase(),
+                    result.message || result.request_id,
+                    result.ok
+                )
+                return
+            }
+            var voiceAction = String(result.action).indexOf("voice_") === 0
             root.showToast(
                 result.ok
-                    ? "ACTION // ACCEPTED"
-                    : "ACTION // " + String(result.code).toUpperCase(),
+                    ? voiceAction
+                        ? "VOICE // ACCEPTED"
+                        : "ACTION // ACCEPTED"
+                    : (voiceAction ? "VOICE // " : "ACTION // ")
+                        + String(result.code).toUpperCase(),
                 result.message || result.request_id,
                 result.ok
             )
@@ -570,6 +847,11 @@ Item {
                 notice.message,
                 String(notice.level).toLowerCase() !== "error"
             )
+        }
+
+        function onFreshSnapshotRequiredChanged() {
+            if (root.store.freshSnapshotRequired)
+                root.pendingDesktopActions = {}
         }
     }
 
@@ -592,11 +874,15 @@ Item {
     }
 
     AmbientView {
+        id: ambientView
+
         anchors.fill: parent
         active: root.activity.ambientMode
         reducedMotion: root.reducedMotion
         agents: root.store.agents
         health: root.store.health
+        voice: root.store.voice
+        connectionState: root.store.connection.state
         onWakeRequested: root.notePassiveInteraction()
     }
 }

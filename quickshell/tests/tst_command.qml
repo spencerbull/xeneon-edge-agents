@@ -57,13 +57,50 @@ TestCase {
         compare(builder.build("restore_focus", "agent-1", "", 42), null)
         compare(
             builder.lastError,
-            "restore_focus cannot target an agent or capability"
+            "System action cannot target an agent or capability"
         )
 
         compare(
             builder.build("restore_focus", "", "stale-capability", 42),
             null
         )
+    }
+
+    function test_voiceActionsAreTypedAndCannotTargetAgents() {
+        for (var index = 0; index < 3; index += 1) {
+            var action = [
+                "voice_start",
+                "voice_stop",
+                "voice_cancel"
+            ][index]
+            var command = builder.build(action, "", "", 44)
+            verify(command !== null)
+            compare(command.action, action)
+            compare(command.sequence, 44)
+            compare(command.agent_id, undefined)
+            compare(command.capability_id, undefined)
+            compare(builder.build(action, "agent-1", "", 44), null)
+        }
+    }
+
+    function test_desktopActionsAreFixedAndCannotTargetAgents() {
+        for (var index = 0; index < 2; index += 1) {
+            var action = [
+                "chatgpt_desktop",
+                "claude_desktop"
+            ][index]
+            var command = builder.build(action, "", "", 45)
+            verify(command !== null)
+            compare(command.action, action)
+            compare(command.agent_id, undefined)
+            compare(command.capability_id, undefined)
+            compare(command.desktop_id, undefined)
+            compare(builder.build(action, "agent-1", "", 45), null)
+            compare(
+                builder.build(action, "", "capability", 45),
+                null
+            )
+        }
     }
 
     function test_rejectsRawOrUnknownActions() {
