@@ -194,12 +194,12 @@ and desktop actions stay in `xeneon-agentd`.
 
 ## Current local state
 
-- The reviewed physical-commissioning and card-accent work is pushed through
-  `80b8ac8` on `origin/agent/portal-voice-ring`; the global display-control
-  follow-up is installed from the current uncommitted worktree diff.
-- The naming/voice/ring UX lives in the isolated
-  `agent/portal-voice-ring` worktree and is installed in user-owned XDG paths
-  on this host.
+- PR #2 is squash-merged on `main` at `7eb773c`, including the reviewed
+  physical commissioning, naming/voice/ring UX, card accents, and persistent
+  display controls.
+- The clean `agent/portal-voice-ring` worktree is retained as historical
+  branch context; the merged implementation remains installed in user-owned
+  XDG paths on this host.
 - The final live preview showed the current Herdr public labels
   `seform-codex`, `wifi7`, `herdr-xeneon`, and `herdr-xeneon-design`; prior
   voice validation observed recording/idle ownership transitions,
