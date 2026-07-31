@@ -9,17 +9,24 @@ ConditionEnvironment=WAYLAND_DISPLAY
 [Service]
 Type=simple
 Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
+Environment="XDG_STATE_HOME=@STATE_HOME@"
 Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
 Environment="XENEON_EDGE_OUTPUT=@OUTPUT_CONNECTOR@"
 Environment="XENEON_EDGE_SERIAL=@OUTPUT_SERIAL@"
 Environment="XENEON_EDGE_MODEL=@OUTPUT_MODEL@"
+Environment="XENEON_EDGE_HOSTNAME=%H"
+Environment="XENEON_EDGE_SETTINGS_PATH=@STATE_HOME@/xeneon-edge-agents/portal/preferences.ini"
 ExecStart=/usr/bin/env quickshell -c xeneon-edge-agents
 Restart=on-failure
 RestartSec=2s
+StateDirectory=xeneon-edge-agents/portal
+StateDirectoryMode=0700
+UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=%t/quickshell %t/dconf
 
 [Install]
 WantedBy=graphical-session.target

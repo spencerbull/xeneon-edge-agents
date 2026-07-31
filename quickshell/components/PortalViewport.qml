@@ -6,8 +6,12 @@ Item {
     required property var store
     required property var bridge
     required property var activity
+    required property var preferences
     property bool reducedMotion: false
     property bool previewMode: false
+    property bool restoreVoiceFocus: false
+    property bool previewMicroOpen: false
+    property string hostName: "LOCAL"
 
     readonly property real designWidth: 2560
     readonly property real designHeight: 720
@@ -38,8 +42,12 @@ Item {
             store: root.store
             bridge: root.bridge
             activity: root.activity
+            preferences: root.preferences
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
+            restoreVoiceFocus: root.restoreVoiceFocus
+            previewMicroOpen: root.previewMicroOpen
+            hostName: root.hostName
         }
     }
 }

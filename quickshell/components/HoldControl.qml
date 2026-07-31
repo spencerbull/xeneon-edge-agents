@@ -27,10 +27,14 @@ Item {
     implicitHeight: 48
 
     Accessible.role: Accessible.Button
+    Accessible.ignored: !root.enabled
     Accessible.name: label
     Accessible.description:
         "Touch and hold for 800 milliseconds; a press action cannot confirm"
-    Accessible.onPressAction: root.accessibleHoldRequested()
+    Accessible.onPressAction: {
+        if (root.enabled)
+            root.accessibleHoldRequested()
+    }
 
     onTargetAgentIdChanged: invalidateChangedTarget()
     onTargetCapabilityIdChanged: invalidateChangedTarget()

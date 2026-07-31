@@ -59,6 +59,11 @@ TestCase {
                 "last_sync_ms": 900 + sequence
             }],
             "agents": agents,
+            "voice": {
+                "available": true,
+                "state": "idle",
+                "owned": false
+            },
             "health": health()
         }
     }
@@ -69,11 +74,13 @@ TestCase {
             "display_name": "Agent " + id,
             "agent": "fixture",
             "status": status,
+            "launch_pending": false,
             "workspace": "fixture-workspace",
             "repository": "fixture/repository",
             "worktree": "fixture-worktree",
             "session": "fixture",
             "focused": false,
+            "review_ready": false,
             "observed_for_seconds": 3,
             "source_order": sourceOrder,
             "terminal_text": "must be discarded",
@@ -101,7 +108,9 @@ TestCase {
             [
                 agent("later", 5, "working"),
                 agent("first", 0, "blocked"),
-                agent("middle", 2, "done")
+                Object.assign(agent("middle", 2, "done"), {
+                    "review_ready": true
+                })
             ]
         ))
 
@@ -121,6 +130,7 @@ TestCase {
         compare(store.health.gpu_temperature.available, false)
         compare(store.health.gpu_temperature.value, null)
         compare(store.health.status, "partial")
+        compare(store.voice.state, "idle")
         compare(store.surfaceState(), "ready")
     }
 
@@ -188,6 +198,101 @@ TestCase {
         compare(store.health.cpu.value, 67)
     }
 
+    function test_equalSequenceRefreshesUsageAndMicroWithoutAmbientWake() {
+        var initial = snapshot(
+            12,
+            "epoch-telemetry",
+            [agent("telemetry-agent", 0, "working")]
+        )
+        initial.generated_at_ms = 12000
+        initial.usage = {
+            "providers": [{
+                "id": "codex",
+                "label": "Codex",
+                "kind": "quota",
+                "available": true,
+                "stale": false,
+                "source": "rpc",
+                "status": "allowed",
+                "primary": {
+                    "label": "Weekly",
+                    "utilization": 0.4,
+                    "reset_at_ms": 50000
+                }
+            }]
+        }
+        initial.micro = {
+            "connected": false,
+            "charging": false
+        }
+        verify(store.ingestEnvelope(initial))
+        semanticActivitySpy.clear()
+
+        var refresh = snapshot(
+            12,
+            "epoch-telemetry",
+            [agent("replacement", 0, "blocked")]
+        )
+        refresh.generated_at_ms = 12001
+        refresh.usage = {
+            "providers": [{
+                "id": "codex",
+                "label": "Codex",
+                "kind": "quota",
+                "available": true,
+                "stale": false,
+                "source": "rpc",
+                "status": "allowed",
+                "primary": {
+                    "label": "Weekly",
+                    "utilization": 1.4,
+                    "reset_at_ms": 60000
+                },
+                "raw_tokens": 999999
+            }, {
+                "id": "hostile-provider",
+                "label": "Discard me",
+                "kind": "quota",
+                "available": true
+            }]
+        }
+        refresh.micro = {
+            "connected": true,
+            "firmware": "0.4.1",
+            "battery": 46,
+            "charging": false,
+            "layer": 1,
+            "profile": 0,
+            "last_updated_ms": 12001,
+            "raw_message": "discard me"
+        }
+
+        verify(store.ingestEnvelope(refresh))
+        compare(store.agents[0].id, "telemetry-agent")
+        compare(store.usage.providers.length, 1)
+        compare(store.usage.providers[0].id, "codex")
+        compare(store.usage.providers[0].primary.utilization, 1)
+        compare(store.usage.providers[0].raw_tokens, undefined)
+        compare(store.micro.connected, true)
+        compare(store.micro.battery, 46)
+        compare(store.micro.raw_message, undefined)
+        compare(semanticActivitySpy.count, 0)
+    }
+
+    function test_launchPendingIsTypedAndHostileValuesDoNotCoerce() {
+        var launching = agent("launching", 0, "unknown")
+        launching.launch_pending = true
+        var hostile = agent("hostile", 1, "unknown")
+        hostile.launch_pending = "true"
+        verify(store.ingestEnvelope(snapshot(
+            13,
+            "epoch-launch",
+            [launching, hostile]
+        )))
+        compare(store.agents[0].launch_pending, true)
+        compare(store.agents[1].launch_pending, false)
+    }
+
     function test_semanticActivityIgnoresSequenceOnlyChanges() {
         verify(store.ingestEnvelope(snapshot(
             1,
@@ -206,6 +311,70 @@ TestCase {
             "epoch-activity",
             [agent("activity-agent", 0, "blocked")]
         )))
+        compare(semanticActivitySpy.count, 1)
+    }
+
+    function test_reviewReadyIdleSortsWithDoneAttention() {
+        var review = agent("review", 4, "idle")
+        review.review_ready = true
+        verify(store.ingestEnvelope(snapshot(
+            4,
+            "epoch-review",
+            [
+                agent("working", 0, "working"),
+                review,
+                agent("idle", 1, "idle")
+            ]
+        )))
+        compare(store.agents[0].id, "review")
+        compare(store.agents[0].review_ready, true)
+        compare(store.agents[1].id, "working")
+        compare(store.agents[2].id, "idle")
+    }
+
+    function test_acknowledgedDoneSortsAsIdle() {
+        var done = agent("done", 0, "done")
+        done.review_ready = false
+        var review = agent("review", 2, "idle")
+        review.review_ready = true
+        verify(store.ingestEnvelope(snapshot(
+            5,
+            "epoch-done-ack",
+            [
+                done,
+                agent("working", 1, "working"),
+                review
+            ]
+        )))
+        compare(store.agents[0].id, "review")
+        compare(store.agents[1].id, "working")
+        compare(store.agents[2].id, "done")
+    }
+
+    function test_equalSequenceVoiceChangeIsAcceptedAndWakesActivity() {
+        var initial = snapshot(
+            7,
+            "epoch-voice",
+            [agent("voice-agent", 0, "idle")]
+        )
+        initial.generated_at_ms = 7000
+        verify(store.ingestEnvelope(initial))
+        semanticActivitySpy.clear()
+
+        var recording = snapshot(
+            7,
+            "epoch-voice",
+            [agent("voice-agent", 0, "idle")]
+        )
+        recording.generated_at_ms = 7001
+        recording.voice = {
+            "available": true,
+            "state": "recording",
+            "owned": true
+        }
+        verify(store.ingestEnvelope(recording))
+        compare(store.voice.state, "recording")
+        compare(store.voice.owned, true)
         compare(semanticActivitySpy.count, 1)
     }
 

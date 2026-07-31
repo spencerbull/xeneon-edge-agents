@@ -10,7 +10,9 @@ PanelWindow {
     required property var store
     required property var bridge
     required property var activity
+    required property var preferences
     property bool reducedMotion: false
+    property string hostName: "LOCAL"
     property bool recoveryVisible: true
     property int recoveryAttempts: 0
     property bool awaitingRecovery: false
@@ -94,7 +96,9 @@ PanelWindow {
         store: root.store
         bridge: root.bridge
         activity: root.activity
+        preferences: root.preferences
         reducedMotion: root.reducedMotion
         previewMode: false
+        hostName: root.hostName
     }
 }

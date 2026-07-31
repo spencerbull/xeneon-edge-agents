@@ -69,11 +69,15 @@ Item {
     }
 
     function toggleDetails() {
+        if (!root.enabled)
+            return false
         detailsVisible = !detailsVisible
         interacted()
+        return true
     }
 
     Accessible.role: Accessible.Button
+    Accessible.ignored: !root.enabled
     Accessible.name: "System health strip"
     Accessible.onPressAction: root.toggleDetails()
 

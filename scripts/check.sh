@@ -210,14 +210,16 @@ print(sum(
       "$touch_output" != "$connector" ]]; then
       printf 'unsafe: per-device touch mapping is incomplete\n'
       failures=$((failures + 1))
-    elif [[ "${touch_bustype,,}" != 0003 || "${touch_vendor,,}" != 1b1c ||
+    elif [[ "${touch_bustype,,}" != 0003 ||
+      ! "$touch_vendor" =~ ^[0-9a-fA-F]{4}$ ||
       ! "$touch_product" =~ ^[0-9a-fA-F]{4}$ ||
       ( -z "$touch_uniq" && -z "$touch_phys" ) ]]; then
-      printf 'unsafe: Corsair USB touch identity is incomplete\n'
+      printf 'unsafe: USB touchscreen identity is incomplete\n'
       failures=$((failures + 1))
     else
       devices_payload=
       devices_inventory_available=0
+      touch_inventory_valid=0
       if [[ -n "$hypr_devices_json" ]]; then
         if [[ -r "$hypr_devices_json" ]]; then
           devices_payload=$(<"$hypr_devices_json")
@@ -255,7 +257,10 @@ print(sum(1 for device in touch if device.get("name") == wanted))
 ' "$touch_device" <<<"$devices_payload"
         )
         case "$touch_match_count" in
-          1) printf 'ok: exact Hyprland touch device: %s\n' "$touch_device" ;;
+          1)
+            printf 'ok: exact Hyprland touch device: %s\n' "$touch_device"
+            touch_inventory_valid=1
+            ;;
           -1)
             printf 'blocked: Hyprland touch-device inventory is invalid JSON\n'
             failures=$((failures + 1))
@@ -273,6 +278,7 @@ print(sum(1 for device in touch if device.get("name") == wanted))
       fi
 
       kernel_touch_match_count=0
+      matched_kernel_base=
       while IFS= read -r -d '' event_path; do
         properties=
         if [[ "$sys_root" == /sys ]] && command -v udevadm >/dev/null 2>&1; then
@@ -292,14 +298,20 @@ print(sum(1 for device in touch if device.get("name") == wanted))
         kernel_uniq=$(<"$event_path/device/uniq")
         kernel_phys=$(<"$event_path/device/phys")
 
-        [[ "$(normalize_hypr_device_name "$kernel_name")" == "$touch_device" ]] ||
-          continue
+        normalized_kernel_name=$(normalize_hypr_device_name "$kernel_name")
+        if [[ "$touch_device" != "$normalized_kernel_name" ]]; then
+          touch_name_suffix=${touch_device#"$normalized_kernel_name"-}
+          [[ "$touch_device" == "$normalized_kernel_name"-* &&
+            "$touch_name_suffix" =~ ^[0-9]+$ ]] ||
+            continue
+        fi
         [[ "${kernel_bustype,,}" == "${touch_bustype,,}" &&
           "${kernel_vendor,,}" == "${touch_vendor,,}" &&
           "${kernel_product,,}" == "${touch_product,,}" ]] ||
           continue
         [[ -z "$touch_uniq" || "$kernel_uniq" == "$touch_uniq" ]] || continue
         [[ -z "$touch_phys" || "$kernel_phys" == "$touch_phys" ]] || continue
+        matched_kernel_base=$normalized_kernel_name
         kernel_touch_match_count=$((kernel_touch_match_count + 1))
       done < <(
         find -L "$sys_root/class/input" \
@@ -308,14 +320,40 @@ print(sum(1 for device in touch if device.get("name") == wanted))
 
       case "$kernel_touch_match_count" in
         1)
-          printf 'ok: exact Corsair USB touchscreen kernel identity\n'
+          printf 'ok: exact USB touchscreen kernel identity\n'
+          if ((touch_inventory_valid)); then
+            touch_family_count=$(
+              python3 -c '
+import json
+import re
+import sys
+
+base = sys.argv[1]
+payload = json.load(sys.stdin)
+family = re.compile(rf"^{re.escape(base)}(?:-[0-9]+)?$")
+print(sum(
+    1
+    for device in payload.get("touch", [])
+    if isinstance(device.get("name"), str)
+    and family.fullmatch(device["name"])
+))
+' "$matched_kernel_base" <<<"$devices_payload"
+            )
+            if [[ "$touch_family_count" == 1 ]]; then
+              printf 'ok: unique Hyprland touchscreen name family\n'
+            else
+              printf 'blocked: Hyprland touchscreen name family is ambiguous (%d matches)\n' \
+                "$touch_family_count"
+              failures=$((failures + 1))
+            fi
+          fi
           ;;
         0)
-          printf 'blocked: configured Corsair USB touchscreen identity is absent\n'
+          printf 'blocked: configured USB touchscreen identity is absent\n'
           failures=$((failures + 1))
           ;;
         *)
-          printf 'blocked: configured Corsair USB touchscreen identity is ambiguous (%d matches)\n' \
+          printf 'blocked: configured USB touchscreen identity is ambiguous (%d matches)\n' \
             "$kernel_touch_match_count"
           failures=$((failures + 1))
           ;;

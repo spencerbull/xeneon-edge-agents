@@ -49,15 +49,17 @@ scripts/install.sh \
   --screen-model '<EXACT-SCREEN-MODEL>' \
   --touch-device '<EXACT-HYPRLAND-DEVICE-NAME>' \
   --touch-bustype '0003' \
-  --touch-vendor '1b1c' \
+  --touch-vendor '<EXACT-USB-VENDOR-ID>' \
   --touch-product '<EXACT-USB-PRODUCT-ID>' \
   --touch-phys '<EXACT-KERNEL-PHYS>'
 ```
 
 Use `--touch-uniq` instead of `--touch-phys` when the device exposes a stable
 non-empty `uniq`; both may be supplied to require both matches. The USB bus
-must be `0003` and the vendor must be Corsair's `1b1c`; the product ID is
-captured from the actual touchscreen and is not guessed.
+must be `0003`; vendor and product IDs are captured from the actual touchscreen
+and are not inferred from the display brand. The commissioned XENEON EDGE unit
+exposes its touch controller as `wch.cn-touchscreen-1`, USB `27c0:0859`, rather
+than through the separate Corsair `1b1c:1d0d` control endpoint.
 
 On a live user installation, the script first builds the candidate files in an
 isolated temporary root and checks the requested identity against real DRM,
@@ -72,8 +74,11 @@ luac -p "$HOME/.config/hypr/xeneon_edge_agents.lua"
 ```
 
 The portal service receives connector, serial, and model independently of the
-daemon config. Quickshell requires all three to match one screen before it
-creates a layer surface.
+daemon config. Activation first requires Hyprland to match all three exactly.
+Quickshell then requires exactly one screen with the configured connector and
+model before it creates a layer surface, and also requires the exact serial
+when Qt's Wayland backend exposes that EDID field. Some compositors leave
+`QScreen.serialNumber` empty even after the Hyprland preflight has succeeded.
 
 ## Activate and verify
 
@@ -89,7 +94,7 @@ scripts/install.sh \
   --screen-model '<EXACT-SCREEN-MODEL>' \
   --touch-device '<EXACT-HYPRLAND-DEVICE-NAME>' \
   --touch-bustype '0003' \
-  --touch-vendor '1b1c' \
+  --touch-vendor '<EXACT-USB-VENDOR-ID>' \
   --touch-product '<EXACT-USB-PRODUCT-ID>' \
   --touch-phys '<EXACT-KERNEL-PHYS>'
 ```
@@ -112,7 +117,7 @@ Physical acceptance requires all of the following:
 - unplugging the EDGE creates no laptop fallback surface;
 - touch maps to the complete EDGE and never another output;
 - tapping passive UI restores the previously active non-EDGE window;
-- open and zoom intentionally focus the exact Herdr session;
+- tapping an ordinary agent card focuses that exact Herdr agent;
 - guarded actions cancel on drag/release and fire once after an 800 ms hold;
 - lock, DPMS, hotplug, and suspend/resume do not leak or relocate the surface;
 - DDC probing is read-only and any future write can restore the exact prior

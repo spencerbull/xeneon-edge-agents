@@ -313,8 +313,8 @@ validate_commissioning_values() {
     die "touch device must be the normalized exact name from hyprctl devices"
   [[ "${touch_bustype,,}" == 0003 ]] ||
     die "touch bustype must be 0003 (USB)"
-  [[ "${touch_vendor,,}" == 1b1c ]] ||
-    die "touch vendor must be 1b1c (Corsair)"
+  [[ "$touch_vendor" =~ ^[0-9a-fA-F]{4}$ ]] ||
+    die "touch vendor must be a four-character hexadecimal input vendor ID"
   [[ "$touch_product" =~ ^[0-9a-fA-F]{4}$ ]] ||
     die "touch product must be a four-character hexadecimal input product ID"
   if [[ -z "$touch_uniq" && -z "$touch_phys" ]]; then

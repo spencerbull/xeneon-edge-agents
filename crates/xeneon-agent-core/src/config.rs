@@ -11,8 +11,12 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub herdr_bin: PathBuf,
+    pub voxtype_bin: PathBuf,
     pub herdr_refresh_ms: u64,
     pub health_refresh_ms: u64,
+    pub voice_refresh_ms: u64,
+    pub usage_refresh_ms: u64,
+    pub micro_refresh_ms: u64,
     pub screen: ScreenConfig,
     pub desktop: DesktopConfig,
 }
@@ -37,8 +41,12 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             herdr_bin: PathBuf::from("herdr"),
+            voxtype_bin: PathBuf::from("voxtype"),
             herdr_refresh_ms: 5_000,
             health_refresh_ms: 1_000,
+            voice_refresh_ms: 250,
+            usage_refresh_ms: 30_000,
+            micro_refresh_ms: 5_000,
             screen: ScreenConfig::default(),
             desktop: DesktopConfig::default(),
         }
@@ -75,6 +83,18 @@ impl Config {
 
     pub fn health_refresh_interval(&self) -> Duration {
         Duration::from_millis(self.health_refresh_ms.max(250))
+    }
+
+    pub fn voice_refresh_interval(&self) -> Duration {
+        Duration::from_millis(self.voice_refresh_ms.max(250))
+    }
+
+    pub fn usage_refresh_interval(&self) -> Duration {
+        Duration::from_millis(self.usage_refresh_ms.max(5_000))
+    }
+
+    pub fn micro_refresh_interval(&self) -> Duration {
+        Duration::from_millis(self.micro_refresh_ms.max(1_000))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -117,11 +137,19 @@ impl Config {
         if self.herdr_bin.as_os_str().is_empty() {
             anyhow::bail!("herdr_bin must not be empty");
         }
+        if self.voxtype_bin.as_os_str().is_empty() {
+            anyhow::bail!("voxtype_bin must not be empty");
+        }
         if self.desktop.herdr_class.trim().is_empty() {
             anyhow::bail!("desktop.herdr_class must not be empty");
         }
-        if self.herdr_refresh_ms < 250 || self.health_refresh_ms < 250 {
-            anyhow::bail!("refresh intervals must be at least 250ms");
+        if self.herdr_refresh_ms < 250
+            || self.health_refresh_ms < 250
+            || self.voice_refresh_ms < 250
+            || self.usage_refresh_ms < 5_000
+            || self.micro_refresh_ms < 1_000
+        {
+            anyhow::bail!("refresh intervals are below their safe minimum");
         }
         Ok(())
     }

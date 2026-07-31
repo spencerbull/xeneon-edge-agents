@@ -8,11 +8,12 @@ check_script=$repo_root/scripts/check.sh
 uninstall_script=$repo_root/scripts/uninstall.sh
 detect_script=$repo_root/scripts/detect-hardware.sh
 production_touch_args=(
-  --touch-device corsair-xeneon-edge-touchscreen
+  --touch-device wch.cn-touchscreen-1
   --touch-bustype 0003
-  --touch-vendor 1b1c
-  --touch-product 1d0d
-  --touch-phys usb-0000:00:14.0-1/input0
+  --touch-vendor 27c0
+  --touch-product 0859
+  --touch-uniq 9LQ0172005164
+  --touch-phys usb-0000:00:14.0-2.4/input0
 )
 
 tests_run=0
@@ -87,15 +88,17 @@ make_sysfs_match() {
 make_touchscreen_match() {
   local sys_root=$1
   local event_name=${2:-event90}
+  local uniq=${3:-9LQ0172005164}
+  local phys=${4:-usb-0000:00:14.0-2.4/input0}
   local directory=$sys_root/devices/mock-input/$event_name
   mkdir -p "$directory/device/id" "$directory/device/capabilities" \
     "$sys_root/class/input"
-  printf 'Corsair XENEON EDGE Touchscreen\n' >"$directory/device/name"
+  printf 'wch.cn TouchScreen\n' >"$directory/device/name"
   printf '0003\n' >"$directory/device/id/bustype"
-  printf '1b1c\n' >"$directory/device/id/vendor"
-  printf '1d0d\n' >"$directory/device/id/product"
-  printf '\n' >"$directory/device/uniq"
-  printf 'usb-0000:00:14.0-1/input0\n' >"$directory/device/phys"
+  printf '27c0\n' >"$directory/device/id/vendor"
+  printf '0859\n' >"$directory/device/id/product"
+  printf '%s\n' "$uniq" >"$directory/device/uniq"
+  printf '%s\n' "$phys" >"$directory/device/phys"
   printf '00000000000000000000000000000001\n' \
     >"$directory/device/capabilities/abs"
   printf 'ID_INPUT=1\nID_INPUT_TOUCHSCREEN=1\n' \
@@ -142,6 +145,26 @@ test_default_idempotence_and_uninstall() {
   assert_file "$root/.config/xeneon-edge-agents/commissioning.toml"
   assert_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_count 2 \
+    'xeneon-agentd.*--config .*--cleanup-dictation' \
+    "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" 'UMask=0077'
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+    'RuntimeDirectory=xeneon-edge-agents'
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+    'RuntimeDirectoryMode=0700'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'ReadWritePaths=%t/quickshell %t/dconf'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    "Environment=\"XDG_STATE_HOME=$root/.local/state\""
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    "Environment=\"XENEON_EDGE_SETTINGS_PATH=$root/.local/state/xeneon-edge-agents/portal/preferences.ini\""
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'StateDirectory=xeneon-edge-agents/portal'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'StateDirectoryMode=0700'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'UMask=0077'
   assert_no_file "$root/.config/hypr/xeneon_edge_agents.lua"
   assert_count 0 'hypr\.xeneon_edge_agents' "$root/.config/hypr/hyprland.lua"
   after=$(sha256sum "$root/.config/hypr/hyprland.lua")
@@ -272,7 +295,7 @@ test_production_commissioning_and_exact_check() {
   make_runtime_stubs "$root" "$quickshell_source"
   make_sysfs_match "$sys_root" card0 DP-1 "$fixture"
   make_touchscreen_match "$sys_root"
-  write_hypr_devices "$hypr_devices" corsair-xeneon-edge-touchscreen
+  write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   write_hypr_monitors "$hypr_monitors"
 
   "$install_script" --root "$root" --quickshell-source "$quickshell_source" \
@@ -294,7 +317,7 @@ test_production_commissioning_and_exact_check() {
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
     "Environment=\"PATH=$root/.local/bin:/usr/local/bin:/usr/bin\""
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
-  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'name = "corsair-xeneon-edge-touchscreen"'
+  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'name = "wch.cn-touchscreen-1"'
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'output = "DP-1"'
   assert_count 0 'require\("hypr\.xeneon_edge_agents"\)' "$root/.config/hypr/hyprland.lua"
   assert_no_file "$root/.config/hypr/monitors.lua"
@@ -417,6 +440,27 @@ test_missing_commissioning_values_do_not_install() {
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
 }
 
+test_invalid_touch_vendor_does_not_install() {
+  local root fixture sha log
+  root=$(new_temp_dir)
+  fixture=$root/edid.bin
+  log=$root/install.log
+  printf 'CORSAIR XENEON EDGE\n' >"$fixture"
+  sha=$(sha256sum "$fixture" | awk '{print $1}')
+
+  if "$install_script" --root "$root" --apply-production \
+    --connector DP-1 --edid-sha256 "$sha" \
+    --screen-serial CX123456 --screen-model "XENEON EDGE" \
+    --touch-device wch.cn-touchscreen-1 \
+    --touch-bustype 0003 --touch-vendor zzzz --touch-product 0859 \
+    --touch-uniq 9LQ0172005164 >"$log" 2>&1; then
+    fail "non-hexadecimal touch vendor unexpectedly passed"
+  fi
+  assert_contains "$log" \
+    'touch vendor must be a four-character hexadecimal input vendor ID'
+  assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+}
+
 test_touch_and_monitor_identity_fail_closed() {
   local root fixture sha sys_root hypr_devices hypr_monitors log
   root=$(new_temp_dir)
@@ -460,7 +504,7 @@ test_touch_and_monitor_identity_fail_closed() {
   fi
   assert_contains "$log" 'configured Hyprland touch device is absent'
 
-  write_hypr_devices "$hypr_devices" corsair-xeneon-edge-touchscreen
+  write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   make_touchscreen_match "$sys_root" event91
   if "$check_script" --root "$root" --sys-root "$sys_root" \
     --hypr-devices-json "$hypr_devices" \
@@ -469,6 +513,21 @@ test_touch_and_monitor_identity_fail_closed() {
   fi
   assert_contains "$log" 'touchscreen identity is ambiguous'
 
+  rm -f "$sys_root/class/input/event91"
+  make_touchscreen_match \
+    "$sys_root" event92 OTHER-CONTROLLER usb-0000:00:14.0-9/input0
+  cat >"$hypr_devices" <<'EOF'
+{"mice":[],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen"},{"address":"0x2","name":"wch.cn-touchscreen-1"}],"switches":[]}
+EOF
+  if "$check_script" --root "$root" --sys-root "$sys_root" \
+    --hypr-devices-json "$hypr_devices" \
+    --hypr-monitors-json "$hypr_monitors" >"$log" 2>&1; then
+    fail "same-base Hyprland touchscreen ambiguity unexpectedly passed"
+  fi
+  assert_contains "$log" 'Hyprland touchscreen name family is ambiguous'
+
+  rm -f "$sys_root/class/input/event92"
+  write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   cat >"$hypr_monitors" <<'EOF'
 [{"id":1,"name":"DP-1","model":"XENEON EDGE","serial":"WRONG","width":2560,"height":720}]
 EOF
@@ -495,7 +554,7 @@ test_hyprctl_query_failures_fail_closed() {
   make_runtime_stubs "$root" "$root/quickshell-source"
   make_sysfs_match "$sys_root" card0 DP-1 "$fixture"
   make_touchscreen_match "$sys_root"
-  write_hypr_devices "$hypr_devices" corsair-xeneon-edge-touchscreen
+  write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   write_hypr_monitors "$hypr_monitors"
 
   "$install_script" --root "$root" \
@@ -949,6 +1008,8 @@ run_test 'missing and ambiguous production outputs fail closed' \
   test_missing_and_ambiguous_output_fail_closed
 run_test 'missing commissioning identity installs nothing' \
   test_missing_commissioning_values_do_not_install
+run_test 'invalid touch vendor installs nothing' \
+  test_invalid_touch_vendor_does_not_install
 run_test 'touch and monitor identities fail closed' \
   test_touch_and_monitor_identity_fail_closed
 run_test 'failed hyprctl inventory queries fail closed' \

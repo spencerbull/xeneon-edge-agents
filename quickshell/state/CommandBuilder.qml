@@ -8,7 +8,12 @@ QtObject {
         "zoom",
         "approve",
         "interrupt",
-        "restore_focus"
+        "restore_focus",
+        "chatgpt_desktop",
+        "claude_desktop",
+        "voice_start",
+        "voice_stop",
+        "voice_cancel"
     ]
 
     property int requestCounter: 0
@@ -36,10 +41,17 @@ QtObject {
             return null
         }
 
-        if (action === "restore_focus") {
+        var systemAction = action === "restore_focus"
+            || action === "chatgpt_desktop"
+            || action === "claude_desktop"
+            || action === "voice_start"
+            || action === "voice_stop"
+            || action === "voice_cancel"
+
+        if (systemAction) {
             if (normalizedAgentId !== ""
                     || normalizedCapabilityId !== "") {
-                lastError = "restore_focus cannot target an agent or capability"
+                lastError = "System action cannot target an agent or capability"
                 return null
             }
         } else if (normalizedAgentId === "") {
@@ -53,7 +65,7 @@ QtObject {
             return null
         }
 
-        if ((action === "open" || action === "zoom")
+        if ((action === "open" || action === "zoom" || systemAction)
                 && normalizedCapabilityId !== "") {
             lastError = "Direct action cannot include a capability_id"
             return null

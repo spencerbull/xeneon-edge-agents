@@ -10,6 +10,8 @@ pub enum CommandError {
     MissingRequestId,
     #[error("agent_id is required for this action")]
     MissingAgentId,
+    #[error("agent_id is not accepted for this action")]
+    UnexpectedAgentId,
     #[error("capability_id is required for guarded actions")]
     MissingCapability,
     #[error("capability_id is not accepted for this action")]
@@ -25,7 +27,15 @@ pub fn validate_command(command: &PortalCommand) -> Result<(), CommandError> {
     }
 
     match command.action {
-        ActionKind::RestoreFocus => {
+        ActionKind::RestoreFocus
+        | ActionKind::ChatgptDesktop
+        | ActionKind::ClaudeDesktop
+        | ActionKind::VoiceStart
+        | ActionKind::VoiceStop
+        | ActionKind::VoiceCancel => {
+            if command.agent_id.is_some() {
+                return Err(CommandError::UnexpectedAgentId);
+            }
             if command.capability_id.is_some() {
                 return Err(CommandError::UnexpectedCapability);
             }
@@ -96,6 +106,40 @@ mod tests {
     }
 
     #[test]
+    fn voice_actions_are_typed_global_actions() {
+        let mut command = command(ActionKind::VoiceStart);
+        assert_eq!(
+            validate_command(&command),
+            Err(CommandError::UnexpectedAgentId)
+        );
+        command.agent_id = None;
+        assert_eq!(validate_command(&command), Ok(()));
+        command.capability_id = Some("not-accepted".into());
+        assert_eq!(
+            validate_command(&command),
+            Err(CommandError::UnexpectedCapability)
+        );
+    }
+
+    #[test]
+    fn desktop_actions_are_typed_global_actions() {
+        for action in [ActionKind::ChatgptDesktop, ActionKind::ClaudeDesktop] {
+            let mut command = command(action);
+            assert_eq!(
+                validate_command(&command),
+                Err(CommandError::UnexpectedAgentId)
+            );
+            command.agent_id = None;
+            assert_eq!(validate_command(&command), Ok(()));
+            command.capability_id = Some("not-accepted".into());
+            assert_eq!(
+                validate_command(&command),
+                Err(CommandError::UnexpectedCapability)
+            );
+        }
+    }
+
+    #[test]
     fn capability_must_match_current_agent_snapshot() {
         let mut command = command(ActionKind::Approve);
         command.capability_id = Some("stale".into());
@@ -104,6 +148,8 @@ mod tests {
             display_name: "Agent".into(),
             agent: "codex".into(),
             status: AgentStatus::Blocked,
+            review_ready: false,
+            launch_pending: false,
             workspace: "workspace".into(),
             repository: None,
             worktree: None,

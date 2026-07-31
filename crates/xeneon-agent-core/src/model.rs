@@ -46,6 +46,25 @@ pub enum SessionState {
     Offline,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceState {
+    Idle,
+    Recording,
+    Processing,
+    Error,
+    #[default]
+    #[serde(other)]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceSnapshot {
+    pub state: VoiceState,
+    #[serde(default)]
+    pub owned: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
@@ -54,6 +73,11 @@ pub enum ActionKind {
     Approve,
     Interrupt,
     RestoreFocus,
+    ChatgptDesktop,
+    ClaudeDesktop,
+    VoiceStart,
+    VoiceStop,
+    VoiceCancel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +106,10 @@ pub struct AgentView {
     pub display_name: String,
     pub agent: String,
     pub status: AgentStatus,
+    #[serde(default)]
+    pub review_ready: bool,
+    #[serde(default)]
+    pub launch_pending: bool,
     pub workspace: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
@@ -94,14 +122,82 @@ pub struct AgentView {
     pub actions: AgentActions,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageKind {
+    #[default]
+    Quota,
+    LocalBudget,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub label: String,
+    pub utilization: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderUsage {
+    pub id: String,
+    pub label: String,
+    pub kind: UsageKind,
+    pub available: bool,
+    pub stale: bool,
+    pub source: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiUsageSnapshot {
+    pub providers: Vec<ProviderUsage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MicroSnapshot {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firmware: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery: Option<u8>,
+    #[serde(default)]
+    pub charging: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated_ms: Option<u64>,
+}
+
 pub fn sort_agents(agents: &mut [AgentView]) {
     agents.sort_by(|left, right| {
-        left.status
-            .attention_rank()
-            .cmp(&right.status.attention_rank())
+        agent_attention_rank(left)
+            .cmp(&agent_attention_rank(right))
             .then_with(|| left.source_order.cmp(&right.source_order))
             .then_with(|| left.id.cmp(&right.id))
     });
+}
+
+fn agent_attention_rank(agent: &AgentView) -> u8 {
+    if agent.review_ready && matches!(agent.status, AgentStatus::Done | AgentStatus::Idle) {
+        AgentStatus::Done.attention_rank()
+    } else if agent.status == AgentStatus::Done {
+        AgentStatus::Idle.attention_rank()
+    } else {
+        agent.status.attention_rank()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +276,9 @@ pub struct PortalSnapshot {
     pub connection: ConnectionState,
     pub sessions: Vec<SessionView>,
     pub agents: Vec<AgentView>,
+    pub voice: VoiceSnapshot,
+    pub usage: AiUsageSnapshot,
+    pub micro: MicroSnapshot,
     pub health: HealthSnapshot,
 }
 
@@ -193,6 +292,9 @@ impl PortalSnapshot {
             connection: ConnectionState::Offline,
             sessions: Vec::new(),
             agents: Vec::new(),
+            voice: VoiceSnapshot::default(),
+            usage: AiUsageSnapshot::default(),
+            micro: MicroSnapshot::default(),
             health: HealthSnapshot::default(),
         }
     }
@@ -261,6 +363,8 @@ mod tests {
             display_name: id.into(),
             agent: "codex".into(),
             status,
+            review_ready: false,
+            launch_pending: false,
             workspace: "workspace".into(),
             repository: None,
             worktree: None,
@@ -274,12 +378,14 @@ mod tests {
 
     #[test]
     fn attention_sort_preserves_source_order_within_status() {
+        let mut done = agent("done", AgentStatus::Done, 1);
+        done.review_ready = true;
         let mut agents = vec![
             agent("idle", AgentStatus::Idle, 0),
             agent("working-2", AgentStatus::Working, 3),
             agent("blocked", AgentStatus::Blocked, 9),
             agent("working-1", AgentStatus::Working, 2),
-            agent("done", AgentStatus::Done, 1),
+            done,
         ];
 
         sort_agents(&mut agents);
@@ -292,6 +398,54 @@ mod tests {
     fn unknown_status_is_forward_compatible() {
         let status: AgentStatus = serde_json::from_str("\"future_state\"").unwrap();
         assert_eq!(status, AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn review_ready_idle_sorts_with_done_priority() {
+        let mut review = agent("review", AgentStatus::Idle, 1);
+        review.review_ready = true;
+        let mut agents = vec![
+            agent("working", AgentStatus::Working, 0),
+            review,
+            agent("blocked", AgentStatus::Blocked, 2),
+        ];
+
+        sort_agents(&mut agents);
+
+        let ids: Vec<_> = agents.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, ["blocked", "review", "working"]);
+    }
+
+    #[test]
+    fn active_attention_state_wins_an_inconsistent_review_latch() {
+        let mut blocked = agent("blocked", AgentStatus::Blocked, 0);
+        blocked.review_ready = true;
+        let mut agents = vec![
+            agent("done", AgentStatus::Done, 1),
+            blocked,
+            agent("working", AgentStatus::Working, 2),
+        ];
+
+        sort_agents(&mut agents);
+
+        let ids: Vec<_> = agents.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, ["blocked", "working", "done"]);
+    }
+
+    #[test]
+    fn acknowledged_done_sorts_as_idle() {
+        let mut review = agent("review", AgentStatus::Idle, 2);
+        review.review_ready = true;
+        let mut agents = vec![
+            agent("done", AgentStatus::Done, 0),
+            agent("working", AgentStatus::Working, 1),
+            review,
+        ];
+
+        sort_agents(&mut agents);
+
+        let ids: Vec<_> = agents.iter().map(|agent| agent.id.as_str()).collect();
+        assert_eq!(ids, ["review", "working", "done"]);
     }
 
     #[test]
