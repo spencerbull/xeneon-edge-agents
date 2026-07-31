@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Effects
 import "PortalPalette.js" as Palette
 
 Item {
@@ -164,15 +165,15 @@ Item {
         border.color: Qt.alpha(root.accent, 0.12)
     }
 
-    Rectangle {
+    Item {
+        id: cardAccent
+
         anchors {
             left: parent.left
             top: parent.top
             bottom: parent.bottom
         }
-        width: 6
-        radius: 3
-        color: root.accent
+        width: 24
         opacity: 0.82
 
         SequentialAnimation on opacity {
@@ -193,18 +194,71 @@ Item {
                 easing.type: Easing.InOutSine
             }
         }
+
+        Rectangle {
+            id: cardAccentGlowSource
+
+            visible: false
+            anchors {
+                left: parent.left
+                verticalCenter: parent.verticalCenter
+                leftMargin: 3
+            }
+            width: 14
+            height: Math.max(1, parent.height - 30)
+            radius: 7
+            color: root.accent
+        }
+
+        MultiEffect {
+            objectName: "cardAccentBloom"
+            anchors.fill: cardAccentGlowSource
+            source: cardAccentGlowSource
+            autoPaddingEnabled: true
+            blurEnabled: true
+            blur: 1
+            blurMax: 42
+            blurMultiplier: 1.4
+            brightness: 0.58
+            colorization: 0.86
+            colorizationColor: root.accent
+            opacity: 1
+        }
     }
 
-    Rectangle {
+    Item {
         id: activitySweep
 
         visible: !root.reducedMotion && root.agentState === "working"
-        width: Math.min(190, root.width * 0.28)
-        height: 2
-        radius: 1
-        y: 3
-        color: root.accent
-        opacity: 0.78
+        width: Math.min(210, root.width * 0.3)
+        height: 18
+        y: -2
+
+        Rectangle {
+            id: activitySweepGlowSource
+
+            visible: false
+            anchors.centerIn: parent
+            width: parent.width
+            height: 6
+            radius: 3
+            color: root.accent
+        }
+
+        MultiEffect {
+            objectName: "cardActivityBloom"
+            anchors.fill: activitySweepGlowSource
+            source: activitySweepGlowSource
+            autoPaddingEnabled: true
+            blurEnabled: true
+            blur: 1
+            blurMax: 36
+            blurMultiplier: 1.1
+            brightness: 0.42
+            colorization: 0.8
+            colorizationColor: root.accent
+            opacity: 0.88
+        }
 
         SequentialAnimation on x {
             loops: Animation.Infinite

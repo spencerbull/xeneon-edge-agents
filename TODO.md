@@ -46,6 +46,9 @@ and desktop actions stay in `xeneon-agentd`.
       agent is working or blocked, and disappears for idle or empty rosters.
 - [x] The perimeter runners render as a Gaussian-style GPU bloom with bounded
       particle motes instead of stacked moving bars.
+- [x] Agent-card status accents use bounded Gaussian blooms with no visible
+      hard core: a state-colored left aura on every card and a moving blue top
+      glint only while the agent is working.
 - [x] The control-center header uses the uppercase live hostname, removes the
       redundant connection pill, and replaces the AI Capacity label tile with
       authoritative Herdr agent/session/focus counts.
@@ -158,6 +161,9 @@ and desktop actions stay in `xeneon-agentd`.
       systemd-owned runtime directory, a connected Herdr protocol-17 snapshot
       with five real agents, live provider/Micro telemetry, and one
       `xeneon-edge-agent-portal` layer surface on `DP-2` only.
+- [x] Physical card-accent QA replaced the rigid left and working-state top
+      bars with two bounded `MultiEffect` blooms, captured the result at native
+      2560x720, and verified zero service restarts or shader warnings.
 - [x] Physical runtime fixes were independently reviewed before reactivation:
       the daemon now uses `RuntimeDirectory=`, Quickshell receives narrowly
       writable shared runtime paths, Qt's unavailable Wayland EDID serial is

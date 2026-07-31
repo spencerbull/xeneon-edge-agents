@@ -134,6 +134,20 @@ class QmlSafetyContractTests(unittest.TestCase):
             )
         )
 
+    def test_card_accents_use_bounded_blurred_blooms(self):
+        card = source("components/AgentCard.qml")
+        self.assertIn("import QtQuick.Effects", card)
+        self.assertEqual(card.count("MultiEffect {"), 2)
+        self.assertIn('objectName: "cardAccentBloom"', card)
+        self.assertIn('objectName: "cardActivityBloom"', card)
+        self.assertEqual(card.count("blurEnabled: true"), 2)
+        self.assertIn("blurMax: 42", card)
+        self.assertIn("blurMax: 36", card)
+        self.assertEqual(card.count("visible: false"), 2)
+        self.assertNotIn("Gradient", card)
+        self.assertIn('root.agentState === "working"', card)
+        self.assertNotIn("Canvas", card)
+
     def test_hold_controls_are_800ms_and_drag_cancellable(self):
         hold = source("components/HoldControl.qml")
         self.assertIn("longPressThreshold: 0.8", hold)
