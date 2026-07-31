@@ -1,4 +1,5 @@
 import QtQuick
+import QtCore
 import Quickshell
 import "components"
 import "state"
@@ -41,6 +42,19 @@ ShellRoot {
                 || Quickshell.env("HOSTNAME")
                 || "LOCAL"
         )
+    readonly property string settingsPath: {
+        var configured = String(
+            Quickshell.env("XENEON_EDGE_SETTINGS_PATH") || ""
+        )
+        if (configured !== "")
+            return configured
+        var runtimeDirectory = String(
+            Quickshell.env("XDG_RUNTIME_DIR") || ""
+        )
+        return runtimeDirectory === ""
+            ? "/dev/null"
+            : runtimeDirectory + "/xeneon-edge-portal-settings.ini"
+    }
 
     readonly property string fixtureName: {
         var requested = String(
@@ -104,6 +118,15 @@ ShellRoot {
     Scope {
         id: runtime
 
+        Settings {
+            id: portalPreferences
+
+            location: "file://" + root.settingsPath
+            category: "display"
+            property bool reduceMotion: false
+            property bool dimmed: false
+        }
+
         PortalStore {
             id: portalStore
         }
@@ -153,6 +176,7 @@ ShellRoot {
                 store: portalStore
                 bridge: portalBridge
                 activity: activityController
+                preferences: portalPreferences
                 reducedMotion: root.reducedMotion
                 hostName: root.hostName
             }
@@ -187,6 +211,7 @@ ShellRoot {
             store: portalStore
             bridge: portalBridge
             activity: activityController
+            preferences: portalPreferences
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.livePreviewMode

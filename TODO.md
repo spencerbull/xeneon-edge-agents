@@ -49,6 +49,10 @@ and desktop actions stay in `xeneon-agentd`.
 - [x] Agent-card status accents use bounded Gaussian blooms with no visible
       hard core: a state-colored left aura on every card and a moving blue top
       glint only while the agent is working.
+- [x] Shared persistent Motion and Screen controls remain available in both
+      control-center and Ambient views; reduced motion uses an evenly spaced
+      static constellation with no trails/runners, and Screen minimum remains
+      visibly reversible above a near-black portal veil.
 - [x] The control-center header uses the uppercase live hostname, removes the
       redundant connection pill, and replaces the AI Capacity label tile with
       authoritative Herdr agent/session/focus counts.
@@ -78,6 +82,7 @@ and desktop actions stay in `xeneon-agentd`.
 | Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
 | Agent-command home redesign | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized safe metadata, usage/Micro collectors, fixed app actions, control-center QML | Software complete, live-previewed, and independently reviewed |
+| Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
 ## Allowed actions
@@ -164,6 +169,17 @@ and desktop actions stay in `xeneon-agentd`.
 - [x] Physical card-accent QA replaced the rigid left and working-state top
       bars with two bounded `MultiEffect` blooms, captured the result at native
       2560x720, and verified zero service restarts or shader warnings.
+- [x] Global display-control gate: 52 core plus 1 CLI test, strict fmt/clippy,
+      25 Python contracts/fixtures, 80 Qt tests with `qmllint`, and 25 isolated
+      installer scenarios.
+- [x] Physical display-control QA used real DP-2 taps in both views: Motion
+      persisted through a production service restart, suppressed perimeter
+      runners and trails, and placed four agents without overlap on an evenly
+      spaced static ellipse; Screen minimum dimmed and restored both
+      control-center and Ambient views without waking Ambient.
+- [x] Independent display-control review approved QML layering, restore
+      reachability, reduced-motion coverage, Qt Settings persistence, and the
+      narrowly writable systemd StateDirectory with no P0/P1/P2 findings.
 - [x] Physical runtime fixes were independently reviewed before reactivation:
       the daemon now uses `RuntimeDirectory=`, Quickshell receives narrowly
       writable shared runtime paths, Qt's unavailable Wayland EDID serial is
@@ -178,19 +194,23 @@ and desktop actions stay in `xeneon-agentd`.
 
 ## Current local state
 
-- The base implementation is committed locally through packaging at
-  `995d123`; the current physical-commissioning and UX diff remains
-  uncommitted and no branch was pushed.
-- The naming/voice/ring UX is an uncommitted, reviewed diff in the isolated
-  `agent/portal-voice-ring` worktree; it is installed in user-owned XDG paths
-  on this host and is not pushed.
+- The reviewed physical-commissioning and card-accent work is pushed through
+  `80b8ac8` on `origin/agent/portal-voice-ring`; the global display-control
+  follow-up is installed from the current uncommitted worktree diff.
+- The naming/voice/ring UX lives in the isolated
+  `agent/portal-voice-ring` worktree and is installed in user-owned XDG paths
+  on this host.
 - The final live preview showed the current Herdr public labels
   `seform-codex`, `wifi7`, `herdr-xeneon`, and `herdr-xeneon-design`; prior
   voice validation observed recording/idle ownership transitions,
   automatically cancelled a recording when its bridge client disconnected,
   and restored the prior ChatGPT window before laptop voice actions.
 - `xeneon-agentd.service` and `xeneon-edge-portal.service` are enabled,
-  active, and running without restarts after the runtime sandbox fix.
+  active, and running without restarts after the persistent presentation
+  settings activation.
+- Portal preferences persist at
+  `~/.local/state/xeneon-edge-agents/portal/preferences.ini` with mode `0600`;
+  physical validation ended in the default full-motion, normal-screen state.
 - `hyprland.lua` contains the installer-managed XENEON require, and the
   generated module maps only `wch.cn-touchscreen-1` to `DP-2`.
 - The persisted home layout places the 1280x360 logical EDGE at `560,1350`,

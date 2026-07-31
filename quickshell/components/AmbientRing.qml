@@ -10,11 +10,12 @@ Item {
     property var voice: ({})
     property string connectionState: "reconnecting"
     property bool reducedMotion: false
+    property bool suppressRunners: false
     property real phase: 0
 
     readonly property string mode: Palette.perimeterMode(agents)
     readonly property color accent: Palette.ambientColor(mode)
-    readonly property bool active: mode !== "off"
+    readonly property bool active: mode !== "off" && !suppressRunners
     readonly property bool moving: active && !reducedMotion
     readonly property int runnerCount: 2
     readonly property real runnerOffset: 0.5

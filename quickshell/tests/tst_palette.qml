@@ -23,6 +23,16 @@ TestCase {
         }
     }
 
+    function init() {
+        halo.suppressRunners = false
+        halo.agents = []
+    }
+
+    function cleanup() {
+        halo.suppressRunners = false
+        halo.agents = []
+    }
+
     function test_microAgentPaletteIsExact() {
         compare(String(Palette.agentColor(agent("working"))), "#0066ff")
         compare(String(Palette.agentColor(agent("blocked"))), "#ffaa00")
@@ -99,6 +109,13 @@ TestCase {
         compare(halo.runnerOffset, 0.5)
         compare(halo.particleCountPerRunner, 6)
         compare(halo.glowBlurMax, 48)
+
+        halo.suppressRunners = true
+        compare(halo.active, false)
+        compare(halo.moving, false)
+
+        halo.suppressRunners = false
+        compare(halo.active, true)
 
         var start = halo.perimeterPoint(0, halo.width, halo.height, 22)
         var later = halo.perimeterPoint(0.1, halo.width, halo.height, 22)

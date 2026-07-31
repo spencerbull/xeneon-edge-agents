@@ -127,6 +127,7 @@ TestCase {
     }
 
     function test_nodesMoveClockwiseAtIndependentRates() {
+        ambient.reducedMotion = false
         ambient.orbitPhase = 0
         var firstStart = ambient.nodeAngleDegrees(0)
         var secondStart = ambient.nodeAngleDegrees(1)
@@ -138,6 +139,23 @@ TestCase {
         verify(firstDelta > 0)
         verify(secondDelta > 0)
         verify(Math.abs(firstDelta - secondDelta) > 1)
+    }
+
+    function test_reducedMotionEvenlySpacesStaticAgents() {
+        ambient.agents = sevenAgents().slice(0, 4)
+        ambient.reducedMotion = true
+        ambient.orbitPhase = 0.8
+
+        compare(ambient.radiusXFor(0), 520)
+        compare(ambient.radiusYFor(0), 230)
+        compare(ambient.nodeAngleDegrees(0), -90)
+        compare(ambient.nodeAngleDegrees(1), 0)
+        compare(ambient.nodeAngleDegrees(2), 90)
+        compare(ambient.nodeAngleDegrees(3), 180)
+
+        ambient.orbitPhase = 0.2
+        compare(ambient.nodeAngleDegrees(0), -90)
+        compare(ambient.nodeAngleDegrees(3), 180)
     }
 
     function test_phaseWrapsAreGeometricallyContinuous() {
@@ -167,6 +185,11 @@ TestCase {
         compare(ambient.orbitPhase, 0.125)
         compare(ambient.orbitBoostPhase, 0)
         compare(ambient.motionEnergy, 0)
+        for (var index = 0; index < ambient.visibleAgentCount; index += 1) {
+            var trail = findChild(ambient, "ambientOrbitTrail-" + index)
+            verify(trail !== null)
+            compare(trail.reveal, 0)
+        }
     }
 
     function test_ringRevealUsesEaseOutGrowth() {

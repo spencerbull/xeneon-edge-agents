@@ -300,6 +300,14 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("hyprctl eval", preview)
         self.assertIn("address:$address", preview)
         self.assertIn('prop = \\"opacity_inactive_override\\"', preview)
+        self.assertIn("preview_preferences=$(\n  mktemp", preview)
+        self.assertEqual(
+            preview.count(
+                "XENEON_EDGE_SETTINGS_PATH=$preview_preferences"
+            ),
+            2,
+        )
+        self.assertIn('rm -f -- "$preview_preferences"', preview)
         self.assertNotIn("hyprctl keyword", preview)
         self.assertNotIn(".config/hypr", preview)
 
@@ -398,6 +406,67 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertNotIn("id: topBeam", ring)
         self.assertNotIn("Process {", voice)
         self.assertNotIn("Process {", ring)
+
+    def test_display_settings_are_shared_persistent_and_presentation_only(self):
+        shell = source("shell.qml")
+        portal = source("components/PortalView.qml")
+        controls = source("components/DisplaySettingsControls.qml")
+        button = source("components/DisplaySettingButton.qml")
+        ring = source("components/AmbientRing.qml")
+        service = (ROOT.parent / "config/systemd/user/"
+                   "xeneon-edge-portal.service.in").read_text(
+                       encoding="utf-8"
+                   )
+        qml = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in ROOT.rglob("*.qml")
+            if "tests" not in path.parts
+        )
+
+        self.assertEqual(shell.count("Settings {"), 1)
+        self.assertIn("import QtCore", shell)
+        self.assertIn("XENEON_EDGE_SETTINGS_PATH", shell)
+        self.assertIn('category: "display"', shell)
+        self.assertIn("property bool reduceMotion: false", shell)
+        self.assertIn("property bool dimmed: false", shell)
+        self.assertEqual(
+            shell.count("preferences: portalPreferences"),
+            2,
+        )
+
+        self.assertEqual(portal.count("DisplaySettingsControls {"), 1)
+        self.assertIn('objectName: "globalDisplaySettings"', portal)
+        self.assertIn("rightMargin: displaySettings.width + 16", portal)
+        self.assertIn("readonly property bool effectiveReducedMotion", portal)
+        self.assertIn(
+            "suppressRunners: root.effectiveReducedMotion",
+            portal,
+        )
+        self.assertIn('objectName: "displayDimmer"', portal)
+        self.assertIn("opacity: root.displayDimmed ? 0.88 : 0", portal)
+        self.assertIn("enabled: false", portal)
+        self.assertIn("z: 70", portal)
+        self.assertIn("z: 80", portal)
+
+        self.assertIn('label: "MOTION"', controls)
+        self.assertIn('label: "SCREEN"', controls)
+        self.assertIn('stateLabel: root.dimmed ? "MINIMUM" : "NORMAL"', controls)
+        self.assertIn("Accessible.role: Accessible.Button", button)
+        self.assertIn("TapHandler.ReleaseWithinBounds", button)
+        self.assertIn("property bool suppressRunners: false", ring)
+        self.assertIn('mode !== "off" && !suppressRunners', ring)
+        self.assertNotIn("Process {", controls)
+        self.assertNotIn("Process {", button)
+        self.assertEqual(len(re.findall(r"\bProcess\s*\{", qml)), 1)
+
+        self.assertIn(
+            'Environment="XENEON_EDGE_SETTINGS_PATH=@STATE_HOME@/'
+            'xeneon-edge-agents/portal/preferences.ini"',
+            service,
+        )
+        self.assertIn("StateDirectory=xeneon-edge-agents/portal", service)
+        self.assertIn("StateDirectoryMode=0700", service)
+        self.assertIn("UMask=0077", service)
 
 
 if __name__ == "__main__":

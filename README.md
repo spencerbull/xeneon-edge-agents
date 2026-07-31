@@ -61,6 +61,10 @@ worktree context, plus the Omarchy AI module's normalized Claude, Codex, and
 OpenCode capacity. Header controls use typed daemon actions to focus or launch
 the fixed ChatGPT Desktop and Claude Desktop entries. The Micro control opens a
 read-only virtual projection of the connected device and current agent slots.
+The upper-right Motion and Screen controls are shared by the command-center
+and Ambient views. Motion snaps the ambient constellation to fixed positions
+and removes perimeter/trail animation; Screen applies a reversible near-black
+portal veil. These presentation settings persist across portal restarts.
 
 The live preview exposes the real narrow agent-focus, desktop-app, and voice
 actions. Voice

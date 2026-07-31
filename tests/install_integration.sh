@@ -155,6 +155,16 @@ test_default_idempotence_and_uninstall() {
     'RuntimeDirectoryMode=0700'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
     'ReadWritePaths=%t/quickshell %t/dconf'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    "Environment=\"XDG_STATE_HOME=$root/.local/state\""
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    "Environment=\"XENEON_EDGE_SETTINGS_PATH=$root/.local/state/xeneon-edge-agents/portal/preferences.ini\""
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'StateDirectory=xeneon-edge-agents/portal'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'StateDirectoryMode=0700'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'UMask=0077'
   assert_no_file "$root/.config/hypr/xeneon_edge_agents.lua"
   assert_count 0 'hypr\.xeneon_edge_agents' "$root/.config/hypr/hyprland.lua"
   after=$(sha256sum "$root/.config/hypr/hyprland.lua")

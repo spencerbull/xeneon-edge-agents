@@ -243,6 +243,7 @@ Item {
             OrbitTrail {
                 required property int index
 
+                objectName: "ambientOrbitTrail-" + index
                 anchors.fill: parent
                 centerX: constellation.width / 2
                 centerY: constellation.height / 2
@@ -250,8 +251,10 @@ Item {
                 radiusY: root.radiusYFor(index)
                 angleDegrees: root.nodeAngleDegrees(index)
                 accent: Palette.agentColor(root.agents[index])
-                reveal: root.nodeProgress
-                    * (0.08 + root.motionEnergy * 0.92)
+                reveal: root.reducedMotion
+                    ? 0
+                    : root.nodeProgress
+                        * (0.08 + root.motionEnergy * 0.92)
                 sweepDegrees: 34
                     + root.motionEnergy * (30 + index * 3)
             }
@@ -426,14 +429,23 @@ Item {
     }
 
     function radiusXFor(index) {
+        if (reducedMotion)
+            return 520
         return [410, 530, 650, 470, 600, 510][index % nodeLimit]
     }
 
     function radiusYFor(index) {
+        if (reducedMotion)
+            return 230
         return [152, 205, 174, 238, 214, 188][index % nodeLimit]
     }
 
     function nodeAngleDegrees(index) {
+        if (reducedMotion) {
+            var count = Math.max(1, visibleAgentCount)
+            var startAngle = count === 2 ? 0 : -90
+            return startAngle + index * 360 / count
+        }
         return baseAngleFor(index)
             + orbitPhase * 360 * speedFor(index)
             + effectiveBoostPhase * 360 * speedFor(index)

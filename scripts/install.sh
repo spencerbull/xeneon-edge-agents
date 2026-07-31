@@ -226,7 +226,7 @@ render_template \
   CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home"
 render_template \
   "$repo_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
-  CONFIG_HOME "$config_home" BIN_HOME "$bin_home" \
+  CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home" \
   OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
 
 daemon_target=$systemd_dir/xeneon-agentd.service

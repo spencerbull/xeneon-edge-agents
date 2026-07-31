@@ -15,6 +15,7 @@ daemon_pid=
 preview_runtime=
 preview_socket=
 preview_state_home=
+preview_preferences=
 preview_host_name=$(hostname)
 
 while (($# > 0)); do
@@ -109,6 +110,9 @@ cleanup_runtime() {
   if [[ -n "$preview_socket" && -S "$preview_socket" ]]; then
     rm -f -- "$preview_socket"
   fi
+  if [[ -n "$preview_preferences" ]]; then
+    rm -f -- "$preview_preferences"
+  fi
   if [[ -n "$preview_runtime" && -d "$preview_runtime" ]]; then
     rmdir -- "$preview_runtime" 2>/dev/null || true
   fi
@@ -200,6 +204,11 @@ apply_hyprland_geometry() {
 trap cleanup_runtime EXIT
 trap forward_signal HUP INT TERM
 
+: "${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required for a preview}"
+preview_preferences=$(
+  mktemp --suffix=.ini "$XDG_RUNTIME_DIR/xeneon-edge-settings.XXXXXX"
+)
+
 if ((live_preview == 1)); then
   start_live_daemon
   PATH="$repo_root/target/debug:$PATH" \
@@ -208,6 +217,7 @@ if ((live_preview == 1)); then
   XENEON_EDGE_LIVE_PREVIEW=1 \
   XENEON_EDGE_AMBIENT_TIMEOUT_MS=$ambient_timeout_ms \
   XENEON_EDGE_HOSTNAME=$preview_host_name \
+  XENEON_EDGE_SETTINGS_PATH=$preview_preferences \
     quickshell --no-duplicate --path "$repo_root/quickshell" &
 else
   QS_APP_ID=$preview_app_id \
@@ -215,6 +225,7 @@ else
   XENEON_EDGE_FIXTURE=$fixture \
   XENEON_EDGE_AMBIENT_TIMEOUT_MS=$ambient_timeout_ms \
   XENEON_EDGE_HOSTNAME=$preview_host_name \
+  XENEON_EDGE_SETTINGS_PATH=$preview_preferences \
     quickshell --no-duplicate --path "$repo_root/quickshell" &
 fi
 preview_pid=$!

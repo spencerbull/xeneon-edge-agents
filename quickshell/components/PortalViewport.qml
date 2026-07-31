@@ -6,6 +6,7 @@ Item {
     required property var store
     required property var bridge
     required property var activity
+    required property var preferences
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
@@ -41,6 +42,7 @@ Item {
             store: root.store
             bridge: root.bridge
             activity: root.activity
+            preferences: root.preferences
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.restoreVoiceFocus

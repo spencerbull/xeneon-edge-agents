@@ -48,8 +48,12 @@ the source.
 - Voice can override the center and ambient treatment through the existing
   bounded `idle`, `recording`, `processing`, `error`, and `unavailable`
   protocol states. QML does not infer audio level or transcript content.
-- Reduced motion renders the final centered constellation with static segments
-  and no continuous orbit.
+- Reduced motion renders the final centered constellation at fixed positions,
+  removes the agent trails and the two perimeter runners, and disables
+  continuous orbit.
+- The global Motion and Screen controls remain reachable in the upper-right
+  corner in both Ambient and control-center views. Their state persists across
+  view changes and portal restarts.
 
 ## Product boundaries
 
@@ -61,5 +65,8 @@ the source.
 - The concept's roughly 2.25-second transition point is presentation timing,
   not the production inactivity policy. Production remains 60 seconds. The
   explicit preview supports a shorter bounded timeout for animation review.
+- `SCREEN // MINIMUM` is a reversible near-black portal veil. It deliberately
+  does not claim to change panel hardware brightness; DDC/CI remains gated on
+  an exact read/restore validation for this display.
 - Physical XENEON touch, GPU cost, and perceived brightness remain hardware
   gates.

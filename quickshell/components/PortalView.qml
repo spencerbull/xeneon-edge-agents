@@ -6,6 +6,7 @@ Item {
     required property var store
     required property var bridge
     required property var activity
+    required property var preferences
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
@@ -18,6 +19,12 @@ Item {
         Math.ceil(store.agents.length / pageSize)
     )
     readonly property string surfaceState: store.surfaceState()
+    readonly property bool userMotionReduced:
+        preferences.reduceMotion === true
+    readonly property bool displayDimmed:
+        preferences.dimmed === true
+    readonly property bool effectiveReducedMotion:
+        reducedMotion || userMotionReduced
     readonly property bool controlCenterInteractive:
         !activity.ambientMode
         && ambientView.controlCenterProgress >= 0.999
@@ -137,6 +144,22 @@ Item {
         return true
     }
 
+    function toggleMotionReduction() {
+        if (reducedMotion)
+            return false
+        preferences.reduceMotion = !userMotionReduced
+        if (typeof preferences.sync === "function")
+            preferences.sync()
+        return true
+    }
+
+    function toggleDisplayDim() {
+        preferences.dimmed = !displayDimmed
+        if (typeof preferences.sync === "function")
+            preferences.sync()
+        return true
+    }
+
     onPageCountChanged: {
         currentPage = Math.min(currentPage, pageCount - 1)
         pages.positionViewAtIndex(currentPage, ListView.SnapPosition)
@@ -149,7 +172,7 @@ Item {
 
     PortalBackground {
         anchors.fill: parent
-        reducedMotion: root.reducedMotion
+        reducedMotion: root.effectiveReducedMotion
         ambientMode: root.activity.ambientMode
     }
 
@@ -158,8 +181,53 @@ Item {
         agents: root.store.agents
         voice: root.store.voice
         connectionState: root.store.connection.state
-        reducedMotion: root.reducedMotion
+        reducedMotion: root.effectiveReducedMotion
+        suppressRunners: root.effectiveReducedMotion
         z: 50
+    }
+
+    Rectangle {
+        id: displayDimmer
+
+        objectName: "displayDimmer"
+        anchors.fill: parent
+        color: "#000000"
+        opacity: root.displayDimmed ? 0.88 : 0
+        enabled: false
+        z: 70
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: root.effectiveReducedMotion ? 0 : 220
+                easing.type: Easing.OutCubic
+            }
+        }
+    }
+
+    DisplaySettingsControls {
+        id: displaySettings
+
+        objectName: "globalDisplaySettings"
+        anchors {
+            right: parent.right
+            top: parent.top
+            rightMargin: 24
+            topMargin: 20
+        }
+        motionReduced: root.effectiveReducedMotion
+        motionForced: root.reducedMotion
+        dimmed: root.displayDimmed
+        opacity: root.displayDimmed ? 0.58 : 1
+        z: 80
+        onMotionToggleRequested: root.toggleMotionReduction()
+        onDimToggleRequested: root.toggleDisplayDim()
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: root.effectiveReducedMotion ? 0 : 180
+                easing.type: Easing.OutCubic
+            }
+        }
     }
 
     Item {
@@ -264,7 +332,7 @@ Item {
 
                         Behavior on width {
                             NumberAnimation {
-                                duration: root.reducedMotion ? 0 : 180
+                                duration: root.effectiveReducedMotion ? 0 : 180
                                 easing.type: Easing.OutCubic
                             }
                         }
@@ -282,6 +350,7 @@ Item {
             anchors {
                 right: parent.right
                 verticalCenter: parent.verticalCenter
+                rightMargin: displaySettings.width + 16
             }
             spacing: 12
 
@@ -316,7 +385,7 @@ Item {
                 height: 58
                 anchors.verticalCenter: parent.verticalCenter
                 voice: root.store.voice
-                reducedMotion: root.reducedMotion
+                reducedMotion: root.effectiveReducedMotion
                 enabled: root.controlCenterInteractive
                 actionsEnabled: root.controlCenterInteractive
                     && !root.store.freshSnapshotRequired
@@ -465,7 +534,7 @@ Item {
 
         Behavior on height {
             NumberAnimation {
-                duration: root.reducedMotion ? 0 : 180
+                duration: root.effectiveReducedMotion ? 0 : 180
             }
         }
     }
@@ -488,7 +557,7 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         interactive: root.pageCount > 1 && root.surfaceState !== "disconnected"
             && root.controlCenterInteractive
-        highlightMoveDuration: root.reducedMotion ? 0 : 220
+        highlightMoveDuration: root.effectiveReducedMotion ? 0 : 220
         cacheBuffer: width
         clip: true
         opacity: ambientView.controlCenterProgress
@@ -554,7 +623,7 @@ Item {
                         agent: root.agentAt(page.index, index)
                         visible: agent !== null
                         enabled: visible && root.controlCenterInteractive
-                        reducedMotion: root.reducedMotion
+                        reducedMotion: root.effectiveReducedMotion
                         snapshotSequence: root.store.sequence
                         actionsEnabled: !root.store.freshSnapshotRequired
 
@@ -679,7 +748,7 @@ Item {
         usage: root.store.usage
         agents: root.store.agents
         sessions: root.store.sessions
-        reducedMotion: root.reducedMotion
+        reducedMotion: root.effectiveReducedMotion
         enabled: root.controlCenterInteractive
         opacity: ambientView.controlCenterProgress
         transform: Translate {
@@ -691,7 +760,7 @@ Item {
         anchors.fill: parent
         opened: root.microDrawerOpen
         interactive: root.controlCenterInteractive
-        reducedMotion: root.reducedMotion
+        reducedMotion: root.effectiveReducedMotion
         micro: root.store.micro
         agents: root.store.agents
         voice: root.store.voice
@@ -769,7 +838,7 @@ Item {
 
         Behavior on height {
             NumberAnimation {
-                duration: root.reducedMotion ? 0 : 170
+                duration: root.effectiveReducedMotion ? 0 : 170
                 easing.type: Easing.OutCubic
             }
         }
@@ -878,7 +947,7 @@ Item {
 
         anchors.fill: parent
         active: root.activity.ambientMode
-        reducedMotion: root.reducedMotion
+        reducedMotion: root.effectiveReducedMotion
         agents: root.store.agents
         health: root.store.health
         voice: root.store.voice
