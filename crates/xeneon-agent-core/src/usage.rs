@@ -89,6 +89,8 @@ impl UsageCollector {
             trusted && (provider.primary.is_some() || provider.secondary.is_some());
         if !trusted {
             provider.stale = true;
+            provider.plan = None;
+            provider.model = None;
             provider.primary = None;
             provider.secondary = None;
             provider.today_tokens = None;
@@ -318,7 +320,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
             temp.path().join("claude-usage.json"),
-            r#"{"5h-utilization":"0.25","_source":"oauth","status":"blocked","_today_tokens":123,"_rate_per_hour":45}"#,
+            r#"{"5h-utilization":"0.25","_source":"oauth","status":"blocked","_plan":"injected-plan","_model":"injected-model","_today_tokens":123,"_rate_per_hour":45}"#,
         )
         .unwrap();
         fs::write(
@@ -332,6 +334,8 @@ mod tests {
         assert_eq!(claude.status, "blocked");
         assert!(!claude.available);
         assert!(claude.stale);
+        assert_eq!(claude.plan, None);
+        assert_eq!(claude.model, None);
         assert!(claude.primary.is_none());
         assert_eq!(claude.today_tokens, None);
         assert_eq!(claude.tokens_per_hour, None);

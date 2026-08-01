@@ -93,7 +93,8 @@ Item {
 
     function notePassiveInteraction() {
         activity.noteUserActivity()
-        bridge.restoreFocus()
+        if (bridge.ready)
+            bridge.restoreFocus()
     }
 
     function selectPage(pageIndex) {
@@ -919,8 +920,10 @@ Item {
         }
 
         function onFreshSnapshotRequiredChanged() {
-            if (root.store.freshSnapshotRequired)
+            if (root.store.freshSnapshotRequired) {
+                root.pendingVoiceFocus = {}
                 root.pendingDesktopActions = {}
+            }
         }
     }
 

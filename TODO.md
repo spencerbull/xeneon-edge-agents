@@ -29,6 +29,11 @@ windows, reset timing, plan/freshness state, and bounded aggregate today/hour
 token activity. Prompt text, per-model history, credentials, and raw provider
 payloads remain outside the portal protocol.
 
+The completed review checkpoint audited the complete tracked repository with Claude
+Fable 5 over a persistent ACP session. Any verified findings are fixed only on
+`claude-fable-review`, revalidated through the required software gates, and
+returned to the same reviewer until no substantive findings remained.
+
 ## Done criteria
 
 - [x] Rust daemon and QML bridge expose versioned normalized snapshots.
@@ -90,6 +95,7 @@ payloads remain outside the portal protocol.
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
 | Agent-command home redesign | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized safe metadata, usage/Micro collectors, fixed app actions, control-center QML | Software complete, live-previewed, and independently reviewed |
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
+| Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -207,6 +213,16 @@ payloads remain outside the portal protocol.
 - [x] Independent AI usage detail review approved the additive schema-v1
       fields, trust clearing, Rust/QML bounds, and 1280x360 composition with no
       substantive findings.
+- [x] Claude-review remediation software gate: 56 Rust core plus 1 CLI test,
+      strict fmt/clippy, ShellCheck 0.11.0, 26 Python QML contracts/fixtures,
+      85 Qt tests with `qmllint`, and 25 isolated installer scenarios.
+- [x] Claude Fable 5 full-repository ACP review has no remaining substantive
+      findings after verified fixes and required local gates.
+- [x] Claude-review live activation passed the exact DP-2/EDID/touch preflight,
+      installed release binaries with source-matching hashes, retired the
+      obsolete `HealthStrip.qml`, restarted both services with zero failures,
+      reported one connected Herdr 0.7.5/protocol-17 session with four agents,
+      and rendered one visually inspected portal layer on DP-2 only.
 - [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
       guarded-hold behavior, and DDC restore remain).
 
@@ -230,6 +246,10 @@ payloads remain outside the portal protocol.
   reset timing, plan/freshness and explicit status, plus bounded aggregate
   today/hour activity when available; no prompts, per-model history,
   credentials, or raw provider payloads cross the protocol.
+- The uncommitted `claude-fable-review` remediation isolates Herdr refreshes
+  from the privacy-sensitive collector loop, fails closed on non-17 Herdr
+  protocols and untrusted usage text, repairs QML recovery behavior, removes
+  the retired HealthStrip, and adds ShellCheck plus an Arch/Quickshell CI gate.
 - Portal preferences persist at
   `~/.local/state/xeneon-edge-agents/portal/preferences.ini` with mode `0600`;
   physical validation ended in the default full-motion, normal-screen state.
@@ -246,6 +266,9 @@ payloads remain outside the portal protocol.
 
 ## Open checkpoints
 
+- Complete the Claude Fable 5 ACP review/fix/re-review loop on
+  `claude-fable-review`; do not include or modify the pre-existing untracked
+  `packaging/` artifacts.
 - Capture calibrated corner coordinates and guarded-hold cancellation.
 - Verify hotplug, DPMS, suspend/resume, and privacy behavior.
 - Probe DDC/CI read-only and expose brightness only after exact restoration

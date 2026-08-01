@@ -105,40 +105,50 @@ impl DaemonRuntime {
         let listener = bind_socket(path)?;
         tracing::info!(socket = %path.display(), "xeneon agent daemon listening");
 
-        let collector_runtime = self.clone();
-        let collector = tokio::spawn(async move {
-            collector_runtime.collect_loop(invalidation_rx).await;
+        let auxiliary_runtime = self.clone();
+        let mut auxiliary_collector = tokio::spawn(async move {
+            auxiliary_runtime.collect_auxiliary_loop().await;
+        });
+        let herdr_runtime = self.clone();
+        let mut herdr_collector = tokio::spawn(async move {
+            herdr_runtime.collect_herdr_loop(invalidation_rx).await;
         });
 
         loop {
-            let (stream, _) = listener.accept().await.context("accepting portal client")?;
-            let client_runtime = self.clone();
-            tokio::spawn(async move {
-                if let Err(error) = client_runtime.handle_client(stream).await {
-                    tracing::warn!(%error, "portal client disconnected");
+            tokio::select! {
+                result = &mut auxiliary_collector => {
+                    result.context("joining auxiliary state collector")?;
+                    bail!("auxiliary state collector stopped unexpectedly");
                 }
-            });
-            if collector.is_finished() {
-                bail!("state collector stopped unexpectedly");
+                result = &mut herdr_collector => {
+                    result.context("joining Herdr state collector")?;
+                    bail!("Herdr state collector stopped unexpectedly");
+                }
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.context("accepting portal client")?;
+                    let client_runtime = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = client_runtime.handle_client(stream).await {
+                            tracing::warn!(%error, "portal client disconnected");
+                        }
+                    });
+                }
             }
         }
     }
 
-    async fn collect_loop(&self, mut invalidation_rx: mpsc::Receiver<String>) {
+    async fn collect_auxiliary_loop(&self) {
         let mut health = HealthCollector::default();
         let usage = UsageCollector::default();
         let micro = MicroCollector::default();
         let mut health_tick = interval(self.config.health_refresh_interval());
-        let mut herdr_tick = interval(self.config.herdr_refresh_interval());
         let mut voice_tick = interval(self.config.voice_refresh_interval());
         let mut usage_tick = interval(self.config.usage_refresh_interval());
         let mut micro_tick = interval(self.config.micro_refresh_interval());
         health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        herdr_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         voice_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         usage_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         micro_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut subscriptions: HashMap<String, Subscription> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -151,9 +161,6 @@ impl DaemonRuntime {
                     }
                     self.publish().await;
                     self.desktop.remember_non_edge_focus().await;
-                }
-                _ = herdr_tick.tick() => {
-                    self.refresh_herdr(&mut subscriptions).await;
                 }
                 _ = voice_tick.tick() => {
                     self.refresh_voice().await;
@@ -177,6 +184,20 @@ impl DaemonRuntime {
                         drop(state);
                         self.publish().await;
                     }
+                }
+            }
+        }
+    }
+
+    async fn collect_herdr_loop(&self, mut invalidation_rx: mpsc::Receiver<String>) {
+        let mut herdr_tick = interval(self.config.herdr_refresh_interval());
+        herdr_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut subscriptions: HashMap<String, Subscription> = HashMap::new();
+
+        loop {
+            tokio::select! {
+                _ = herdr_tick.tick() => {
+                    self.refresh_herdr(&mut subscriptions).await;
                 }
                 invalidation = invalidation_rx.recv() => {
                     if invalidation.is_none() {
@@ -205,14 +226,13 @@ impl DaemonRuntime {
             return;
         }
         state.snapshot.voice = voice;
-        state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
         state.snapshot.generated_at_ms = now_ms();
         drop(state);
         self.publish().await;
     }
 
     async fn refresh_herdr(&self, subscriptions: &mut HashMap<String, Subscription>) {
-        let now_ms = now_ms();
+        let observation_time_ms = now_ms();
         let descriptors = match self.herdr.discover().await {
             Ok(descriptors) => descriptors,
             Err(error) => {
@@ -228,7 +248,7 @@ impl DaemonRuntime {
                 }
                 state.targets.clear();
                 state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
-                state.snapshot.generated_at_ms = now_ms;
+                state.snapshot.generated_at_ms = now_ms();
                 drop(state);
                 self.publish().await;
                 return;
@@ -248,10 +268,17 @@ impl DaemonRuntime {
             active_names.push(descriptor.name.clone());
             match self
                 .herdr
-                .observe_session(descriptor, &epoch, source_offset, now_ms)
+                .observe_session(descriptor, &epoch, source_offset, observation_time_ms)
                 .await
             {
                 Ok(mut observation) => {
+                    if observation.session.state == SessionState::Incompatible {
+                        if let Some(subscription) = subscriptions.remove(&descriptor.name) {
+                            subscription.handle.abort();
+                        }
+                        sessions.push(observation.session);
+                        continue;
+                    }
                     match update_subscription(
                         subscriptions,
                         &self.herdr,
@@ -264,10 +291,26 @@ impl DaemonRuntime {
                         Ok(true) => {
                             match self
                                 .herdr
-                                .observe_session(descriptor, &epoch, source_offset, now_ms)
+                                .observe_session(
+                                    descriptor,
+                                    &epoch,
+                                    source_offset,
+                                    observation_time_ms,
+                                )
                                 .await
                             {
-                                Ok(reconciled) => observation = reconciled,
+                                Ok(reconciled) => {
+                                    if reconciled.session.state == SessionState::Incompatible {
+                                        if let Some(subscription) =
+                                            subscriptions.remove(&descriptor.name)
+                                        {
+                                            subscription.handle.abort();
+                                        }
+                                        sessions.push(reconciled.session);
+                                        continue;
+                                    }
+                                    observation = reconciled;
+                                }
                                 Err(error) => {
                                     tracing::warn!(
                                         session = %descriptor.name,
@@ -385,7 +428,7 @@ impl DaemonRuntime {
             ConnectionState::Reconnecting
         };
         state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
-        state.snapshot.generated_at_ms = now_ms;
+        state.snapshot.generated_at_ms = now_ms();
         state.targets = targets;
         drop(state);
         self.publish().await;
@@ -1067,6 +1110,30 @@ mod tests {
         assert_eq!(result.code, "command_error");
         assert_eq!(result.message, "voice action failed");
         assert!(!result.message.contains("transcript"));
+    }
+
+    #[tokio::test]
+    async fn voice_only_refresh_does_not_invalidate_agent_commands() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("voice-state");
+        fs::write(&state_path, "recording").unwrap();
+        let (mut runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+        runtime.voice = Arc::new(Mutex::new(VoiceController::new(
+            temp.path().join("voxtype"),
+            state_path,
+            temp.path().join("dictation-active"),
+            "owner",
+        )));
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 42;
+        }
+
+        runtime.refresh_voice().await;
+
+        let state = runtime.state.read().await;
+        assert_eq!(state.snapshot.sequence, 42);
+        assert_eq!(state.snapshot.voice.state, VoiceState::Recording);
     }
 
     #[tokio::test]

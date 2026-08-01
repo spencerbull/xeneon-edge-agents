@@ -29,7 +29,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install portable integration dependencies
-        run: sudo apt-get update && sudo apt-get install -y lua5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 shellcheck
+      - name: Run shell static checks
+        run: shellcheck scripts/*.sh scripts/preview tests/*.sh tests/run-integration-tests tests/run-qml-tests
       - name: Validate JSON assets
         run: |
           find . -type f -name '*.json' -print0 |
@@ -40,3 +42,14 @@ jobs:
             python3 -m unittest discover -s quickshell/tests -p 'test_*.py' -v
       - name: Run portable integration tests
         run: tests/run-integration-tests
+
+  qml:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: archlinux:latest
+    steps:
+      - name: Install Quickshell and Qt test dependencies
+        run: pacman -Syu --noconfirm --needed git python quickshell qt6-declarative
+      - uses: actions/checkout@v4
+      - name: Run QML lint, contracts, and Qt tests
+        run: tests/run-qml-tests
