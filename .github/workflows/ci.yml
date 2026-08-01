@@ -49,7 +49,9 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install Quickshell and Qt test dependencies
-        run: pacman -Syu --noconfirm --needed git python quickshell qt6-declarative
+        run: |
+          pacman -Syu --noconfirm --needed git python quickshell qt6-declarative
+          echo /usr/lib/qt6/bin >> "$GITHUB_PATH"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run QML lint, contracts, and Qt tests
         run: tests/run-qml-tests

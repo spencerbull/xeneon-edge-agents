@@ -80,7 +80,8 @@ if ((live_preview == 0)) &&
 fi
 
 # Called by the signal trap below.
-# shellcheck disable=SC2329
+# ShellCheck 0.10 and 0.11 use different codes for trap-only callbacks.
+# shellcheck disable=SC2317,SC2329
 forward_signal() {
   if [[ -n "$preview_pid" ]] && kill -0 "$preview_pid" 2>/dev/null; then
     kill -TERM "$preview_pid" 2>/dev/null || true
@@ -91,7 +92,8 @@ forward_signal() {
 }
 
 # Called by the EXIT trap below.
-# shellcheck disable=SC2329
+# ShellCheck 0.10 and 0.11 use different codes for trap-only callbacks.
+# shellcheck disable=SC2317,SC2329
 cleanup_runtime() {
   forward_signal
   if [[ -n "$daemon_pid" ]]; then
