@@ -218,7 +218,9 @@ TestCase {
                     "label": "Weekly",
                     "utilization": 0.4,
                     "reset_at_ms": 50000
-                }
+                },
+                "today_tokens": -1,
+                "tokens_per_hour": "1000"
             }]
         }
         initial.micro = {
@@ -226,6 +228,8 @@ TestCase {
             "charging": false
         }
         verify(store.ingestEnvelope(initial))
+        compare(store.usage.providers[0].today_tokens, null)
+        compare(store.usage.providers[0].tokens_per_hour, null)
         semanticActivitySpy.clear()
 
         var refresh = snapshot(
@@ -248,6 +252,13 @@ TestCase {
                     "utilization": 1.4,
                     "reset_at_ms": 60000
                 },
+                "secondary": {
+                    "label": "5h",
+                    "utilization": 0.25,
+                    "reset_at_ms": 55000
+                },
+                "today_tokens": 53960987620,
+                "tokens_per_hour": 1778512401,
                 "raw_tokens": 999999
             }, {
                 "id": "hostile-provider",
@@ -272,6 +283,9 @@ TestCase {
         compare(store.usage.providers.length, 1)
         compare(store.usage.providers[0].id, "codex")
         compare(store.usage.providers[0].primary.utilization, 1)
+        compare(store.usage.providers[0].secondary.utilization, 0.25)
+        compare(store.usage.providers[0].today_tokens, 53960987620)
+        compare(store.usage.providers[0].tokens_per_hour, 1778512401)
         compare(store.usage.providers[0].raw_tokens, undefined)
         compare(store.micro.connected, true)
         compare(store.micro.battery, 46)

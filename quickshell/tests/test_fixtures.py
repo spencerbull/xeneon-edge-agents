@@ -143,6 +143,15 @@ class FixtureContractTests(unittest.TestCase):
                             )
                             self.assertIsInstance(provider["available"], bool)
                             self.assertIsInstance(provider["stale"], bool)
+                            for name in ("today_tokens", "tokens_per_hour"):
+                                if name not in provider:
+                                    continue
+                                self.assertIsInstance(provider[name], int)
+                                self.assertGreaterEqual(provider[name], 0)
+                                self.assertLessEqual(
+                                    provider[name],
+                                    1_000_000_000_000_000,
+                                )
                             for name in ("primary", "secondary"):
                                 window = provider.get(name)
                                 if window is None:

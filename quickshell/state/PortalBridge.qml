@@ -8,6 +8,8 @@ QtObject {
     property bool enabled: true
     property bool previewMode: false
     property string fixturePath: ""
+    readonly property bool ready: !store.freshSnapshotRequired
+        && (previewMode || bridgeProcess.running)
 
     signal commandEmitted(var command)
     signal commandRejected(string reason)
@@ -37,10 +39,10 @@ QtObject {
         }
 
         stderr: SplitParser {
-            onRead: function(line) {
+            onRead: function(_line) {
                 root.store.setTransportState(
                     "degraded",
-                    String(line || "").trim().slice(0, 120)
+                    "Bridge reported a warning"
                 )
             }
         }
@@ -70,7 +72,13 @@ QtObject {
             return
 
         try {
-            store.ingestEnvelope(JSON.parse(trimmed))
+            var accepted = store.ingestEnvelope(JSON.parse(trimmed))
+            if (accepted && store.transportState === "degraded") {
+                store.setTransportState(
+                    root.previewMode ? "fixture" : "streaming",
+                    ""
+                )
+            }
         } catch (error) {
             store.reject("Invalid NDJSON envelope")
         }

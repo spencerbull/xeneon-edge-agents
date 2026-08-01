@@ -22,6 +22,7 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const SUPPORTED_HERDR_PROTOCOL: u32 = 17;
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -183,6 +184,24 @@ impl HerdrClient {
             json!({"id": request_id(), "method": "ping", "params": {}}),
         )
         .await?;
+        if ping.result.protocol != SUPPORTED_HERDR_PROTOCOL {
+            return Ok(SessionObservation {
+                session: SessionView {
+                    name: descriptor.name.clone(),
+                    state: SessionState::Incompatible,
+                    version: Some(ping.result.version),
+                    protocol: Some(ping.result.protocol),
+                    last_sync_ms: Some(now_ms),
+                    message: Some(format!(
+                        "Herdr protocol {} is unsupported; expected {}",
+                        ping.result.protocol, SUPPORTED_HERDR_PROTOCOL
+                    )),
+                },
+                agents: Vec::new(),
+                targets: HashMap::new(),
+                pane_ids: Vec::new(),
+            });
+        }
         let response: SnapshotResponse = request(
             &descriptor.socket_path,
             json!({"id": request_id(), "method": "session.snapshot", "params": {}}),
@@ -648,6 +667,44 @@ mod tests {
             display_name(&canonical_only, &HashMap::new(), "codex"),
             "codex"
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_protocol_never_requests_or_surfaces_session_data() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "ping");
+            write
+                .write_all(
+                    b"{\"id\":\"ping\",\"result\":{\"version\":\"future\",\"protocol\":999}}\n",
+                )
+                .await
+                .unwrap();
+        });
+        let descriptor = SessionDescriptor {
+            name: "future".into(),
+            running: true,
+            socket_path: socket,
+        };
+
+        let observation = HerdrClient::new("herdr")
+            .observe_session(&descriptor, "epoch", 0, 1234)
+            .await
+            .unwrap();
+
+        assert_eq!(observation.session.state, SessionState::Incompatible);
+        assert_eq!(observation.session.protocol, Some(999));
+        assert!(observation.agents.is_empty());
+        assert!(observation.targets.is_empty());
+        assert!(observation.pane_ids.is_empty());
+        server.await.unwrap();
     }
 
     #[tokio::test]

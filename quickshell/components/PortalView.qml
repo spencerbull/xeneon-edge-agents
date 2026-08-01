@@ -93,7 +93,8 @@ Item {
 
     function notePassiveInteraction() {
         activity.noteUserActivity()
-        bridge.restoreFocus()
+        if (bridge.ready)
+            bridge.restoreFocus()
     }
 
     function selectPage(pageIndex) {
@@ -744,7 +745,7 @@ Item {
             rightMargin: 24
             bottomMargin: 16
         }
-        height: 82
+        height: 106
         usage: root.store.usage
         agents: root.store.agents
         sessions: root.store.sessions
@@ -919,8 +920,10 @@ Item {
         }
 
         function onFreshSnapshotRequiredChanged() {
-            if (root.store.freshSnapshotRequired)
+            if (root.store.freshSnapshotRequired) {
+                root.pendingVoiceFocus = {}
                 root.pendingDesktopActions = {}
+            }
         }
     }
 

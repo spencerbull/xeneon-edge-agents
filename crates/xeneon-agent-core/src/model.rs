@@ -156,6 +156,10 @@ pub struct ProviderUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<UsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub today_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_hour: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_updated_ms: Option<u64>,
 }
 

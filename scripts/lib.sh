@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Shared path outputs are consumed by the installer scripts that source this
+# library, so they intentionally look unused when this file is linted alone.
+# shellcheck disable=SC2034
+
 set -euo pipefail
 
 project_name=xeneon-edge-agents
@@ -33,7 +37,7 @@ validate_path_argument() {
   local value=$2
   [[ "$value" == /* ]] || die "$label must be an absolute path"
   case "$value" in
-    *$'\n'*|*$'\r'*|*$'\t'*|*'%'*|*'$'*|*'"'*|*'\'*)
+    *$'\n'*|*$'\r'*|*$'\t'*|*'%'*|*'$'*|*'"'*|*\\*)
       die "$label may not contain control characters, %, $, quotes, or backslashes"
       ;;
   esac

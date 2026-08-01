@@ -1,4 +1,5 @@
 /target/
+/packaging/arch/dist/
 /.cache/
 /.worktrees/
 *.log

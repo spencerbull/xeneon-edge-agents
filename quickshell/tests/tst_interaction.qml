@@ -6,7 +6,6 @@ TestCase {
     id: testCase
 
     name: "PortalInteraction"
-    when: windowShown
     width: 900
     height: 360
 
@@ -74,20 +73,6 @@ TestCase {
             "available": true,
             "state": "idle",
             "owned": false
-        })
-    }
-
-    HealthStrip {
-        id: health
-
-        x: 650
-        y: 305
-        width: 240
-        height: 52
-        health: ({})
-        connection: ({
-            "state": "connected",
-            "detail": "fixture"
         })
     }
 
@@ -165,8 +150,6 @@ TestCase {
         voiceCancelSpy.clear()
         hostileCard.enabled = true
         agentFocusSpy.clear()
-        health.enabled = true
-        health.detailsVisible = false
         chatGptButton.enabled = true
         chatGptButton.pending = false
         claudeButton.enabled = true
@@ -283,9 +266,6 @@ TestCase {
         compare(voiceStopSpy.count, 0)
         compare(voiceCancelSpy.count, 0)
 
-        health.enabled = false
-        verify(!health.toggleDetails())
-        verify(!health.detailsVisible)
     }
 
     function test_voicePressPairsExactlyOneStartAndStop() {

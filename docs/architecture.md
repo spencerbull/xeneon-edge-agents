@@ -54,8 +54,8 @@ portal interaction, so they cannot invalidate a guarded action or wake the
 ambient surface. Usage collection reads only the bounded normalized cache
 contracts already produced by the Omarchy Quickshell AI module. The daemon
 allowlists provider IDs, sources, status values, and safe metadata, clamps
-utilization, rejects oversized files, and never forwards credentials or raw
-provider payloads.
+utilization and aggregate token activity, rejects oversized files, and never
+forwards credentials, prompts, per-model history, or raw provider payloads.
 
 Micro collection uses one fixed read-only `device.status` request on the
 user-private local microd socket. Connected state requires a valid device

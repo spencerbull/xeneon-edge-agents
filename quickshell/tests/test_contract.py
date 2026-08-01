@@ -333,7 +333,6 @@ class QmlSafetyContractTests(unittest.TestCase):
         for component in (
             "AgentCard.qml",
             "DesktopAppButton.qml",
-            "HealthStrip.qml",
             "HoldControl.qml",
             "MicroDrawer.qml",
             "VoiceControl.qml",
@@ -343,6 +342,34 @@ class QmlSafetyContractTests(unittest.TestCase):
                 source("components/" + component),
                 component,
             )
+
+        self.assertFalse((ROOT / "components/HealthStrip.qml").exists())
+
+    def test_bridge_warnings_recover_and_passive_focus_is_quiet(self):
+        bridge = source("state/PortalBridge.qml")
+        portal = source("components/PortalView.qml")
+
+        self.assertIn('"Bridge reported a warning"', bridge)
+        self.assertIn('store.transportState === "degraded"', bridge)
+        self.assertIn(
+            'root.previewMode ? "fixture" : "streaming"',
+            bridge,
+        )
+        passive = re.search(
+            r"function notePassiveInteraction\(\) \{(?P<body>.*?)\n\s*\}",
+            portal,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(passive)
+        self.assertIn("if (bridge.ready)", passive.group("body"))
+        reconnect = re.search(
+            r"function onFreshSnapshotRequiredChanged\(\) \{(?P<body>.*?)\n\s*\}",
+            portal,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(reconnect)
+        self.assertIn("root.pendingVoiceFocus = {}", reconnect.group("body"))
+        self.assertIn("root.pendingDesktopActions = {}", reconnect.group("body"))
 
     def test_home_telemetry_and_app_controls_remain_presentation_only(self):
         portal = source("components/PortalView.qml")

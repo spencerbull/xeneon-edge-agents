@@ -160,7 +160,9 @@ fn read_network_totals(path: &Path) -> Option<NetworkTotals> {
     let mut totals = NetworkTotals::default();
     let mut interfaces = 0;
     for line in contents.lines().skip(2) {
-        let (name, values) = line.split_once(':')?;
+        let Some((name, values)) = line.split_once(':') else {
+            continue;
+        };
         if name.trim() == "lo" {
             continue;
         }
@@ -168,8 +170,11 @@ fn read_network_totals(path: &Path) -> Option<NetworkTotals> {
         if fields.len() < 9 {
             continue;
         }
-        totals.down = totals.down.saturating_add(fields[0].parse().ok()?);
-        totals.up = totals.up.saturating_add(fields[8].parse().ok()?);
+        let (Ok(down), Ok(up)) = (fields[0].parse::<u64>(), fields[8].parse::<u64>()) else {
+            continue;
+        };
+        totals.down = totals.down.saturating_add(down);
+        totals.up = totals.up.saturating_add(up);
         interfaces += 1;
     }
     (interfaces > 0).then_some(totals)
@@ -308,6 +313,20 @@ mod tests {
         assert!(second.cpu.available);
         assert!(second.network_down.available);
         assert!(second.network_up.available);
+    }
+
+    #[test]
+    fn malformed_network_interfaces_do_not_hide_valid_totals() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("net/dev");
+        write(
+            &path,
+            "Inter-| Receive | Transmit\n face |\nmissing separator\nbad0: nope 0 0 0 0 0 0 0 12 0 0 0 0 0 0 0\neth0: 1000 0 0 0 0 0 0 0 500 0 0 0 0 0 0 0\n",
+        );
+
+        let totals = read_network_totals(&path).unwrap();
+        assert_eq!(totals.down, 1000);
+        assert_eq!(totals.up, 500);
     }
 
     #[test]
