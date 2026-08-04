@@ -89,7 +89,7 @@ returned to the same reviewer until no substantive findings remained.
 | Stream | Branch/worktree | Files to own | Status |
 | --- | --- | --- | --- |
 | Foundation and Rust adapter | `main` | Rust workspace, schemas, fixtures | Complete through `c32b5cd` |
-| Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Complete locally at `8298f46`; not installed or pushed |
+| Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Installed from reviewed v0.8.0 head `fd53378d`; not pushed |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
@@ -97,7 +97,7 @@ returned to the same reviewer until no substantive findings remained.
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
 | Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
-| Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Complete locally; full software gate passed and stable install unchanged |
+| Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -275,9 +275,14 @@ returned to the same reviewer until no substantive findings remained.
   immediately to its right at `1840,1350`. The external display is running at
   120 Hz instead of 240 Hz so the third display fits the available link
   bandwidth.
-- The stable Herdr installation remains unchanged. The guarded-action branch is
-  rebased onto Herdr v0.8.0/protocol 19 with its pre-rebase tip preserved;
-  approval and Windows guarded actions remain unavailable.
+- Herdr was live-handed off twice without terminating its 48 pane processes:
+  first from stable v0.7.5 to reviewed v0.8.0/protocol 19, then from the build
+  artifact to the canonical `~/.local/bin/herdr`. The old server exited only
+  after the replacement acknowledged PTY ownership. Installed Herdr and XENEON
+  binary hashes match their reviewed release artifacts; both user services,
+  `xeneon-agentctl doctor`, and `scripts/check.sh` pass. Backups are retained in
+  the user-owned Herdr and XENEON state directories. Approval and Windows
+  guarded actions remain unavailable.
 
 ## Open checkpoints
 
