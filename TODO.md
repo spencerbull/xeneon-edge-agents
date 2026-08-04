@@ -97,6 +97,7 @@ returned to the same reviewer until no substantive findings remained.
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
 | Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
+| Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Complete locally; full software gate passed and stable install unchanged |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -231,6 +232,8 @@ returned to the same reviewer until no substantive findings remained.
       Apps menu, launched it through that menu, rendered its success
       notification, kept already-running service PIDs stable, and separately
       restored a deliberately stopped portal through `gtk-launch` on DP-1.
+- [x] Herdr v0.8 compatibility gate: protocol-19 adapter fixture and full
+      repository software checks pass against the rebased Herdr API contract.
 - [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
       guarded-hold behavior, and DDC restore remain).
 
@@ -272,9 +275,9 @@ returned to the same reviewer until no substantive findings remained.
   immediately to its right at `1840,1350`. The external display is running at
   120 Hz instead of 240 Hz so the third display fits the available link
   bandwidth.
-- The stable Herdr installation remains unchanged. Guarded interruption exists
-  only on the local Herdr branch; approval and Windows guarded actions remain
-  unavailable.
+- The stable Herdr installation remains unchanged. The guarded-action branch is
+  rebased onto Herdr v0.8.0/protocol 19 with its pre-rebase tip preserved;
+  approval and Windows guarded actions remain unavailable.
 
 ## Open checkpoints
 
