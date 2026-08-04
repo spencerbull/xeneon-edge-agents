@@ -221,6 +221,8 @@ snapshot_activation_artifact() {
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
+launcher_helper=$temp_dir/xeneon-edge-launch
+desktop_entry=$temp_dir/xeneon-edge-agents.desktop
 render_template \
   "$repo_root/config/systemd/user/xeneon-agentd.service.in" "$daemon_unit" \
   CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home"
@@ -228,9 +230,16 @@ render_template \
   "$repo_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
   CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home" \
   OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+cp "$repo_root/config/bin/xeneon-edge-launch" "$launcher_helper"
+render_template \
+  "$repo_root/config/applications/xeneon-edge-agents.desktop.in" "$desktop_entry" \
+  BIN_HOME "$bin_home"
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
+launcher_target=$bin_home/xeneon-edge-launch
+desktop_target=$data_home/applications/xeneon-edge-agents.desktop
+icon_target=$data_home/icons/hicolor/scalable/apps/xeneon-edge-agents.svg
 config_target=$config_dir/config.toml
 commissioning_target=$config_dir/commissioning.toml
 module_target=$hypr_dir/xeneon_edge_agents.lua
@@ -247,6 +256,10 @@ fi
 # therefore leaves no partial installation to roll back.
 preflight_managed_target "$daemon_unit" "$daemon_target"
 preflight_managed_target "$portal_unit" "$portal_target"
+preflight_managed_target "$launcher_helper" "$launcher_target"
+preflight_managed_target "$desktop_entry" "$desktop_target"
+preflight_managed_target \
+  "$repo_root/config/icons/xeneon-edge-agents.svg" "$icon_target"
 
 quickshell_sources=()
 quickshell_targets=()
@@ -386,6 +399,9 @@ fi
 if ((activate)); then
   snapshot_activation_artifact "$daemon_target"
   snapshot_activation_artifact "$portal_target"
+  snapshot_activation_artifact "$launcher_target"
+  snapshot_activation_artifact "$desktop_target"
+  snapshot_activation_artifact "$icon_target"
   for target in "${quickshell_targets[@]}"; do
     snapshot_activation_artifact "$target"
   done
@@ -408,6 +424,10 @@ fi
 
 install_managed_file "$daemon_unit" "$daemon_target"
 install_managed_file "$portal_unit" "$portal_target"
+install_managed_file "$launcher_helper" "$launcher_target" 0755
+install_managed_file "$desktop_entry" "$desktop_target"
+install_managed_file \
+  "$repo_root/config/icons/xeneon-edge-agents.svg" "$icon_target"
 for index in "${!quickshell_sources[@]}"; do
   install_managed_file \
     "${quickshell_sources[$index]}" "${quickshell_targets[$index]}"
@@ -531,8 +551,14 @@ if [[ -f "$quickshell_source/shell.qml" && -f "$manifest_path" ]]; then
   find "$quickshell_target" -depth -type d -empty -delete 2>/dev/null || true
 fi
 
+if ((!isolated_root)) && command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$data_home/applications" ||
+    warn "desktop launcher installed but the application cache refresh failed"
+fi
+
 note "Installed XENEON EDGE user integration."
 note "Config: $config_target"
+note "Launcher: $desktop_target"
 if ((!activate)); then
   note "Services were not enabled."
 fi

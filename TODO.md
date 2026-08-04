@@ -96,6 +96,7 @@ returned to the same reviewer until no substantive findings remained.
 | Agent-command home redesign | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized safe metadata, usage/Micro collectors, fixed app actions, control-center QML | Software complete, live-previewed, and independently reviewed |
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
+| Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -223,6 +224,13 @@ returned to the same reviewer until no substantive findings remained.
       obsolete `HealthStrip.qml`, restarted both services with zero failures,
       reported one connected Herdr 0.7.5/protocol-17 session with four agents,
       and rendered one visually inspected portal layer on DP-2 only.
+- [x] Desktop-launcher gate: strict ShellCheck, desktop-entry validation, 28
+      isolated installer scenarios, and the full Rust/QML/software gates pass;
+      independent re-review has no remaining P0/P1/P2 findings.
+- [x] Desktop-launcher live QA found the custom entry and icon in Omarchy's
+      Apps menu, launched it through that menu, rendered its success
+      notification, kept already-running service PIDs stable, and separately
+      restored a deliberately stopped portal through `gtk-launch` on DP-1.
 - [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
       guarded-hold behavior, and DDC restore remain).
 
@@ -242,6 +250,10 @@ returned to the same reviewer until no substantive findings remained.
 - `xeneon-agentd.service` and `xeneon-edge-portal.service` are enabled,
   active, and running without restarts after the reviewed AI usage detail
   activation.
+- The managed `XENEON EDGE Command Center` desktop entry, icon, and bounded
+  helper are installed in user-owned XDG paths. The default action starts the
+  two fixed user units without disrupting active services; restart is an
+  explicit secondary action.
 - The installed physical footer now shows both reported provider windows,
   reset timing, plan/freshness and explicit status, plus bounded aggregate
   today/hour activity when available; no prompts, per-model history,

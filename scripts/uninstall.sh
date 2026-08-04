@@ -160,8 +160,17 @@ if ((hypr_entrypoint_changed && !isolated_root)); then
   fi
 fi
 
+if ((!isolated_root)) && [[ -d "$data_home/applications" ]] &&
+  command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$data_home/applications" ||
+    warn "files were removed but the application cache refresh failed"
+fi
+
 for directory in \
   "$config_home/quickshell/xeneon-edge-agents" "$config_home/quickshell" \
+  "$data_home/applications" "$data_home/icons/hicolor/scalable/apps" \
+  "$data_home/icons/hicolor/scalable" "$data_home/icons/hicolor" \
+  "$data_home/icons" \
   "$config_dir" "$systemd_dir" "$hypr_dir" \
   "$install_state_dir" "$state_home/$project_name"; do
   rmdir "$directory" 2>/dev/null || true

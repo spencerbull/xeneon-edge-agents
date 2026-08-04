@@ -197,6 +197,7 @@ install_managed_file() {
   if [[ -f "$target" ]] && [[ "$(sha256_file "$target")" == "$source_hash" ]]; then
     [[ "$(manifest_hash "$target" 2>/dev/null || true)" == "$source_hash" ]] ||
       die "refusing to claim pre-existing identical user file: $target"
+    chmod "$mode" "$target"
     write_manifest_entry "$target" "$source_hash"
     return 0
   fi

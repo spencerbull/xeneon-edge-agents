@@ -73,11 +73,28 @@ hyprland_target=$hypr_dir/hyprland.lua
 
 check_file "daemon service" "$systemd_dir/xeneon-agentd.service"
 check_file "portal service" "$systemd_dir/xeneon-edge-portal.service"
+check_file "desktop launcher" "$data_home/applications/xeneon-edge-agents.desktop"
+check_file "desktop icon" "$data_home/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
 check_file "named Quickshell config" "$config_home/quickshell/xeneon-edge-agents/shell.qml"
 check_file "config" "$config_target"
 check_file "commissioning config" "$commissioning_target"
 
-for executable in xeneon-agentd xeneon-agentctl; do
+desktop_target=$data_home/applications/xeneon-edge-agents.desktop
+if [[ -f "$desktop_target" ]]; then
+  if command -v desktop-file-validate >/dev/null 2>&1; then
+    if ! desktop-file-validate "$desktop_target"; then
+      printf 'invalid: desktop launcher does not follow the desktop-entry specification\n'
+      failures=$((failures + 1))
+    fi
+  fi
+  if ! grep -Fqx "Exec=\"$bin_home/xeneon-edge-launch\"" "$desktop_target" ||
+    ! grep -Fqx "Exec=\"$bin_home/xeneon-edge-launch\" --restart" "$desktop_target"; then
+    printf 'unsafe: desktop launcher does not use the managed helper\n'
+    failures=$((failures + 1))
+  fi
+fi
+
+for executable in xeneon-agentd xeneon-agentctl xeneon-edge-launch; do
   if [[ -x "$bin_home/$executable" ]]; then
     printf 'ok: executable: %s\n' "$bin_home/$executable"
   else

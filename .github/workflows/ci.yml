@@ -29,9 +29,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Install portable integration dependencies
-        run: sudo apt-get update && sudo apt-get install -y lua5.4 shellcheck
+        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils lua5.4 shellcheck
       - name: Run shell static checks
-        run: shellcheck scripts/*.sh scripts/preview tests/*.sh tests/run-integration-tests tests/run-qml-tests
+        run: shellcheck config/bin/* scripts/*.sh scripts/preview tests/*.sh tests/run-integration-tests tests/run-qml-tests
       - name: Validate JSON assets
         run: |
           find . -type f -name '*.json' -print0 |

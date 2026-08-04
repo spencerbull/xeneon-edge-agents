@@ -94,8 +94,11 @@ scripts/install.sh
 ```
 
 The default installer copies the named Quickshell configuration and rendered
-user units but does not enable either service, edit Hyprland, or match any
-production output. Existing user-owned or modified files are refused or
+user units, plus an XDG desktop launcher named **XENEON EDGE Command Center**.
+The launcher starts the two fixed user services without restarting an already
+running portal; its secondary desktop action performs an explicit restart.
+The default installer does not enable either service, edit Hyprland, or match
+any production output. Existing user-owned or modified files are refused or
 preserved.
 
 The daemon reads Voxtype's runtime state when Omarchy Dictation is available.

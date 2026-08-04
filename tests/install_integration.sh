@@ -145,6 +145,23 @@ test_default_idempotence_and_uninstall() {
   assert_file "$root/.config/xeneon-edge-agents/commissioning.toml"
   assert_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_file "$root/.local/bin/xeneon-edge-launch"
+  [[ -x "$root/.local/bin/xeneon-edge-launch" ]] ||
+    fail "desktop launcher helper is not executable"
+  assert_file "$root/.local/share/applications/xeneon-edge-agents.desktop"
+  assert_file "$root/.local/share/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
+  assert_contains "$root/.local/share/applications/xeneon-edge-agents.desktop" \
+    "Exec=\"$root/.local/bin/xeneon-edge-launch\""
+  assert_contains "$root/.local/share/applications/xeneon-edge-agents.desktop" \
+    'Actions=Restart;'
+  if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate \
+      "$root/.local/share/applications/xeneon-edge-agents.desktop"
+  fi
+  chmod 0644 "$root/.local/bin/xeneon-edge-launch"
+  "$install_script" --root "$root" >/dev/null
+  [[ -x "$root/.local/bin/xeneon-edge-launch" ]] ||
+    fail "reinstall did not restore the managed launcher's executable mode"
   assert_count 2 \
     'xeneon-agentd.*--config .*--cleanup-dictation' \
     "$root/.config/systemd/user/xeneon-agentd.service"
@@ -173,7 +190,113 @@ test_default_idempotence_and_uninstall() {
   "$uninstall_script" --root "$root" >/dev/null
   assert_no_file "$root/.config/xeneon-edge-agents/config.toml"
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.local/bin/xeneon-edge-launch"
+  assert_no_file "$root/.local/share/applications/xeneon-edge-agents.desktop"
+  assert_no_file "$root/.local/share/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
   assert_file "$root/.config/hypr/hyprland.lua"
+}
+
+test_desktop_launcher_actions_are_bounded() {
+  local root stub_bin systemctl_log doctor_log notification_log launcher
+  root=$(new_temp_dir)
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  doctor_log=$root/doctor.log
+  notification_log=$root/notification.log
+  mkdir -p "$stub_bin"
+
+  "$install_script" --root "$root" >/dev/null
+  launcher=$root/.local/bin/xeneon-edge-launch
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+exit 0
+EOF
+  cat >"$root/.local/bin/xeneon-agentctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DOCTOR_LOG"
+[[ "$*" == doctor ]]
+EOF
+  cat >"$stub_bin/notify-send" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$NOTIFICATION_LOG"
+EOF
+  chmod +x \
+    "$stub_bin/systemctl" "$stub_bin/notify-send" \
+    "$root/.local/bin/xeneon-agentctl"
+
+  env SYSTEMCTL_LOG="$systemctl_log" DOCTOR_LOG="$doctor_log" \
+    NOTIFICATION_LOG="$notification_log" PATH="$stub_bin:/usr/bin" \
+    "$launcher"
+  assert_contains "$systemctl_log" \
+    '--user start xeneon-agentd.service xeneon-edge-portal.service'
+  assert_contains "$doctor_log" 'doctor'
+  assert_contains "$notification_log" 'Command center is running.'
+
+  : >"$systemctl_log"
+  env SYSTEMCTL_LOG="$systemctl_log" DOCTOR_LOG="$doctor_log" \
+    NOTIFICATION_LOG="$notification_log" PATH="$stub_bin:/usr/bin" \
+    "$launcher" --restart
+  assert_contains "$systemctl_log" \
+    '--user restart xeneon-agentd.service xeneon-edge-portal.service'
+  assert_contains "$notification_log" 'Command center restarted.'
+
+  : >"$systemctl_log"
+  if env SYSTEMCTL_LOG="$systemctl_log" DOCTOR_LOG="$doctor_log" \
+    NOTIFICATION_LOG="$notification_log" PATH="$stub_bin:/usr/bin" \
+    "$launcher" --unsupported; then
+    fail "launcher accepted an unsupported action"
+  fi
+  [[ ! -s "$systemctl_log" ]] ||
+    fail "unsupported launcher action reached systemctl"
+}
+
+test_launcher_path_is_not_evaluated_as_shell_source() {
+  local root bin_home stub_bin launcher marker
+  root=$(new_temp_dir)
+  bin_home="$root/bin\`touch PWNED\`"
+  stub_bin=$root/stub-bin
+  launcher=$bin_home/xeneon-edge-launch
+  marker=$root/PWNED
+  mkdir -p "$stub_bin"
+
+  "$install_script" --root "$root" --bin-home "$bin_home" >/dev/null
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$bin_home/xeneon-agentctl" <<'EOF'
+#!/usr/bin/env bash
+[[ "$*" == doctor ]]
+EOF
+  cat >"$stub_bin/notify-send" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x \
+    "$stub_bin/systemctl" "$stub_bin/notify-send" \
+    "$bin_home/xeneon-agentctl"
+
+  (
+    cd "$root"
+    PATH="$stub_bin:/usr/bin" "$launcher"
+  )
+
+  assert_no_file "$marker"
+}
+
+test_modified_desktop_launcher_is_preserved() {
+  local root desktop
+  root=$(new_temp_dir)
+  desktop=$root/.local/share/applications/xeneon-edge-agents.desktop
+  "$install_script" --root "$root" >/dev/null
+  printf '\n# user customization\n' >>"$desktop"
+
+  "$uninstall_script" --root "$root" >/dev/null 2>&1
+
+  assert_file "$desktop"
+  assert_contains "$desktop" '# user customization'
+  assert_no_file "$root/.local/bin/xeneon-edge-launch"
 }
 
 test_user_config_preserved() {
@@ -995,6 +1118,12 @@ test_read_only_detection_reports_physical_gate() {
 printf 'TAP version 13\n'
 run_test 'default install is idempotent and uninstall is reversible' \
   test_default_idempotence_and_uninstall
+run_test 'desktop launcher actions are bounded and health checked' \
+  test_desktop_launcher_actions_are_bounded
+run_test 'launcher paths are never evaluated as shell source' \
+  test_launcher_path_is_not_evaluated_as_shell_source
+run_test 'modified desktop launcher is preserved during uninstall' \
+  test_modified_desktop_launcher_is_preserved
 run_test 'existing user config is preserved' test_user_config_preserved
 run_test 'existing user config symlink is preserved' \
   test_user_config_symlink_is_preserved
