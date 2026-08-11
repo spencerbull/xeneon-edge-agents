@@ -160,7 +160,8 @@ esac
   block_stack "resolved connector name is unsafe"
 
 if [[ -n "${XENEON_HYPR_MONITORS_JSON:-}" ]]; then
-  monitors_payload=$(<"$XENEON_HYPR_MONITORS_JSON")
+  monitors_payload=$(cat -- "$XENEON_HYPR_MONITORS_JSON") ||
+    unexpected_failure
 else
   monitors_payload=$("$hyprctl_bin" -j monitors all 2>/dev/null) ||
     block_stack "Hyprland monitor inventory is unavailable"
@@ -228,7 +229,8 @@ done < <(
 hypr_touch_matches=0
 for attempt in 0 1 2 3 4; do
   if [[ -n "${XENEON_HYPR_DEVICES_JSON:-}" ]]; then
-    devices_payload=$(<"$XENEON_HYPR_DEVICES_JSON")
+    devices_payload=$(cat -- "$XENEON_HYPR_DEVICES_JSON") ||
+      unexpected_failure
   else
     devices_payload=$("$hyprctl_bin" -j devices 2>/dev/null) ||
       block_stack "Hyprland touch inventory is unavailable"
@@ -272,7 +274,8 @@ done < <(
   block_stack "commissioned output changed during reconciliation"
 
 if [[ -n "${XENEON_HYPR_MONITORS_JSON:-}" ]]; then
-  final_monitors_payload=$(<"$XENEON_HYPR_MONITORS_JSON")
+  final_monitors_payload=$(cat -- "$XENEON_HYPR_MONITORS_JSON") ||
+    unexpected_failure
 else
   final_monitors_payload=$("$hyprctl_bin" -j monitors all 2>/dev/null) ||
     block_stack "Hyprland monitor inventory changed during reconciliation"
