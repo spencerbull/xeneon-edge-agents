@@ -5,11 +5,10 @@ the session and interaction authority while providing a dedicated 2560x720
 touch surface for agent status, safe triage, provider capacity, and connected
 tool status.
 
-The software path is implemented and simulator-tested. Physical display and
-touch commissioning is still intentionally open because the XENEON EDGE was
-not connected during development. Production output matching is fail-closed:
-the portal creates no surface unless connector, model, and serial all match
-exactly and uniquely.
+Production output matching is fail-closed: the portal creates no surface
+unless the commissioned EDID, model, serial, and touchscreen all match exactly
+and uniquely. The connector name is resolved at runtime so a normal port rename
+after reboot or replug does not weaken the hardware identity.
 
 ## Components
 
@@ -18,7 +17,8 @@ exactly and uniquely.
   reconnects, and output/focus integration.
 - `xeneon-agentctl qml-bridge`: NDJSON bridge used by Quickshell.
 - `quickshell/`: standalone touch portal plus deterministic and live previews.
-- `config/` and `scripts/`: reversible user-service and Omarchy integration.
+- `config/` and `scripts/`: reversible user-service, exact-identity hotplug,
+  and Omarchy integration.
 
 Herdr remains authoritative. The portal can never send arbitrary text, keys,
 or shell commands. Open and zoom are narrow public Herdr API calls. Interrupt
@@ -144,16 +144,22 @@ scripts/install.sh \
   --touch-phys '<EXACT-KERNEL-PHYS>'
 ```
 
-Use `--touch-uniq` instead of `--touch-phys` when the device exposes a stable
-non-empty `uniq`; providing both is allowed and requires both to match. A live
+Use `--touch-uniq` when the device exposes a stable non-empty `uniq`; `phys` is
+the fallback only when `uniq` is empty because the USB topology path can change
+across boots. Providing both records both values but runtime identity prefers
+the stable `uniq`. A live
 production install performs the full output and touchscreen check before
 changing any user file. Without `--activate`, it stages the generated module
-but deliberately leaves `hyprland.lua` and both service states untouched. Add
+but deliberately leaves `hyprland.lua` and all service states untouched. Add
 `--activate` only after that exact identity passes while the device is
 connected. Activation inserts the one user-owned require, validates and
-reloads Hyprland, and starts or restarts both services. The generated module
-uses a per-device output mapping and leaves Omarchy's `monitors.lua` ownership
-untouched.
+reloads Hyprland, and enables the lightweight hotplug reconciler. Native
+Hyprland monitor events then resolve the current connector, verify the complete
+identity, map only the commissioned touchscreen, and start or stop the daemon
+and portal together. A user-level `/dev/input` path watcher covers USB-only
+touch disconnects/reconnects; the exact touch device stays disabled during
+every transition until the full identity gate passes. The generated module
+leaves Omarchy's `monitors.lua` ownership untouched.
 
 The remaining physical checklist covers touch coordinates, focus restoration,
 hotplug, DPMS, suspend/resume, lock-screen privacy, and read-only DDC discovery.

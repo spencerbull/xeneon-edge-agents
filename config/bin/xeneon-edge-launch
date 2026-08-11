@@ -5,6 +5,7 @@ set -euo pipefail
 readonly app_name="XENEON EDGE Command Center"
 readonly daemon_unit=xeneon-agentd.service
 readonly portal_unit=xeneon-edge-portal.service
+readonly reconcile_unit=xeneon-edge-reconcile.service
 launcher_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 readonly agentctl="$launcher_dir/xeneon-agentctl"
 
@@ -19,11 +20,9 @@ notify() {
 
 case "${1:-}" in
   "")
-    verb=start
     success_message="Command center is running."
     ;;
   --restart)
-    verb=restart
     success_message="Command center restarted."
     ;;
   *)
@@ -32,9 +31,22 @@ case "${1:-}" in
     ;;
 esac
 
-if ! systemctl --user "$verb" "$daemon_unit" "$portal_unit"; then
-  notify critical "Could not $verb the user services."
+if [[ "${1:-}" == --restart ]]; then
+  if ! systemctl --user stop "$portal_unit" "$daemon_unit"; then
+    notify critical "Could not stop the user services."
+    exit 1
+  fi
+fi
+
+if ! systemctl --user restart "$reconcile_unit"; then
+  notify critical "Could not reconcile the XENEON EDGE session."
   exit 1
+fi
+
+if ! systemctl --user is-active --quiet "$daemon_unit" &&
+  ! systemctl --user is-active --quiet "$portal_unit"; then
+  notify normal "XENEON EDGE is not connected; the command center remains stopped."
+  exit 0
 fi
 
 # Type=simple units can report active just before the daemon socket is ready.
@@ -49,5 +61,5 @@ for _ in {1..20}; do
   sleep 0.25
 done
 
-notify critical "Services started but did not become healthy."
+notify critical "XENEON EDGE was detected but the services did not become healthy."
 exit 1

@@ -73,6 +73,8 @@ hyprland_target=$hypr_dir/hyprland.lua
 
 check_file "daemon service" "$systemd_dir/xeneon-agentd.service"
 check_file "portal service" "$systemd_dir/xeneon-edge-portal.service"
+check_file "hotplug reconciler service" "$systemd_dir/xeneon-edge-reconcile.service"
+check_file "input hotplug watcher" "$systemd_dir/xeneon-edge-input.path"
 check_file "desktop launcher" "$data_home/applications/xeneon-edge-agents.desktop"
 check_file "desktop icon" "$data_home/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
 check_file "named Quickshell config" "$config_home/quickshell/xeneon-edge-agents/shell.qml"
@@ -94,7 +96,8 @@ if [[ -f "$desktop_target" ]]; then
   fi
 fi
 
-for executable in xeneon-agentd xeneon-agentctl xeneon-edge-launch; do
+for executable in \
+  xeneon-agentd xeneon-agentctl xeneon-edge-launch xeneon-edge-reconcile; do
   if [[ -x "$bin_home/$executable" ]]; then
     printf 'ok: executable: %s\n' "$bin_home/$executable"
   else
@@ -132,6 +135,7 @@ if [[ -f "$commissioning_target" ]]; then
       failures=$((failures + 1))
     else
       match_count=0
+      runtime_connector=
       while IFS= read -r -d '' edid_path; do
         candidate_connector=$(drm_connector_name "$edid_path")
         candidate_sha=$(sha256_file "$edid_path")
@@ -141,9 +145,9 @@ if [[ -f "$commissioning_target" ]]; then
           candidate_status=$(<"$candidate_status_path")
         fi
         if [[ "$candidate_status" == connected &&
-          "$candidate_connector" == "$connector" &&
           "${candidate_sha,,}" == "${edid_sha,,}" ]]; then
           match_count=$((match_count + 1))
+          runtime_connector=$candidate_connector
         fi
       done < <(
         find -L "$sys_root/class/drm" \
@@ -151,7 +155,13 @@ if [[ -f "$commissioning_target" ]]; then
       )
 
       case "$match_count" in
-        1) printf 'ok: exact production output identity: %s\n' "$connector" ;;
+        1)
+          printf 'ok: exact production output identity: %s' "$runtime_connector"
+          if [[ "$runtime_connector" != "$connector" ]]; then
+            printf ' (commissioned on %s)' "$connector"
+          fi
+          printf '\n'
+          ;;
         0)
           printf 'blocked: configured XENEON output is absent; physical gate remains closed\n'
           failures=$((failures + 1))
@@ -202,7 +212,7 @@ print(sum(
     and monitor.get("serial") == serial
     and monitor.get("model") == model
 ))
-' "$connector" "$output_serial" "$output_model" <<<"$monitors_payload"
+' "$runtime_connector" "$output_serial" "$output_model" <<<"$monitors_payload"
         )
         case "$monitor_match_count" in
           1) printf 'ok: exact Hyprland screen serial and model\n' ;;
@@ -326,8 +336,11 @@ print(sum(1 for device in touch if device.get("name") == wanted))
           "${kernel_vendor,,}" == "${touch_vendor,,}" &&
           "${kernel_product,,}" == "${touch_product,,}" ]] ||
           continue
-        [[ -z "$touch_uniq" || "$kernel_uniq" == "$touch_uniq" ]] || continue
-        [[ -z "$touch_phys" || "$kernel_phys" == "$touch_phys" ]] || continue
+        if [[ -n "$touch_uniq" ]]; then
+          [[ "$kernel_uniq" == "$touch_uniq" ]] || continue
+        else
+          [[ -n "$touch_phys" && "$kernel_phys" == "$touch_phys" ]] || continue
+        fi
         matched_kernel_base=$normalized_kernel_name
         kernel_touch_match_count=$((kernel_touch_match_count + 1))
       done < <(
@@ -396,7 +409,7 @@ print(sum(
     portal_unit=$systemd_dir/xeneon-edge-portal.service
     if [[ -f "$portal_unit" ]]; then
       for expected_environment in \
-        "Environment=\"XENEON_EDGE_OUTPUT=$connector\"" \
+        'EnvironmentFile=%t/xeneon-edge-agents/screen.env' \
         "Environment=\"XENEON_EDGE_SERIAL=$output_serial\"" \
         "Environment=\"XENEON_EDGE_MODEL=$output_model\""; do
         if ! grep -Fqx "$expected_environment" "$portal_unit"; then
@@ -410,8 +423,10 @@ print(sum(
     check_file "Hyprland module" "$module_target"
     check_file "Hyprland entrypoint" "$hyprland_target"
     if [[ -f "$module_target" ]]; then
-      if ! grep -Fqx "  name = \"$touch_device\"," "$module_target" ||
-        ! grep -Fqx "  output = \"$connector\"," "$module_target"; then
+      if ! grep -Fqx "local touchDevice = \"$touch_device\"" "$module_target" ||
+        ! grep -Fq 'enabled = false' "$module_target" ||
+        ! grep -Fq 'hl.on("monitor.added", restartReconcile)' "$module_target" ||
+        ! grep -Fq 'hl.on("monitor.removed", restartReconcile)' "$module_target"; then
         printf 'unsafe: Hyprland module does not match commissioning identity\n'
         failures=$((failures + 1))
       fi

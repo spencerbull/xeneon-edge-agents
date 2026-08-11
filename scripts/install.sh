@@ -117,9 +117,34 @@ activation_manifest_existed=0
 activation_artifact_targets=()
 activation_artifact_backups=()
 activation_artifact_existed=()
-service_units=(xeneon-agentd.service xeneon-edge-portal.service)
+service_units=(
+  xeneon-agentd.service
+  xeneon-edge-portal.service
+  xeneon-edge-reconcile.service
+  xeneon-edge-input.path
+)
 service_previous_active=()
 service_previous_enabled=()
+activation_gate=
+activation_gate_active=0
+
+remove_activation_gate() {
+  if ((activation_gate_active)); then
+    if rmdir -- "$activation_gate"; then
+      activation_gate_active=0
+    else
+      warn "could not remove lifecycle transaction gate: $activation_gate"
+    fi
+  fi
+}
+
+release_activation_gate() {
+  if ((activation_gate_active)); then
+    rmdir -- "$activation_gate" ||
+      die "could not release lifecycle transaction gate: $activation_gate"
+    activation_gate_active=0
+  fi
+}
 
 cleanup() {
   local status=$?
@@ -199,6 +224,12 @@ cleanup() {
       esac
     done
   fi
+  remove_activation_gate
+  if ((status != 0 && activate && apply_production && !isolated_root)) &&
+    command -v systemctl >/dev/null 2>&1; then
+    systemctl --user start xeneon-edge-reconcile.service >/dev/null 2>&1 ||
+      warn "could not reconcile the restored XENEON integration after rollback"
+  fi
   rm -rf "$temp_dir"
   exit "$status"
 }
@@ -221,7 +252,10 @@ snapshot_activation_artifact() {
 
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
+reconcile_unit=$temp_dir/xeneon-edge-reconcile.service
+input_path_unit=$temp_dir/xeneon-edge-input.path
 launcher_helper=$temp_dir/xeneon-edge-launch
+reconcile_helper=$temp_dir/xeneon-edge-reconcile
 desktop_entry=$temp_dir/xeneon-edge-agents.desktop
 render_template \
   "$repo_root/config/systemd/user/xeneon-agentd.service.in" "$daemon_unit" \
@@ -229,15 +263,23 @@ render_template \
 render_template \
   "$repo_root/config/systemd/user/xeneon-edge-portal.service.in" "$portal_unit" \
   CONFIG_HOME "$config_home" STATE_HOME "$state_home" BIN_HOME "$bin_home" \
-  OUTPUT_CONNECTOR "$connector" OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+  OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
+render_template \
+  "$repo_root/config/systemd/user/xeneon-edge-reconcile.service.in" "$reconcile_unit" \
+  CONFIG_HOME "$config_home" BIN_HOME "$bin_home"
+cp "$repo_root/config/systemd/user/xeneon-edge-input.path.in" "$input_path_unit"
 cp "$repo_root/config/bin/xeneon-edge-launch" "$launcher_helper"
+cp "$repo_root/config/bin/xeneon-edge-reconcile" "$reconcile_helper"
 render_template \
   "$repo_root/config/applications/xeneon-edge-agents.desktop.in" "$desktop_entry" \
   BIN_HOME "$bin_home"
 
 daemon_target=$systemd_dir/xeneon-agentd.service
 portal_target=$systemd_dir/xeneon-edge-portal.service
+reconcile_target=$systemd_dir/xeneon-edge-reconcile.service
+input_path_target=$systemd_dir/xeneon-edge-input.path
 launcher_target=$bin_home/xeneon-edge-launch
+reconcile_helper_target=$bin_home/xeneon-edge-reconcile
 desktop_target=$data_home/applications/xeneon-edge-agents.desktop
 icon_target=$data_home/icons/hicolor/scalable/apps/xeneon-edge-agents.svg
 config_target=$config_dir/config.toml
@@ -256,7 +298,10 @@ fi
 # therefore leaves no partial installation to roll back.
 preflight_managed_target "$daemon_unit" "$daemon_target"
 preflight_managed_target "$portal_unit" "$portal_target"
+preflight_managed_target "$reconcile_unit" "$reconcile_target"
+preflight_managed_target "$input_path_unit" "$input_path_target"
 preflight_managed_target "$launcher_helper" "$launcher_target"
+preflight_managed_target "$reconcile_helper" "$reconcile_helper_target"
 preflight_managed_target "$desktop_entry" "$desktop_target"
 preflight_managed_target \
   "$repo_root/config/icons/xeneon-edge-agents.svg" "$icon_target"
@@ -306,7 +351,8 @@ if ((apply_production)); then
     "$repo_root/config/xeneon-edge-agents/commissioning.toml.example" >"$production_commissioning"
   render_template \
     "$repo_root/config/hypr/xeneon_edge_agents.lua.in" "$temp_dir/xeneon_edge_agents.lua" \
-    TOUCH_DEVICE "$touch_device" OUTPUT_CONNECTOR "$connector"
+    TOUCH_DEVICE "$touch_device" OUTPUT_SERIAL "$output_serial" \
+    OUTPUT_MODEL "$output_model"
   production_module=$temp_dir/xeneon_edge_agents.lua
 
   if [[ -e "$config_target" || -L "$config_target" ]]; then
@@ -397,9 +443,52 @@ if ((apply_production && !isolated_root)); then
 fi
 
 if ((activate)); then
+  runtime_dir=${XDG_RUNTIME_DIR:?production activation requires XDG_RUNTIME_DIR}
+  validate_path_argument "runtime directory" "$runtime_dir"
+  runtime_dir=$(canonical_dir "$runtime_dir")
+  validate_path_argument "canonical runtime directory" "$runtime_dir"
+  activation_gate=$runtime_dir/xeneon-edge-agents-uninstalling
+  mkdir -m 0700 -- "$activation_gate" ||
+    die "refusing to replace an existing lifecycle transaction gate: $activation_gate"
+  activation_gate_active=1
+
+  # Writing the live Lua module can cause Hyprland to reload it immediately.
+  # Hold the unit condition closed and let any already-running oneshot finish
+  # before snapshotting service state or replacing managed artifacts.
+  reconcile_state=
+  for _ in {1..100}; do
+    reconcile_state=$(systemctl --user is-active xeneon-edge-reconcile.service 2>/dev/null || true)
+    case "$reconcile_state" in
+      inactive|failed) break ;;
+      active|activating|deactivating) sleep 0.1 ;;
+      *) die "could not determine stable active state for xeneon-edge-reconcile.service" ;;
+    esac
+  done
+  [[ "$reconcile_state" == inactive || "$reconcile_state" == failed ]] ||
+    die "timed out waiting for the XENEON reconciler transaction gate"
+
+  for unit in "${service_units[@]}"; do
+    active_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
+    case "$active_state" in
+      active|inactive|failed) ;;
+      *) die "could not determine stable active state for $unit" ;;
+    esac
+    service_previous_active+=("$active_state")
+
+    enabled_state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
+    case "$enabled_state" in
+      enabled|enabled-runtime|linked|linked-runtime|alias|disabled|static|indirect|not-found) ;;
+      *) die "could not determine stable enabled state for $unit" ;;
+    esac
+    service_previous_enabled+=("$enabled_state")
+  done
+
   snapshot_activation_artifact "$daemon_target"
   snapshot_activation_artifact "$portal_target"
+  snapshot_activation_artifact "$reconcile_target"
+  snapshot_activation_artifact "$input_path_target"
   snapshot_activation_artifact "$launcher_target"
+  snapshot_activation_artifact "$reconcile_helper_target"
   snapshot_activation_artifact "$desktop_target"
   snapshot_activation_artifact "$icon_target"
   for target in "${quickshell_targets[@]}"; do
@@ -424,7 +513,10 @@ fi
 
 install_managed_file "$daemon_unit" "$daemon_target"
 install_managed_file "$portal_unit" "$portal_target"
+install_managed_file "$reconcile_unit" "$reconcile_target"
+install_managed_file "$input_path_unit" "$input_path_target"
 install_managed_file "$launcher_helper" "$launcher_target" 0755
+install_managed_file "$reconcile_helper" "$reconcile_helper_target" 0755
 install_managed_file "$desktop_entry" "$desktop_target"
 install_managed_file \
   "$repo_root/config/icons/xeneon-edge-agents.svg" "$icon_target"
@@ -489,6 +581,11 @@ if ((activate)); then
   "$script_dir/check.sh" \
     --config-home "$config_home" --data-home "$data_home" \
     --state-home "$state_home" --bin-home "$bin_home"
+  rollback_services=1
+  rollback_daemon_reload=1
+  systemctl --user daemon-reload
+  # Capture the original service state before reloading Hyprland: the generated
+  # Lua module immediately requests a reconciliation during that reload.
   if ((apply_production)); then
     command -v hyprctl >/dev/null 2>&1 ||
       die "production activation requires a running Hyprland session"
@@ -497,33 +594,12 @@ if ((activate)); then
     [[ -z "$config_errors" ]] ||
       die "Hyprland reported config errors: $config_errors"
   fi
-  rollback_daemon_reload=1
-  systemctl --user daemon-reload
-  for unit in "${service_units[@]}"; do
-    active_state=$(systemctl --user is-active "$unit" 2>/dev/null || true)
-    case "$active_state" in
-      active|inactive|failed) ;;
-      *) die "could not determine stable active state for $unit" ;;
-    esac
-    service_previous_active+=("$active_state")
-
-    enabled_state=$(systemctl --user is-enabled "$unit" 2>/dev/null || true)
-    case "$enabled_state" in
-      enabled|enabled-runtime|linked|linked-runtime|alias|disabled) ;;
-      *) die "could not determine stable enabled state for $unit" ;;
-    esac
-    service_previous_enabled+=("$enabled_state")
-  done
-  rollback_services=1
-  systemctl --user enable "${service_units[@]}"
-  for index in "${!service_units[@]}"; do
-    unit=${service_units[$index]}
-    if [[ "${service_previous_active[$index]}" == active ]]; then
-      systemctl --user restart "$unit"
-    else
-      systemctl --user start "$unit"
-    fi
-  done
+  systemctl --user disable xeneon-agentd.service xeneon-edge-portal.service
+  systemctl --user enable xeneon-edge-reconcile.service xeneon-edge-input.path
+  systemctl --user start xeneon-edge-input.path
+  systemctl --user stop xeneon-edge-portal.service xeneon-agentd.service
+  release_activation_gate
+  systemctl --user restart xeneon-edge-reconcile.service
   rollback_services=0
   rollback_daemon_reload=0
   rollback_hypr=0

@@ -1,0 +1,27 @@
+[Unit]
+Description=Reconcile XENEON EDGE hotplug lifecycle
+Documentation=https://github.com/spencerbull/xeneon-edge-agents
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+ConditionPathExists=!%t/xeneon-edge-agents-uninstalling
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
+Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
+ExecStartPre=/usr/bin/sleep 0.5
+ExecStart="@BIN_HOME@/xeneon-edge-reconcile"
+RuntimeDirectory=xeneon-edge-agents
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=graphical-session.target

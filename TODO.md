@@ -34,6 +34,11 @@ Fable 5 over a persistent ACP session. Any verified findings are fixed only on
 `claude-fable-review`, revalidated through the required software gates, and
 returned to the same reviewer until no substantive findings remained.
 
+The active hotplug checkpoint replaces connector-pinned autostart with an
+event-driven lifecycle. The commissioned EDID, serial/model, and USB touch
+identity remain authoritative while the current connector becomes runtime
+state; the daemon and portal run only while that exact hardware is present.
+
 ## Done criteria
 
 - [x] Rust daemon and QML bridge expose versioned normalized snapshots.
@@ -83,6 +88,8 @@ returned to the same reviewer until no substantive findings remained.
       independent review pass complete for the home-command checkpoint.
 - [ ] Physical EDGE display/touch/focus/privacy/power checks pass (display,
       exact touch mapping, Ambient wake, and card focus are now confirmed).
+- [x] Exact XENEON hotplug starts and maps the stack on its current connector;
+      unplug stops both application services without touching other displays.
 
 ## Streams
 
@@ -98,6 +105,7 @@ returned to the same reviewer until no substantive findings remained.
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
 | Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
 | Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
+| Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -118,6 +126,14 @@ returned to the same reviewer until no substantive findings remained.
 - Claiming physical success without the connected device.
 
 ## Gates and evidence
+
+- [x] Hotplug lifecycle software gate: Rust config tests, shell/static checks,
+      31 isolated installer/reconciler scenarios, generated Lua syntax, and
+      independent review with no remaining substantive findings.
+- [ ] Hotplug lifecycle physical gate: reviewed live install, actual
+      `/dev/input` path activation, display/USB unplug-replug ordering, and real
+      touch disable/re-enable mapping pass. DPMS, suspend/resume, focus/privacy,
+      and coordinate validation on the XENEON remain open.
 
 - [x] Foundation focused tests: 24 core plus 1 CLI test and strict clippy.
 - [x] Herdr gates: 2,825 unit, 213 integration, 86 maintenance, 17
@@ -197,7 +213,8 @@ returned to the same reviewer until no substantive findings remained.
       reachability, reduced-motion coverage, Qt Settings persistence, and the
       narrowly writable systemd StateDirectory with no P0/P1/P2 findings.
 - [x] Physical runtime fixes were independently reviewed before reactivation:
-      the daemon now uses `RuntimeDirectory=`, Quickshell receives narrowly
+      the reconciler exclusively owns and preserves the systemd runtime
+      directory needed for connector handoff, Quickshell receives narrowly
       writable shared runtime paths, Qt's unavailable Wayland EDID serial is
       tolerated only after the installer verifies the configured serial
       through Hyprland, and the unique connector/model match remains

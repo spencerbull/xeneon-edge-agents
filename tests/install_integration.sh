@@ -145,7 +145,10 @@ test_default_idempotence_and_uninstall() {
   assert_file "$root/.config/xeneon-edge-agents/commissioning.toml"
   assert_file "$root/.config/systemd/user/xeneon-agentd.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-input.path"
   assert_file "$root/.local/bin/xeneon-edge-launch"
+  assert_file "$root/.local/bin/xeneon-edge-reconcile"
   [[ -x "$root/.local/bin/xeneon-edge-launch" ]] ||
     fail "desktop launcher helper is not executable"
   assert_file "$root/.local/share/applications/xeneon-edge-agents.desktop"
@@ -166,10 +169,30 @@ test_default_idempotence_and_uninstall() {
     'xeneon-agentd.*--config .*--cleanup-dictation' \
     "$root/.config/systemd/user/xeneon-agentd.service"
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" 'UMask=0077'
-  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
     'RuntimeDirectory=xeneon-edge-agents'
-  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
     'RuntimeDirectoryMode=0700'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
+    'RuntimeDirectoryPreserve=yes'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
+    'StartLimitIntervalSec=0'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
+    'ExecStartPre=/usr/bin/sleep 0.5'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
+    'ConditionPathExists=!%t/xeneon-edge-agents-uninstalling'
+  if grep -Fq 'RuntimeDirectory=' \
+    "$root/.config/systemd/user/xeneon-agentd.service"; then
+    fail 'agentd must not share ownership of the reconciler runtime directory'
+  fi
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+    "ReadWritePaths=\"$root/.local/state/xeneon-edge-agents\" %t/xeneon-edge-agents"
+  assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
+    'EnvironmentFile=%t/xeneon-edge-agents/screen.env'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
+    'EnvironmentFile=%t/xeneon-edge-agents/screen.env'
+  assert_contains "$root/.config/systemd/user/xeneon-edge-input.path" \
+    'PathChanged=/dev/input'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
     'ReadWritePaths=%t/quickshell %t/dconf'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
@@ -190,7 +213,10 @@ test_default_idempotence_and_uninstall() {
   "$uninstall_script" --root "$root" >/dev/null
   assert_no_file "$root/.config/xeneon-edge-agents/config.toml"
   assert_no_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_no_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
+  assert_no_file "$root/.config/systemd/user/xeneon-edge-input.path"
   assert_no_file "$root/.local/bin/xeneon-edge-launch"
+  assert_no_file "$root/.local/bin/xeneon-edge-reconcile"
   assert_no_file "$root/.local/share/applications/xeneon-edge-agents.desktop"
   assert_no_file "$root/.local/share/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
   assert_file "$root/.config/hypr/hyprland.lua"
@@ -229,7 +255,7 @@ EOF
     NOTIFICATION_LOG="$notification_log" PATH="$stub_bin:/usr/bin" \
     "$launcher"
   assert_contains "$systemctl_log" \
-    '--user start xeneon-agentd.service xeneon-edge-portal.service'
+    '--user restart xeneon-edge-reconcile.service'
   assert_contains "$doctor_log" 'doctor'
   assert_contains "$notification_log" 'Command center is running.'
 
@@ -238,7 +264,9 @@ EOF
     NOTIFICATION_LOG="$notification_log" PATH="$stub_bin:/usr/bin" \
     "$launcher" --restart
   assert_contains "$systemctl_log" \
-    '--user restart xeneon-agentd.service xeneon-edge-portal.service'
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+  assert_contains "$systemctl_log" \
+    '--user restart xeneon-edge-reconcile.service'
   assert_contains "$notification_log" 'Command center restarted.'
 
   : >"$systemctl_log"
@@ -417,7 +445,10 @@ test_production_commissioning_and_exact_check() {
   write_hyprland "$root"
   make_runtime_stubs "$root" "$quickshell_source"
   make_sysfs_match "$sys_root" card0 DP-1 "$fixture"
-  make_touchscreen_match "$sys_root"
+  # USB topology changed from the commissioned 2.4 path to 1.4 after reboot;
+  # the device-provided uniq remains the stable touch authority.
+  make_touchscreen_match \
+    "$sys_root" event90 9LQ0172005164 usb-0000:00:14.0-1.4/input0
   write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   write_hypr_monitors "$hypr_monitors"
 
@@ -440,11 +471,17 @@ test_production_commissioning_and_exact_check() {
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
     "Environment=\"PATH=$root/.local/bin:/usr/local/bin:/usr/bin\""
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
-  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'name = "wch.cn-touchscreen-1"'
-  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" 'output = "DP-1"'
+  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
+    'local touchDevice = "wch.cn-touchscreen-1"'
+  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
+    'enabled = false'
+  assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
+    'hl.on("monitor.added", restartReconcile)'
   assert_count 0 'require\("hypr\.xeneon_edge_agents"\)' "$root/.config/hypr/hyprland.lua"
   assert_no_file "$root/.config/hypr/monitors.lua"
   luac -p "$root/.config/hypr/xeneon_edge_agents.lua"
+  lua "$repo_root/tests/hypr_lifecycle_test.lua" \
+    "$root/.config/hypr/xeneon_edge_agents.lua"
   if ! "$check_script" --root "$root" --sys-root "$sys_root" \
     --hypr-devices-json "$hypr_devices" \
     --hypr-monitors-json "$hypr_monitors" >"$root/check.log" 2>&1; then
@@ -457,7 +494,9 @@ test_production_commissioning_and_exact_check() {
   if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify \
       "$root/.config/systemd/user/xeneon-agentd.service" \
-      "$root/.config/systemd/user/xeneon-edge-portal.service"
+      "$root/.config/systemd/user/xeneon-edge-portal.service" \
+      "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
+      "$root/.config/systemd/user/xeneon-edge-input.path"
   fi
 
   if [[ -n "${XENEON_AGENTD_BIN:-}" ]]; then
@@ -711,10 +750,22 @@ EOF
   assert_contains "$log" 'hyprctl touch-device query failed'
 }
 
-test_preexisting_hypr_require_is_preserved() {
-  local root fixture sha module
+assert_lifecycle_dependency_closure() {
+  local root=$1
+  assert_file "$root/.config/hypr/xeneon_edge_agents.lua"
+  assert_file "$root/.config/systemd/user/xeneon-agentd.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
+  assert_file "$root/.config/systemd/user/xeneon-edge-input.path"
+  assert_file "$root/.local/bin/xeneon-edge-reconcile"
+  assert_file "$root/.config/xeneon-edge-agents/commissioning.toml"
+}
+
+test_preexisting_hypr_require_aborts_uninstall() {
+  local root fixture sha log
   root=$(new_temp_dir)
   fixture=$root/edid.bin
+  log=$root/uninstall.log
   printf 'CORSAIR XENEON EDGE\n' >"$fixture"
   sha=$(sha256sum "$fixture" | awk '{print $1}')
   write_hyprland "$root"
@@ -723,12 +774,15 @@ test_preexisting_hypr_require_is_preserved() {
     --connector DP-1 --edid-sha256 "$sha" \
     --screen-serial CX123456 --screen-model "XENEON EDGE" \
     "${production_touch_args[@]}" >/dev/null
-  module=$root/.config/hypr/xeneon_edge_agents.lua
   sed -i '/require("hypr.input")/a require("hypr.xeneon_edge_agents")' \
     "$root/.config/hypr/hyprland.lua"
-  "$uninstall_script" --root "$root" >/dev/null
+  if "$uninstall_script" --root "$root" >"$log" 2>&1; then
+    fail "uninstall with a user-owned active Hyprland require unexpectedly passed"
+  fi
+  assert_contains "$log" \
+    'refusing to uninstall while a user-owned or changed Hyprland require retains the XENEON module'
   assert_count 1 'require\("hypr\.xeneon_edge_agents"\)' "$root/.config/hypr/hyprland.lua"
-  assert_file "$module"
+  assert_lifecycle_dependency_closure "$root"
 }
 
 test_symlinked_hypr_entrypoint_is_refused() {
@@ -755,11 +809,11 @@ test_symlinked_hypr_entrypoint_is_refused() {
   assert_contains "$target" 'require("hypr.input")'
 }
 
-test_changed_injected_require_preserves_module() {
-  local root fixture sha module
+test_changed_injected_require_aborts_uninstall() {
+  local root fixture sha log
   root=$(new_temp_dir)
   fixture=$root/edid.bin
-  module=$root/.config/hypr/xeneon_edge_agents.lua
+  log=$root/uninstall.log
   printf 'CORSAIR XENEON EDGE\n' >"$fixture"
   sha=$(sha256sum "$fixture" | awk '{print $1}')
   write_hyprland "$root"
@@ -776,8 +830,12 @@ test_changed_injected_require_preserves_module() {
   printf 'require("hypr.xeneon_edge_agents")\n' \
     >>"$root/.config/hypr/hyprland.lua"
 
-  "$uninstall_script" --root "$root" >/dev/null 2>&1
-  assert_file "$module"
+  if "$uninstall_script" --root "$root" >"$log" 2>&1; then
+    fail "uninstall with a changed active Hyprland require unexpectedly passed"
+  fi
+  assert_contains "$log" \
+    'refusing to uninstall while a user-owned or changed Hyprland require retains the XENEON module'
+  assert_lifecycle_dependency_closure "$root"
   assert_count 1 'require\("hypr\.xeneon_edge_agents"\)' \
     "$root/.config/hypr/hyprland.lua"
 }
@@ -885,12 +943,13 @@ test_modified_managed_unit_aborts_uninstall() {
 }
 
 test_activation_restarts_active_services() {
-  local root stub_bin systemctl_log
+  local root stub_bin systemctl_log daemon_reloaded
   root=$(new_temp_dir)
   stub_bin=$root/stub-bin
   systemctl_log=$root/systemctl.log
+  daemon_reloaded=$root/daemon-reloaded
   mkdir -p \
-    "$root/config" "$root/data" "$root/state" "$root/bin" "$stub_bin"
+    "$root/config" "$root/data" "$root/state" "$root/run" "$root/bin" "$stub_bin"
   : >"$root/bin/xeneon-agentd"
   : >"$root/bin/xeneon-agentctl"
   chmod +x "$root/bin/xeneon-agentd" "$root/bin/xeneon-agentctl"
@@ -898,8 +957,17 @@ test_activation_restarts_active_services() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 case "$*" in
-  *" is-active "*) printf 'active\n' ;;
+  *" is-active xeneon-edge-reconcile.service")
+    [[ -d "$LIFECYCLE_GATE" ]] || exit 7
+    printf 'inactive\n'
+    ;;
+  *" is-active "*)
+    [[ -d "$LIFECYCLE_GATE" ]] || exit 7
+    [[ ! -f "$DAEMON_RELOADED" ]] || exit 1
+    printf 'active\n'
+    ;;
   *" is-enabled "*) printf 'enabled\n' ;;
+  *" daemon-reload") : >"$DAEMON_RELOADED" ;;
 esac
 exit 0
 EOF
@@ -909,25 +977,109 @@ EOF
     XDG_CONFIG_HOME="$root/config" \
     XDG_DATA_HOME="$root/data" \
     XDG_STATE_HOME="$root/state" \
+    XDG_RUNTIME_DIR="$root/run" \
+    XDG_BIN_HOME="$root/bin" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    DAEMON_RELOADED="$daemon_reloaded" \
+    LIFECYCLE_GATE="$root/run/xeneon-edge-agents-uninstalling" \
+    PATH="$stub_bin:/usr/bin" \
+    "$install_script" --activate >/dev/null
+  assert_no_file "$root/run/xeneon-edge-agents-uninstalling"
+
+  grep -Fxq -- \
+    '--user disable xeneon-agentd.service xeneon-edge-portal.service' \
+    "$systemctl_log" || fail "activation did not disable direct autostart"
+  grep -Fxq -- \
+    '--user enable xeneon-edge-reconcile.service xeneon-edge-input.path' \
+    "$systemctl_log" ||
+    fail "activation did not enable the hotplug reconciler"
+  grep -Fxq -- '--user start xeneon-edge-input.path' "$systemctl_log" ||
+    fail "activation did not start the input-device watcher"
+  grep -Fxq -- \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service' \
+    "$systemctl_log" || fail "activation did not retire directly started services"
+  grep -Fxq -- '--user restart xeneon-edge-reconcile.service' \
+    "$systemctl_log" || fail "activation did not perform initial reconciliation"
+}
+
+test_clean_first_activation_accepts_missing_units() {
+  local root stub_bin systemctl_log
+  root=$(new_temp_dir)
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  mkdir -p \
+    "$root/config" "$root/data" "$root/state" "$root/run" "$root/bin" "$stub_bin"
+  : >"$root/bin/xeneon-agentd"
+  : >"$root/bin/xeneon-agentctl"
+  chmod +x "$root/bin/xeneon-agentd" "$root/bin/xeneon-agentctl"
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+case "$*" in
+  *" is-active "*) printf 'inactive\n' ;;
+  *" is-enabled "*) printf 'not-found\n'; exit 4 ;;
+esac
+exit 0
+EOF
+  chmod +x "$stub_bin/systemctl"
+
+  env \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_RUNTIME_DIR="$root/run" \
     XDG_BIN_HOME="$root/bin" \
     SYSTEMCTL_LOG="$systemctl_log" \
     PATH="$stub_bin:/usr/bin" \
     "$install_script" --activate >/dev/null
 
-  grep -Fxq -- '--user restart xeneon-agentd.service' "$systemctl_log" ||
-    fail "activation did not restart the active daemon"
-  grep -Fxq -- '--user restart xeneon-edge-portal.service' "$systemctl_log" ||
-    fail "activation did not restart the active portal"
-  grep -Fxq -- \
-    '--user enable xeneon-agentd.service xeneon-edge-portal.service' \
-    "$systemctl_log" ||
-    fail "activation did not enable both services"
+  assert_file "$root/config/systemd/user/xeneon-edge-reconcile.service"
+  assert_no_file "$root/run/xeneon-edge-agents-uninstalling"
+  grep -Fxq -- '--user restart xeneon-edge-reconcile.service' \
+    "$systemctl_log" || fail "clean first activation did not reconcile"
+}
+
+test_activation_fails_if_gate_cannot_be_released() {
+  local root stub_bin log
+  root=$(new_temp_dir)
+  stub_bin=$root/stub-bin
+  log=$root/activate.log
+  mkdir -p \
+    "$root/config" "$root/data" "$root/state" "$root/run" "$root/bin" "$stub_bin"
+  : >"$root/bin/xeneon-agentd"
+  : >"$root/bin/xeneon-agentctl"
+  chmod +x "$root/bin/xeneon-agentd" "$root/bin/xeneon-agentctl"
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *" is-active "*) printf 'inactive\n' ;;
+  *" is-enabled "*) printf 'not-found\n'; exit 4 ;;
+  *" start xeneon-edge-input.path") : >"$LIFECYCLE_GATE/held" ;;
+esac
+exit 0
+EOF
+  chmod +x "$stub_bin/systemctl"
+
+  if env \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_RUNTIME_DIR="$root/run" \
+    XDG_BIN_HOME="$root/bin" \
+    LIFECYCLE_GATE="$root/run/xeneon-edge-agents-uninstalling" \
+    PATH="$stub_bin:/usr/bin" \
+    "$install_script" --activate >"$log" 2>&1; then
+    fail "activation succeeded while its lifecycle gate remained held"
+  fi
+  assert_contains "$log" 'could not release lifecycle transaction gate'
+  assert_no_file "$root/config/systemd/user/xeneon-edge-reconcile.service"
 }
 
 test_failed_activation_restores_prior_artifacts() {
   local root source stub_bin systemctl_log failure_marker restore_marker
   local target manifest
   local target_before manifest_before log daemon_restarts portal_restarts
+  local reconcile_restarts
   root=$(new_temp_dir)
   source=$root/quickshell-source
   stub_bin=$root/stub-bin
@@ -938,7 +1090,7 @@ test_failed_activation_restores_prior_artifacts() {
   manifest=$root/state/xeneon-edge-agents/install/managed.tsv
   log=$root/activate.log
   mkdir -p \
-    "$root/config" "$root/data" "$root/state" "$root/bin" \
+    "$root/config" "$root/data" "$root/state" "$root/run" "$root/bin" \
     "$source" "$stub_bin"
   : >"$root/bin/xeneon-agentd"
   : >"$root/bin/xeneon-agentctl"
@@ -949,13 +1101,22 @@ test_failed_activation_restores_prior_artifacts() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 case "$*" in
-  *" is-active "*) printf 'active\n' ;;
+  *" is-active xeneon-edge-reconcile.service")
+    [[ -d "$LIFECYCLE_GATE" ]] || exit 7
+    printf 'inactive\n'
+    ;;
+  *" is-active "*)
+    [[ -d "$LIFECYCLE_GATE" ]] || exit 7
+    printf 'active\n'
+    ;;
   *" is-enabled "*) printf 'enabled\n' ;;
-  *" restart xeneon-edge-portal.service")
+  *" restart xeneon-edge-reconcile.service")
     if [[ ! -f "$FAILURE_MARKER" ]]; then
       : >"$FAILURE_MARKER"
       exit 1
     fi
+    ;;
+  *" restart xeneon-agentd.service")
     if grep -Fq 'version: "v1"' "$TARGET_PATH"; then
       : >"$RESTORE_MARKER"
     else
@@ -971,6 +1132,7 @@ EOF
     XDG_CONFIG_HOME="$root/config" \
     XDG_DATA_HOME="$root/data" \
     XDG_STATE_HOME="$root/state" \
+    XDG_RUNTIME_DIR="$root/run" \
     XDG_BIN_HOME="$root/bin" \
     PATH="$stub_bin:/usr/bin" \
     "$install_script" --quickshell-source "$source" >/dev/null
@@ -983,11 +1145,13 @@ EOF
     XDG_CONFIG_HOME="$root/config" \
     XDG_DATA_HOME="$root/data" \
     XDG_STATE_HOME="$root/state" \
+    XDG_RUNTIME_DIR="$root/run" \
     XDG_BIN_HOME="$root/bin" \
     SYSTEMCTL_LOG="$systemctl_log" \
     FAILURE_MARKER="$failure_marker" \
     RESTORE_MARKER="$restore_marker" \
     TARGET_PATH="$target" \
+    LIFECYCLE_GATE="$root/run/xeneon-edge-agents-uninstalling" \
     PATH="$stub_bin:/usr/bin" \
     "$install_script" --quickshell-source "$source" --activate \
       >"$log" 2>&1; then
@@ -999,6 +1163,7 @@ EOF
   [[ "$manifest_before" == "$(sha256sum "$manifest")" ]] ||
     fail "failed activation did not restore the prior manifest"
   assert_contains "$target" 'version: "v1"'
+  assert_no_file "$root/run/xeneon-edge-agents-uninstalling"
   assert_file "$restore_marker"
   assert_contains "$log" 'restoring prior managed files'
   daemon_restarts=$(
@@ -1007,18 +1172,27 @@ EOF
   portal_restarts=$(
     grep -Fxc -- '--user restart xeneon-edge-portal.service' "$systemctl_log"
   )
-  [[ "$daemon_restarts" == 2 && "$portal_restarts" == 2 ]] ||
-    fail "failed activation did not restart both prior active services"
+  reconcile_restarts=$(
+    grep -Fxc -- '--user restart xeneon-edge-reconcile.service' "$systemctl_log"
+  )
+  [[ "$daemon_restarts" == 1 && "$portal_restarts" == 1 &&
+    "$reconcile_restarts" == 1 ]] ||
+    fail "failed activation did not restore all prior active services"
 }
 
 test_live_uninstall_reloads_hyprland() {
   local root fixture sha marker stub_bin systemctl_log hyprctl_log
+  local uninstall_gate gate_target reload_marker post_clean_start
   root=$(new_temp_dir)
   fixture=$root/edid.bin
   marker=$root/.local/state/xeneon-edge-agents/install/hypr-require-injected
   stub_bin=$root/stub-bin
   systemctl_log=$root/systemctl.log
   hyprctl_log=$root/hyprctl.log
+  uninstall_gate=$root/run/xeneon-edge-agents-uninstalling
+  gate_target=$root/gate-target
+  reload_marker=$root/hypr-reloaded
+  post_clean_start=$root/post-clean-start
   printf 'CORSAIR XENEON EDGE\n' >"$fixture"
   sha=$(sha256sum "$fixture" | awk '{print $1}')
   write_hyprland "$root"
@@ -1031,29 +1205,59 @@ test_live_uninstall_reloads_hyprland() {
   : >"$marker"
 
   mkdir -p "$stub_bin"
-  cat >"$stub_bin/systemctl" <<'EOF'
+cat >"$stub_bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
-if [[ "$*" == *" is-active --quiet "* ]]; then
-  exit 3
-fi
+case "$*" in
+  *" start xeneon-edge-reconcile.service")
+    [[ -d "$UNINSTALL_GATE" ]] || : >"$POST_CLEAN_START"
+    ;;
+  *" is-active --quiet "*) exit 3 ;;
+esac
 exit 0
 EOF
   cat >"$stub_bin/hyprctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$HYPRCTL_LOG"
+if [[ "$*" == reload ]]; then
+  : >"$RELOAD_MARKER"
+  # Model a monitor callback racing immediately after the first runtime clean.
+  systemctl --user start xeneon-edge-reconcile.service
+fi
 exit 0
 EOF
   chmod +x "$stub_bin/systemctl" "$stub_bin/hyprctl"
+
+  mkdir -p "$root/run"
+  printf 'must remain unchanged\n' >"$gate_target"
+  ln -s "$gate_target" "$uninstall_gate"
+  if env \
+    HOME="$root" \
+    XDG_CONFIG_HOME="$root/.config" \
+    XDG_DATA_HOME="$root/.local/share" \
+    XDG_STATE_HOME="$root/.local/state" \
+    XDG_RUNTIME_DIR="$root/run" \
+    XDG_BIN_HOME="$root/.local/bin" \
+    PATH="$stub_bin:/usr/bin" \
+    "$uninstall_script" >/dev/null 2>&1; then
+    fail "live uninstall replaced an existing runtime gate"
+  fi
+  assert_contains "$gate_target" 'must remain unchanged'
+  assert_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
+  rm -f -- "$uninstall_gate"
 
   env \
     HOME="$root" \
     XDG_CONFIG_HOME="$root/.config" \
     XDG_DATA_HOME="$root/.local/share" \
     XDG_STATE_HOME="$root/.local/state" \
+    XDG_RUNTIME_DIR="$root/run" \
     XDG_BIN_HOME="$root/.local/bin" \
     SYSTEMCTL_LOG="$systemctl_log" \
     HYPRCTL_LOG="$hyprctl_log" \
+    UNINSTALL_GATE="$uninstall_gate" \
+    RELOAD_MARKER="$reload_marker" \
+    POST_CLEAN_START="$post_clean_start" \
     PATH="$stub_bin:/usr/bin" \
     "$uninstall_script" >/dev/null
 
@@ -1061,6 +1265,13 @@ EOF
     fail "live uninstall did not reload Hyprland"
   grep -Fxq -- 'configerrors' "$hyprctl_log" ||
     fail "live uninstall did not validate Hyprland config errors"
+  grep -Fxq -- \
+    '--user clean --what=runtime xeneon-edge-reconcile.service' \
+    "$systemctl_log" || fail "live uninstall did not clean preserved runtime state"
+  grep -Fxq -- '--user start xeneon-edge-reconcile.service' \
+    "$systemctl_log" || fail "live uninstall test did not inject the Lua race"
+  assert_no_file "$post_clean_start"
+  assert_no_file "$uninstall_gate"
   assert_count 0 \
     'require\("hypr\.xeneon_edge_agents"\)' \
     "$root/.config/hypr/hyprland.lua"
@@ -1115,6 +1326,244 @@ test_read_only_detection_reports_physical_gate() {
   assert_contains "$output" 'No configuration was changed'
 }
 
+test_hotplug_reconciler_tracks_identity_across_connector_drift() {
+  local root fixture sha sys_root monitors devices runtime stub_bin systemctl_log
+  local hyprctl_log settle_pid
+  root=$(new_temp_dir)
+  fixture=$root/edid.bin
+  sys_root=$root/sys
+  monitors=$root/monitors.json
+  devices=$root/devices.json
+  runtime=$root/runtime
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  hyprctl_log=$root/hyprctl.log
+  printf 'CORSAIR XENEON EDGE lifecycle EDID fixture\n' >"$fixture"
+  sha=$(sha256sum "$fixture" | awk '{print $1}')
+  write_hyprland "$root"
+  "$install_script" --root "$root" --apply-production \
+    --connector DP-1 --edid-sha256 "$sha" \
+    --screen-serial CX123456 --screen-model "XENEON EDGE" \
+    "${production_touch_args[@]}" >/dev/null
+
+  make_sysfs_match "$sys_root" card0 DP-2 "$fixture"
+  make_touchscreen_match \
+    "$sys_root" event90 9LQ0172005164 usb-0000:00:14.0-1.4/input0
+  write_hypr_devices "$devices" wch.cn-touchscreen-1
+  cat >"$monitors" <<'EOF'
+[{"id":2,"name":"DP-2","model":"XENEON EDGE","serial":"CX123456","width":2560,"height":720}]
+EOF
+  mkdir -p "$runtime" "$stub_bin"
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+if [[ "${FAIL_START:-0}" == 1 &&
+  "$*" == '--user start xeneon-agentd.service xeneon-edge-portal.service' ]]; then
+  exit 1
+fi
+EOF
+  cat >"$stub_bin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$HYPRCTL_LOG"
+printf 'ok\n'
+EOF
+  chmod +x "$stub_bin/systemctl" "$stub_bin/hyprctl"
+
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+
+  assert_contains "$runtime/screen.env" 'XENEON_EDGE_OUTPUT=DP-2'
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_contains "$systemctl_log" \
+    '--user start xeneon-agentd.service xeneon-edge-portal.service'
+  assert_contains "$hyprctl_log" \
+    'enabled = true'
+
+  # A healthy reconciliation must not trip ERR handling inside command or
+  # process substitutions and recycle an already-correct stack.
+  : >"$systemctl_log"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+  if grep -Fq -- \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service' \
+    "$systemctl_log"; then
+    fail "stable reconciliation recycled an already-correct stack"
+  fi
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+
+  : >"$systemctl_log"
+  printf 'disconnected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=absent'
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+  assert_contains "$hyprctl_log" 'enabled = false'
+
+  : >"$systemctl_log"
+  printf 'connected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"
+  printf '{"touch":[]}\n' >"$devices"
+  (sleep 0.4; write_hypr_devices "$devices" wch.cn-touchscreen-1) &
+  settle_pid=$!
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+  wait "$settle_pid"
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_contains "$systemctl_log" \
+    '--user start xeneon-agentd.service xeneon-edge-portal.service'
+
+  : >"$systemctl_log"
+  : >"$hyprctl_log"
+  printf '{"touch":[]}\n' >"$devices"
+  (
+    sleep 0.2
+    printf 'disconnected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"
+    sleep 0.2
+    write_hypr_devices "$devices" wch.cn-touchscreen-1
+  ) &
+  settle_pid=$!
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+  wait "$settle_pid"
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  if grep -Fq -- \
+    '--user start xeneon-agentd.service xeneon-edge-portal.service' \
+    "$systemctl_log"; then
+    fail "video removal during touch settle started the stale stack"
+  fi
+  if grep -Fq -- 'enabled = true' "$hyprctl_log"; then
+    fail "video removal during touch settle re-enabled the touchscreen"
+  fi
+  printf 'connected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"
+
+  : >"$systemctl_log"
+  printf '{"touch":"not-an-array"}\n' >"$devices"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+
+  write_hypr_devices "$devices" wch.cn-touchscreen-1
+  : >"$systemctl_log"
+  if env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$root/missing-monitors.json" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null 2>&1; then
+    fail "reconciler accepted an unreadable monitor inventory"
+  fi
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=failed'
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+
+  : >"$systemctl_log"
+  printf 'connected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"
+  sed -i 's/CX123456/WRONGSERIAL/' "$monitors"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+
+  : >"$systemctl_log"
+  sed -i 's/WRONGSERIAL/CX123456/' "$monitors"
+  if env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    FAIL_START=1 \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null; then
+    fail "reconciler accepted a partial application-service start"
+  fi
+  assert_no_file "$runtime/screen.env"
+  assert_contains "$runtime/lifecycle.status" 'state=failed'
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+}
+
 printf 'TAP version 13\n'
 run_test 'default install is idempotent and uninstall is reversible' \
   test_default_idempotence_and_uninstall
@@ -1147,12 +1596,12 @@ run_test 'touch and monitor identities fail closed' \
   test_touch_and_monitor_identity_fail_closed
 run_test 'failed hyprctl inventory queries fail closed' \
   test_hyprctl_query_failures_fail_closed
-run_test 'preexisting Hyprland require remains user-owned' \
-  test_preexisting_hypr_require_is_preserved
+run_test 'preexisting Hyprland require aborts uninstall with dependencies intact' \
+  test_preexisting_hypr_require_aborts_uninstall
 run_test 'symlinked Hyprland entrypoint is refused' \
   test_symlinked_hypr_entrypoint_is_refused
-run_test 'changed injected require preserves its module' \
-  test_changed_injected_require_preserves_module
+run_test 'changed injected require aborts uninstall with dependencies intact' \
+  test_changed_injected_require_aborts_uninstall
 run_test 'explicit XDG directories are supported' test_explicit_xdg_paths
 run_test 'path boundaries reject systemd hazards and allow spaces' \
   test_path_boundaries_and_spaces
@@ -1162,6 +1611,10 @@ run_test 'modified managed units abort uninstall before dependency removal' \
   test_modified_managed_unit_aborts_uninstall
 run_test 'activation restarts already-active services' \
   test_activation_restarts_active_services
+run_test 'clean first activation accepts units not yet known to systemd' \
+  test_clean_first_activation_accepts_missing_units
+run_test 'activation fails closed when its lifecycle gate cannot be released' \
+  test_activation_fails_if_gate_cannot_be_released
 run_test 'failed activation restores prior managed artifacts and services' \
   test_failed_activation_restores_prior_artifacts
 run_test 'live uninstall reloads and validates Hyprland' \
@@ -1170,4 +1623,6 @@ run_test 'absent live EDGE preflight changes no live files' \
   test_live_production_preflight_changes_nothing_when_edge_absent
 run_test 'read-only detection reports the absent-hardware gate' \
   test_read_only_detection_reports_physical_gate
+run_test 'hotplug reconciler follows exact hardware across connector drift' \
+  test_hotplug_reconciler_tracks_identity_across_connector_drift
 printf '1..%d\n' "$tests_run"

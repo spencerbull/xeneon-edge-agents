@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -64,17 +66,25 @@ impl Default for DesktopConfig {
 
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Self> {
-        let path = path.map(PathBuf::from).or_else(default_config_path);
-        let Some(path) = path else {
-            return Ok(Self::default());
-        };
-        if !path.exists() {
-            return Ok(Self::default());
-        }
+        let runtime_output = env::var_os("XENEON_EDGE_OUTPUT");
+        Self::load_with_runtime_output(path, runtime_output.as_deref())
+    }
 
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("reading config {}", path.display()))?;
-        toml::from_str(&contents).with_context(|| format!("parsing config {}", path.display()))
+    fn load_with_runtime_output(
+        path: Option<&Path>,
+        runtime_output: Option<&OsStr>,
+    ) -> Result<Self> {
+        let path = path.map(PathBuf::from).or_else(default_config_path);
+        let mut config = if let Some(path) = path.filter(|path| path.exists()) {
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("reading config {}", path.display()))?;
+            toml::from_str(&contents)
+                .with_context(|| format!("parsing config {}", path.display()))?
+        } else {
+            Self::default()
+        };
+        config.apply_runtime_output(runtime_output)?;
+        Ok(config)
     }
 
     pub fn herdr_refresh_interval(&self) -> Duration {
@@ -153,6 +163,31 @@ impl Config {
         }
         Ok(())
     }
+
+    fn apply_runtime_output(&mut self, output: Option<&OsStr>) -> Result<()> {
+        let Some(output) = output else {
+            return Ok(());
+        };
+        let output = output
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("XENEON_EDGE_OUTPUT must be valid UTF-8"))?;
+        if output.is_empty()
+            || !output
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_.:-".contains(character))
+        {
+            anyhow::bail!("XENEON_EDGE_OUTPUT is not a safe connector name");
+        }
+        if self.screen.serial.is_none()
+            || self.screen.model.is_none()
+            || self.screen.touch_device.is_none()
+        {
+            anyhow::bail!("XENEON_EDGE_OUTPUT requires a commissioned screen identity");
+        }
+        self.screen.connector = Some(output.into());
+        self.desktop.edge_output = Some(output.into());
+        Ok(())
+    }
 }
 
 fn default_config_path() -> Option<PathBuf> {
@@ -174,12 +209,68 @@ mod tests {
     }
 
     #[test]
+    fn absent_config_rejects_a_runtime_output_without_commissioned_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = Config::load_with_runtime_output(
+            Some(&temp.path().join("missing.toml")),
+            Some(OsStr::new("DP-2")),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("commissioned screen identity"));
+    }
+
+    #[test]
     fn config_rejects_unsafe_poll_rate() {
         let config = Config {
             health_refresh_ms: 10,
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_output_replaces_the_commissioned_connector_atomically() {
+        let mut config = Config {
+            screen: ScreenConfig {
+                connector: Some("DP-1".into()),
+                serial: Some("CX123456".into()),
+                model: Some("XENEON EDGE".into()),
+                touch_device: Some("wch.cn-touchscreen-1".into()),
+            },
+            desktop: DesktopConfig {
+                edge_output: Some("DP-1".into()),
+                ..DesktopConfig::default()
+            },
+            ..Config::default()
+        };
+
+        config
+            .apply_runtime_output(Some(OsStr::new("DP-2")))
+            .unwrap();
+
+        assert_eq!(config.screen.connector.as_deref(), Some("DP-2"));
+        assert_eq!(config.desktop.edge_output.as_deref(), Some("DP-2"));
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn runtime_output_rejects_shell_metacharacters() {
+        let mut config = Config {
+            screen: ScreenConfig {
+                serial: Some("CX123456".into()),
+                model: Some("XENEON EDGE".into()),
+                touch_device: Some("wch.cn-touchscreen-1".into()),
+                ..ScreenConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let error = config
+            .apply_runtime_output(Some(OsStr::new("DP-2;reboot")))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("safe connector name"));
     }
 
     #[test]

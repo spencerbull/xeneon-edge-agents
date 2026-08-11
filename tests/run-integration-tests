@@ -9,6 +9,10 @@ command -v luac >/dev/null 2>&1 || {
   printf 'error: luac is required for Hyprland integration tests\n' >&2
   exit 1
 }
+command -v lua >/dev/null 2>&1 || {
+  printf 'error: lua is required for Hyprland lifecycle tests\n' >&2
+  exit 1
+}
 
 cargo build --workspace
 XENEON_AGENTD_BIN=${XENEON_AGENTD_BIN:-"$repo_root/target/debug/xeneon-agentd"} \
