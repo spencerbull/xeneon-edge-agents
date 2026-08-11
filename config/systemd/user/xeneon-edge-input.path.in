@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch input devices for XENEON EDGE lifecycle changes
+Documentation=https://github.com/spencerbull/xeneon-edge-agents
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+
+[Path]
+PathChanged=/dev/input
+Unit=xeneon-edge-reconcile.service
+
+[Install]
+WantedBy=graphical-session.target

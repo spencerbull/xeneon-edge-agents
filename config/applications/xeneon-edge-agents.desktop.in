@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=XENEON EDGE Command Center
+Comment=Start the XENEON EDGE agent portal
+Exec="@BIN_HOME@/xeneon-edge-launch"
+Icon=xeneon-edge-agents
+Terminal=false
+Categories=System;
+Keywords=XENEON;EDGE;agents;portal;Herdr;
+StartupNotify=false
+X-GNOME-UsesNotifications=true
+Actions=Restart;
+
+[Desktop Action Restart]
+Name=Restart Command Center
+Exec="@BIN_HOME@/xeneon-edge-launch" --restart

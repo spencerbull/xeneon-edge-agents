@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly daemon_unit=xeneon-agentd.service
+readonly portal_unit=xeneon-edge-portal.service
+readonly config_home=${XDG_CONFIG_HOME:-${HOME:?}/.config}
+readonly commissioning=$config_home/xeneon-edge-agents/commissioning.toml
+readonly sys_root=${XENEON_SYS_ROOT:-/sys}
+readonly runtime_root=${XENEON_RUNTIME_DIR:-${XDG_RUNTIME_DIR:?}/xeneon-edge-agents}
+readonly runtime_environment=$runtime_root/screen.env
+readonly runtime_status=$runtime_root/lifecycle.status
+readonly systemctl_bin=${XENEON_SYSTEMCTL:-systemctl}
+readonly hyprctl_bin=${XENEON_HYPRCTL:-hyprctl}
+touch_device=
+
+toml_value() {
+  local section=$1
+  local key=$2
+  awk -v wanted_section="$section" -v wanted_key="$key" '
+    /^[[:space:]]*\[/ {
+      current=$0
+      gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", current)
+      next
+    }
+    current == wanted_section {
+      line=$0
+      sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" wanted_key "[[:space:]]*=") {
+        sub("^[[:space:]]*" wanted_key "[[:space:]]*=[[:space:]]*", "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        if (line ~ /^".*"$/) {
+          sub(/^"/, "", line)
+          sub(/"$/, "", line)
+        }
+        print line
+        exit
+      }
+    }
+  ' "$commissioning"
+}
+
+top_level_value() {
+  local key=$1
+  awk -v wanted_key="$key" '
+    /^[[:space:]]*\[/ { in_section=1 }
+    !in_section {
+      line=$0
+      sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" wanted_key "[[:space:]]*=") {
+        sub("^[[:space:]]*" wanted_key "[[:space:]]*=[[:space:]]*", "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        gsub(/^"|"$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$commissioning"
+}
+
+connector_name() {
+  local base prefix
+  base=$(basename "$(dirname "$1")")
+  prefix=${base%%-*}
+  printf '%s\n' "${base#"$prefix"-}"
+}
+
+record_status() {
+  local state=$1
+  local detail=$2
+  mkdir -p "$runtime_root"
+  chmod 0700 "$runtime_root"
+  printf 'state=%s\ndetail=%s\n' "$state" "$detail" >"$runtime_status"
+  chmod 0600 "$runtime_status"
+  printf 'xeneon-edge-reconcile: %s: %s\n' "$state" "$detail"
+}
+
+disable_touch() {
+  [[ "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 0
+  "$hyprctl_bin" eval \
+    "hl.device({ name = \"$touch_device\", enabled = false })" >/dev/null
+}
+
+enable_touch() {
+  "$hyprctl_bin" eval \
+    "hl.device({ name = \"$touch_device\", output = \"$connector\", enabled = true })" \
+    >/dev/null
+}
+
+stop_stack() {
+  local status=0
+  "$systemctl_bin" --user stop "$portal_unit" "$daemon_unit" || status=$?
+  rm -f "$runtime_environment"
+  return "$status"
+}
+
+block_stack() {
+  disable_touch || true
+  stop_stack || true
+  record_status blocked "$1"
+  exit 0
+}
+
+unexpected_failure() {
+  local status=$?
+  trap - ERR
+  set +e
+  disable_touch
+  stop_stack
+  record_status failed "unexpected inventory or lifecycle error"
+  exit "$status"
+}
+trap unexpected_failure ERR
+
+[[ -r "$commissioning" ]] || block_stack "commissioning config is missing"
+[[ "$(top_level_value mode)" == production ]] ||
+  block_stack "production commissioning is not active"
+
+edid_sha=$(toml_value output edid_sha256)
+output_serial=$(toml_value output serial)
+output_model=$(toml_value output model)
+touch_device=$(toml_value touch device)
+touch_bustype=$(toml_value touch bustype)
+touch_vendor=$(toml_value touch vendor)
+touch_product=$(toml_value touch product)
+touch_uniq=$(toml_value touch uniq)
+touch_phys=$(toml_value touch phys)
+
+[[ "$edid_sha" =~ ^[0-9a-fA-F]{64}$ &&
+  "$output_serial" =~ ^[A-Za-z0-9_.:-]+$ &&
+  "$output_model" =~ ^[A-Za-z0-9_.:\ -]+$ &&
+  "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
+  block_stack "commissioning identity is incomplete"
+disable_touch
+
+matches=()
+while IFS= read -r -d '' edid_path; do
+  status_path=$(dirname "$edid_path")/status
+  [[ -r "$status_path" && "$(<"$status_path")" == connected ]] || continue
+  candidate_sha=$(sha256sum "$edid_path" | awk '{print $1}')
+  [[ "${candidate_sha,,}" == "${edid_sha,,}" ]] || continue
+  matches+=("$(connector_name "$edid_path")")
+done < <(
+  find -L "$sys_root/class/drm" -mindepth 2 -maxdepth 2 \
+    -type f -name edid -print0 2>/dev/null
+)
+
+case ${#matches[@]} in
+  0)
+    disable_touch || true
+    stop_stack || true
+    record_status absent "commissioned XENEON EDGE is not connected"
+    exit 0
+    ;;
+  1) connector=${matches[0]} ;;
+  *) block_stack "commissioned EDID matches multiple connected outputs" ;;
+esac
+
+[[ "$connector" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
+  block_stack "resolved connector name is unsafe"
+
+if [[ -n "${XENEON_HYPR_MONITORS_JSON:-}" ]]; then
+  monitors_payload=$(cat -- "$XENEON_HYPR_MONITORS_JSON") ||
+    unexpected_failure
+else
+  monitors_payload=$("$hyprctl_bin" -j monitors all 2>/dev/null) ||
+    block_stack "Hyprland monitor inventory is unavailable"
+fi
+
+monitor_matches=$(python3 -c '
+import json, sys
+connector, serial, model = sys.argv[1:4]
+try:
+    monitors = json.load(sys.stdin)
+    if not isinstance(monitors, list) or not all(isinstance(m, dict) for m in monitors):
+        raise TypeError
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
+print(sum(1 for monitor in monitors
+          if monitor.get("name") == connector
+          and monitor.get("serial") == serial
+          and monitor.get("model") == model))
+' "$connector" "$output_serial" "$output_model" <<<"$monitors_payload")
+[[ "$monitor_matches" == 1 ]] ||
+  block_stack "resolved output failed exact Hyprland serial/model verification"
+
+kernel_touch_matches=0
+while IFS= read -r -d '' event_path; do
+  properties=
+  if [[ "$sys_root" == /sys ]] && command -v udevadm >/dev/null 2>&1; then
+    properties=$(udevadm info --query=property --path="$event_path" 2>/dev/null || true)
+  elif [[ -r "$event_path/device/properties" ]]; then
+    properties=$(<"$event_path/device/properties")
+  fi
+  grep -Fqx 'ID_INPUT_TOUCHSCREEN=1' <<<"$properties" || continue
+  for field in name id/bustype id/vendor id/product uniq phys; do
+    [[ -r "$event_path/device/$field" ]] || continue 2
+  done
+  kernel_name=$(<"$event_path/device/name")
+  normalized_name=${kernel_name,,}
+  normalized_name=${normalized_name// /-}
+  if [[ "$touch_device" != "$normalized_name" ]]; then
+    suffix=${touch_device#"$normalized_name"-}
+    [[ "$touch_device" == "$normalized_name"-* && "$suffix" =~ ^[0-9]+$ ]] || continue
+  fi
+  kernel_bustype=$(<"$event_path/device/id/bustype")
+  kernel_vendor=$(<"$event_path/device/id/vendor")
+  kernel_product=$(<"$event_path/device/id/product")
+  [[ "${kernel_bustype,,}" == "${touch_bustype,,}" &&
+    "${kernel_vendor,,}" == "${touch_vendor,,}" &&
+    "${kernel_product,,}" == "${touch_product,,}" ]] || continue
+  if [[ -n "$touch_uniq" ]]; then
+    [[ "$(<"$event_path/device/uniq")" == "$touch_uniq" ]] || continue
+  else
+    [[ -n "$touch_phys" && "$(<"$event_path/device/phys")" == "$touch_phys" ]] || continue
+  fi
+  kernel_touch_matches=$((kernel_touch_matches + 1))
+done < <(
+  find -L "$sys_root/class/input" -mindepth 1 -maxdepth 1 \
+    -type d -name 'event*' -print0 2>/dev/null
+)
+[[ "$kernel_touch_matches" == 1 ]] ||
+  block_stack "exact USB touchscreen is absent or ambiguous"
+
+# The kernel event node appears before Hyprland/libinput necessarily publishes
+# the touch device. Retry only this proven settling case; a missing or ambiguous
+# kernel identity already failed above without delay.
+hypr_touch_matches=0
+for attempt in 0 1 2 3 4; do
+  if [[ -n "${XENEON_HYPR_DEVICES_JSON:-}" ]]; then
+    devices_payload=$(cat -- "$XENEON_HYPR_DEVICES_JSON") ||
+      unexpected_failure
+  else
+    devices_payload=$("$hyprctl_bin" -j devices 2>/dev/null) ||
+      block_stack "Hyprland touch inventory is unavailable"
+  fi
+  hypr_touch_matches=$(python3 -c '
+import json, sys
+wanted = sys.argv[1]
+try:
+    devices = json.load(sys.stdin)
+    touch = devices.get("touch") if isinstance(devices, dict) else None
+    if not isinstance(touch, list) or not all(isinstance(d, dict) for d in touch):
+        raise TypeError
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
+print(sum(1 for device in touch
+          if device.get("name") == wanted))
+' "$touch_device" <<<"$devices_payload")
+  [[ "$hypr_touch_matches" == 1 ]] && break
+  ((attempt == 4)) || sleep 0.25
+done
+[[ "$hypr_touch_matches" == 1 ]] ||
+  block_stack "exact Hyprland touchscreen is absent or ambiguous"
+
+# A monitor can disappear while libinput is settling the touchscreen. The Lua
+# callback queues a durable service restart for that edge, while this final
+# check prevents the stale invocation from publishing runtime identity or
+# re-enabling touch before the replacement runs.
+final_matches=()
+while IFS= read -r -d '' edid_path; do
+  status_path=$(dirname "$edid_path")/status
+  [[ -r "$status_path" && "$(<"$status_path")" == connected ]] || continue
+  candidate_sha=$(sha256sum "$edid_path" | awk '{print $1}')
+  [[ "${candidate_sha,,}" == "${edid_sha,,}" ]] || continue
+  final_matches+=("$(connector_name "$edid_path")")
+done < <(
+  find -L "$sys_root/class/drm" -mindepth 2 -maxdepth 2 \
+    -type f -name edid -print0 2>/dev/null
+)
+[[ ${#final_matches[@]} == 1 && "${final_matches[0]}" == "$connector" ]] ||
+  block_stack "commissioned output changed during reconciliation"
+
+if [[ -n "${XENEON_HYPR_MONITORS_JSON:-}" ]]; then
+  final_monitors_payload=$(cat -- "$XENEON_HYPR_MONITORS_JSON") ||
+    unexpected_failure
+else
+  final_monitors_payload=$("$hyprctl_bin" -j monitors all 2>/dev/null) ||
+    block_stack "Hyprland monitor inventory changed during reconciliation"
+fi
+final_monitor_matches=$(python3 -c '
+import json, sys
+connector, serial, model = sys.argv[1:4]
+try:
+    monitors = json.load(sys.stdin)
+    if not isinstance(monitors, list) or not all(isinstance(m, dict) for m in monitors):
+        raise TypeError
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
+print(sum(1 for monitor in monitors
+          if monitor.get("name") == connector
+          and monitor.get("serial") == serial
+          and monitor.get("model") == model))
+' "$connector" "$output_serial" "$output_model" <<<"$final_monitors_payload")
+[[ "$final_monitor_matches" == 1 ]] ||
+  block_stack "Hyprland output changed during reconciliation"
+
+mkdir -p "$runtime_root"
+chmod 0700 "$runtime_root"
+environment_temp=$(mktemp "$runtime_root/screen.env.XXXXXX")
+printf 'XENEON_EDGE_OUTPUT=%s\n' "$connector" >"$environment_temp"
+chmod 0600 "$environment_temp"
+mv "$environment_temp" "$runtime_environment"
+
+enable_touch
+if ! "$systemctl_bin" --user start "$daemon_unit" "$portal_unit"; then
+  disable_touch || true
+  "$systemctl_bin" --user stop "$portal_unit" "$daemon_unit" || true
+  rm -f "$runtime_environment"
+  record_status failed "application services did not start cleanly"
+  exit 1
+fi
+record_status running "verified $connector and started the XENEON EDGE stack"

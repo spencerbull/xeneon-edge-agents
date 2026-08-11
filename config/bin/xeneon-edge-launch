@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly app_name="XENEON EDGE Command Center"
+readonly daemon_unit=xeneon-agentd.service
+readonly portal_unit=xeneon-edge-portal.service
+readonly reconcile_unit=xeneon-edge-reconcile.service
+launcher_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+readonly agentctl="$launcher_dir/xeneon-agentctl"
+
+notify() {
+  local urgency=$1
+  local message=$2
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name="$app_name" --icon=xeneon-edge-agents \
+      --urgency="$urgency" "$app_name" "$message" || true
+  fi
+}
+
+case "${1:-}" in
+  "")
+    success_message="Command center is running."
+    ;;
+  --restart)
+    success_message="Command center restarted."
+    ;;
+  *)
+    notify critical "Unknown launcher action."
+    exit 64
+    ;;
+esac
+
+if [[ "${1:-}" == --restart ]]; then
+  if ! systemctl --user stop "$portal_unit" "$daemon_unit"; then
+    notify critical "Could not stop the user services."
+    exit 1
+  fi
+fi
+
+if ! systemctl --user restart "$reconcile_unit"; then
+  notify critical "Could not reconcile the XENEON EDGE session."
+  exit 1
+fi
+
+if ! systemctl --user is-active --quiet "$daemon_unit" &&
+  ! systemctl --user is-active --quiet "$portal_unit"; then
+  notify normal "XENEON EDGE is not connected; the command center remains stopped."
+  exit 0
+fi
+
+# Type=simple units can report active just before the daemon socket is ready.
+# Retry only the read-only health probe, never a lifecycle action.
+for _ in {1..20}; do
+  if systemctl --user is-active --quiet "$daemon_unit" &&
+    systemctl --user is-active --quiet "$portal_unit" &&
+    "$agentctl" doctor >/dev/null 2>&1; then
+    notify normal "$success_message"
+    exit 0
+  fi
+  sleep 0.25
+done
+
+notify critical "XENEON EDGE was detected but the services did not become healthy."
+exit 1

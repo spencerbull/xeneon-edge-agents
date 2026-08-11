@@ -9,6 +9,8 @@ There are three distinct modes:
    portal surface and enables no service.
 3. Production activation requires a connected display identity, a per-device
    touch mapping, successful offline validation, and explicit `--activate`.
+   Thereafter only the lightweight reconciler autostarts; the daemon and portal
+   run while the exact commissioned hardware is present.
 
 No mode edits `/usr/share/omarchy`. Production staging writes the generated
 module without changing the active Hyprland entrypoint. Explicit activation
@@ -26,7 +28,7 @@ scripts/detect-hardware.sh
 
 Record:
 
-- the exact DRM connector;
+- the current DRM connector as the commissioning-time hint;
 - the SHA-256 of that connector's non-empty EDID;
 - the exact serial and model exposed to Hyprland/Qt;
 - the normalized exact touchscreen name from `hyprctl -j devices`;
@@ -54,8 +56,10 @@ scripts/install.sh \
   --touch-phys '<EXACT-KERNEL-PHYS>'
 ```
 
-Use `--touch-uniq` instead of `--touch-phys` when the device exposes a stable
-non-empty `uniq`; both may be supplied to require both matches. The USB bus
+Use `--touch-uniq` when the device exposes a stable non-empty `uniq`; `phys` is
+used only as a fallback when `uniq` is empty because USB topology paths can
+change across boots. Both may be recorded, but runtime identity prefers the
+device-provided `uniq`. The USB bus
 must be `0003`; vendor and product IDs are captured from the actual touchscreen
 and are not inferred from the display brand. The commissioned XENEON EDGE unit
 exposes its touch controller as `wch.cn-touchscreen-1`, USB `27c0:0859`, rather
@@ -73,12 +77,15 @@ scripts/check.sh
 luac -p "$HOME/.config/hypr/xeneon_edge_agents.lua"
 ```
 
-The portal service receives connector, serial, and model independently of the
-daemon config. Activation first requires Hyprland to match all three exactly.
-Quickshell then requires exactly one screen with the configured connector and
-model before it creates a layer surface, and also requires the exact serial
-when Qt's Wayland backend exposes that EDID field. Some compositors leave
-`QScreen.serialNumber` empty even after the Hyprland preflight has succeeded.
+The commissioned EDID hash, serial/model, and USB touchscreen identity remain
+stable authority. On each Hyprland start, monitor add, or monitor removal, the
+reconciler discovers the connector currently carrying that EDID and verifies
+the same connector against Hyprland. It writes that connector to a private
+runtime environment consumed by both services. Quickshell then requires
+exactly one screen with the resolved connector and model before it creates a
+layer surface, and also requires the exact serial when Qt's Wayland backend
+exposes that EDID field. Some compositors leave `QScreen.serialNumber` empty
+even after the Hyprland gate has succeeded.
 
 ## Activate and verify
 
@@ -102,14 +109,21 @@ scripts/install.sh \
 Then verify:
 
 ```bash
-systemctl --user status xeneon-agentd.service xeneon-edge-portal.service
+systemctl --user status \
+  xeneon-edge-reconcile.service \
+  xeneon-agentd.service \
+  xeneon-edge-portal.service
 xeneon-agentctl doctor
 hyprctl configerrors
 ```
 
-Activation validates the candidate files, reloads Hyprland, and starts new
-services or restarts already-active services so the commissioned identity is
-effective immediately.
+Activation validates the candidate files, reloads Hyprland, disables direct
+autostart of the application services, enables the reconciler, and performs an
+initial reconciliation. Unplugging the exact display stops the portal and
+daemon. Reconnecting it on any connector starts both with the newly resolved
+connector only after every identity gate passes. The input path watcher also
+reconciles USB-only changes; the commissioned touch device is synchronously
+disabled during transitions and re-enabled only with its verified output.
 
 Physical acceptance requires all of the following:
 

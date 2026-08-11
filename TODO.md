@@ -34,6 +34,11 @@ Fable 5 over a persistent ACP session. Any verified findings are fixed only on
 `claude-fable-review`, revalidated through the required software gates, and
 returned to the same reviewer until no substantive findings remained.
 
+The active hotplug checkpoint replaces connector-pinned autostart with an
+event-driven lifecycle. The commissioned EDID, serial/model, and USB touch
+identity remain authoritative while the current connector becomes runtime
+state; the daemon and portal run only while that exact hardware is present.
+
 ## Done criteria
 
 - [x] Rust daemon and QML bridge expose versioned normalized snapshots.
@@ -83,19 +88,24 @@ returned to the same reviewer until no substantive findings remained.
       independent review pass complete for the home-command checkpoint.
 - [ ] Physical EDGE display/touch/focus/privacy/power checks pass (display,
       exact touch mapping, Ambient wake, and card focus are now confirmed).
+- [x] Exact XENEON hotplug starts and maps the stack on its current connector;
+      unplug stops both application services without touching other displays.
 
 ## Streams
 
 | Stream | Branch/worktree | Files to own | Status |
 | --- | --- | --- | --- |
 | Foundation and Rust adapter | `main` | Rust workspace, schemas, fixtures | Complete through `c32b5cd` |
-| Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Complete locally at `8298f46`; not installed or pushed |
+| Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Installed from reviewed v0.8.0 head `fd53378d`; not pushed |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
 | Agent-command home redesign | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized safe metadata, usage/Micro collectors, fixed app actions, control-center QML | Software complete, live-previewed, and independently reviewed |
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
+| Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
+| Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
+| Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
@@ -116,6 +126,14 @@ returned to the same reviewer until no substantive findings remained.
 - Claiming physical success without the connected device.
 
 ## Gates and evidence
+
+- [x] Hotplug lifecycle software gate: Rust config tests, shell/static checks,
+      31 isolated installer/reconciler scenarios, generated Lua syntax, and
+      independent review with no remaining substantive findings.
+- [ ] Hotplug lifecycle physical gate: reviewed live install, actual
+      `/dev/input` path activation, display/USB unplug-replug ordering, and real
+      touch disable/re-enable mapping pass. DPMS, suspend/resume, focus/privacy,
+      and coordinate validation on the XENEON remain open.
 
 - [x] Foundation focused tests: 24 core plus 1 CLI test and strict clippy.
 - [x] Herdr gates: 2,825 unit, 213 integration, 86 maintenance, 17
@@ -195,7 +213,8 @@ returned to the same reviewer until no substantive findings remained.
       reachability, reduced-motion coverage, Qt Settings persistence, and the
       narrowly writable systemd StateDirectory with no P0/P1/P2 findings.
 - [x] Physical runtime fixes were independently reviewed before reactivation:
-      the daemon now uses `RuntimeDirectory=`, Quickshell receives narrowly
+      the reconciler exclusively owns and preserves the systemd runtime
+      directory needed for connector handoff, Quickshell receives narrowly
       writable shared runtime paths, Qt's unavailable Wayland EDID serial is
       tolerated only after the installer verifies the configured serial
       through Hyprland, and the unique connector/model match remains
@@ -223,6 +242,15 @@ returned to the same reviewer until no substantive findings remained.
       obsolete `HealthStrip.qml`, restarted both services with zero failures,
       reported one connected Herdr 0.7.5/protocol-17 session with four agents,
       and rendered one visually inspected portal layer on DP-2 only.
+- [x] Desktop-launcher gate: strict ShellCheck, desktop-entry validation, 28
+      isolated installer scenarios, and the full Rust/QML/software gates pass;
+      independent re-review has no remaining P0/P1/P2 findings.
+- [x] Desktop-launcher live QA found the custom entry and icon in Omarchy's
+      Apps menu, launched it through that menu, rendered its success
+      notification, kept already-running service PIDs stable, and separately
+      restored a deliberately stopped portal through `gtk-launch` on DP-1.
+- [x] Herdr v0.8 compatibility gate: protocol-19 adapter fixture and full
+      repository software checks pass against the rebased Herdr API contract.
 - [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
       guarded-hold behavior, and DDC restore remain).
 
@@ -242,6 +270,10 @@ returned to the same reviewer until no substantive findings remained.
 - `xeneon-agentd.service` and `xeneon-edge-portal.service` are enabled,
   active, and running without restarts after the reviewed AI usage detail
   activation.
+- The managed `XENEON EDGE Command Center` desktop entry, icon, and bounded
+  helper are installed in user-owned XDG paths. The default action starts the
+  two fixed user units without disrupting active services; restart is an
+  explicit secondary action.
 - The installed physical footer now shows both reported provider windows,
   reset timing, plan/freshness and explicit status, plus bounded aggregate
   today/hour activity when available; no prompts, per-model history,
@@ -260,9 +292,14 @@ returned to the same reviewer until no substantive findings remained.
   immediately to its right at `1840,1350`. The external display is running at
   120 Hz instead of 240 Hz so the third display fits the available link
   bandwidth.
-- The stable Herdr installation remains unchanged. Guarded interruption exists
-  only on the local Herdr branch; approval and Windows guarded actions remain
-  unavailable.
+- Herdr was live-handed off twice without terminating its 48 pane processes:
+  first from stable v0.7.5 to reviewed v0.8.0/protocol 19, then from the build
+  artifact to the canonical `~/.local/bin/herdr`. The old server exited only
+  after the replacement acknowledged PTY ownership. Installed Herdr and XENEON
+  binary hashes match their reviewed release artifacts; both user services,
+  `xeneon-agentctl doctor`, and `scripts/check.sh` pass. Backups are retained in
+  the user-owned Herdr and XENEON state directories. Approval and Windows
+  guarded actions remain unavailable.
 
 ## Open checkpoints
 

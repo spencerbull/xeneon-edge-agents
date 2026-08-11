@@ -76,7 +76,7 @@ Connection and action failures are separate fields, not invented agent states.
 Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
 
-The Herdr adapter accepts protocol 17. A different value from `ping` produces
+The Herdr adapter accepts protocol 19 from Herdr v0.8.0. A different value from `ping` produces
 an `incompatible` session with no agents, targets, actions, snapshot request,
 or event subscription; the daemon does not guess compatibility across a Herdr
 protocol boundary.

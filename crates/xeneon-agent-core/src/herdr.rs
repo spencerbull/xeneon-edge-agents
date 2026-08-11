@@ -22,7 +22,7 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const SUPPORTED_HERDR_PROTOCOL: u32 = 17;
+const SUPPORTED_HERDR_PROTOCOL: u32 = 19;
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -704,6 +704,66 @@ mod tests {
         assert!(observation.agents.is_empty());
         assert!(observation.targets.is_empty());
         assert!(observation.pane_ids.is_empty());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn herdr_v0_8_protocol_requests_and_parses_the_snapshot() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "ping");
+            write
+                .write_all(
+                    b"{\"id\":\"ping\",\"result\":{\"version\":\"0.8.0\",\"protocol\":19}}\n",
+                )
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "session.snapshot");
+            write
+                .write_all(
+                    b"{\"id\":\"snapshot\",\"result\":{\"snapshot\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"number\":1,\"label\":\"xeneon\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"review\"}],\"agents\":[{\"terminal_id\":\"term-1\",\"agent\":\"codex\",\"agent_status\":\"blocked\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"pane_id\":\"w1:p1\",\"revision\":4,\"state_change_seq\":9,\"actions\":[{\"capability_id\":\"interrupt-1\",\"action\":\"interrupt\",\"expires_at_unix_ms\":999,\"revision\":4}]}]}}}\n",
+                )
+                .await
+                .unwrap();
+        });
+        let descriptor = SessionDescriptor {
+            name: "default".into(),
+            running: true,
+            socket_path: socket,
+        };
+
+        let observation = HerdrClient::new("herdr")
+            .observe_session(&descriptor, "epoch", 0, 1234)
+            .await
+            .unwrap();
+
+        assert_eq!(observation.session.state, SessionState::Connected);
+        assert_eq!(observation.session.version.as_deref(), Some("0.8.0"));
+        assert_eq!(observation.session.protocol, Some(19));
+        assert_eq!(observation.agents.len(), 1);
+        assert_eq!(observation.agents[0].display_name, "review");
+        assert_eq!(observation.agents[0].status, AgentStatus::Blocked);
+        assert_eq!(
+            observation.agents[0]
+                .actions
+                .interrupt
+                .as_ref()
+                .map(|capability| capability.capability_id.as_str()),
+            Some("interrupt-1")
+        );
         server.await.unwrap();
     }
 
