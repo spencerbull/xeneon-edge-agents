@@ -186,13 +186,12 @@ state; the daemon and portal run only while that exact hardware is present.
 - [x] Card-focus QA verified the full-size target contract, the fixed
       `agent.focus` action against the live preview daemon, and the resulting
       authoritative focused-agent update for `seform-codex`.
-- [x] Physical EDGE display and touch QA identified `DP-2` / serial
-      `066626215698` / EDID SHA-256
-      `311920e1e0982803ea7ec8aee0a1688630095944e025ece9bc741ebb8ac70dc5`,
-      enabled native 2560x720 at 2x scale, mapped only
-      `wch.cn-touchscreen-1` (`0003:27c0:0859`, uniq
-      `9LQ0172005164`), captured a real touch sequence, woke Ambient, tapped
-      `herdr-xeneon`, and observed Herdr report that exact agent focused.
+- [x] Physical EDGE display and touch QA verified the exact commissioned EDID,
+      model, serial, USB identity, and touch device; enabled native 2560x720 at
+      2x scale; captured a real touch sequence; woke Ambient; focused an agent;
+      and observed Herdr report that exact agent focused. Host-specific hardware
+      identifiers remain in the local commissioning file rather than this
+      repository.
 - [x] Production activation verified both user services active with zero
       restarts, a mode-`0600` daemon socket inside a mode-`0700`
       systemd-owned runtime directory, a connected Herdr protocol-17 snapshot

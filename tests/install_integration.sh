@@ -12,7 +12,7 @@ production_touch_args=(
   --touch-bustype 0003
   --touch-vendor 27c0
   --touch-product 0859
-  --touch-uniq 9LQ0172005164
+  --touch-uniq TEST-TOUCH-UNIQ-0001
   --touch-phys usb-0000:00:14.0-2.4/input0
 )
 
@@ -88,7 +88,7 @@ make_sysfs_match() {
 make_touchscreen_match() {
   local sys_root=$1
   local event_name=${2:-event90}
-  local uniq=${3:-9LQ0172005164}
+  local uniq=${3:-TEST-TOUCH-UNIQ-0001}
   local phys=${4:-usb-0000:00:14.0-2.4/input0}
   local directory=$sys_root/devices/mock-input/$event_name
   mkdir -p "$directory/device/id" "$directory/device/capabilities" \
@@ -448,7 +448,7 @@ test_production_commissioning_and_exact_check() {
   # USB topology changed from the commissioned 2.4 path to 1.4 after reboot;
   # the device-provided uniq remains the stable touch authority.
   make_touchscreen_match \
-    "$sys_root" event90 9LQ0172005164 usb-0000:00:14.0-1.4/input0
+    "$sys_root" event90 TEST-TOUCH-UNIQ-0001 usb-0000:00:14.0-1.4/input0
   write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   write_hypr_monitors "$hypr_monitors"
 
@@ -615,7 +615,7 @@ test_invalid_touch_vendor_does_not_install() {
     --screen-serial CX123456 --screen-model "XENEON EDGE" \
     --touch-device wch.cn-touchscreen-1 \
     --touch-bustype 0003 --touch-vendor zzzz --touch-product 0859 \
-    --touch-uniq 9LQ0172005164 >"$log" 2>&1; then
+    --touch-uniq TEST-TOUCH-UNIQ-0001 >"$log" 2>&1; then
     fail "non-hexadecimal touch vendor unexpectedly passed"
   fi
   assert_contains "$log" \
@@ -1348,7 +1348,7 @@ test_hotplug_reconciler_tracks_identity_across_connector_drift() {
 
   make_sysfs_match "$sys_root" card0 DP-2 "$fixture"
   make_touchscreen_match \
-    "$sys_root" event90 9LQ0172005164 usb-0000:00:14.0-1.4/input0
+    "$sys_root" event90 TEST-TOUCH-UNIQ-0001 usb-0000:00:14.0-1.4/input0
   write_hypr_devices "$devices" wch.cn-touchscreen-1
   cat >"$monitors" <<'EOF'
 [{"id":2,"name":"DP-2","model":"XENEON EDGE","serial":"CX123456","width":2560,"height":720}]
