@@ -4,18 +4,10 @@ final result: passed
 
 ## Evidence
 
-- Source visual truth:
-  `/home/sbull/Downloads/herdr-xeneon-edge-concept.mp4`
-- Source hash:
-  `a8a4d8bbda6034b301f527463e2938828184a60c6edecc4e323f3f7bbca6ad07`
-- Rectified source transition and tail sheets:
-  `/tmp/xeneon-motion-pass2.cRkBRX/transition-sheet.png` and
-  `/tmp/xeneon-motion-pass2.cRkBRX/tails-sheet.png`
-- Final implementation captures:
-  `/tmp/xeneon-final-motion.1roWWj/control-center-final.png` and
-  `/tmp/xeneon-final-motion.1roWWj/ambient-nested-final.png`
-- Final tail comparison:
-  `/tmp/xeneon-final-motion.1roWWj/tail-comparison-final.png`
+- Source visual truth: a local concept capture that is intentionally not
+  committed to the repository.
+- Rectified transition sheets, implementation captures, and tail comparisons
+  were generated as ephemeral local QA artifacts.
 - Viewport: 1280x360 logical pixels.
 - Source: photographed 1280x720 frame perspective-rectified and normalized to
   1280x360 at density 1.
@@ -24,11 +16,9 @@ final result: passed
 - States compared: operational cards, dashboard-to-radar transition, quiet
   constellation, and energetic orbit.
 
-This is explicitly ephemeral local QA evidence: the source remains in the
-user's Downloads folder and captures remain under `/tmp`. Their paths and
-source hash make this run auditable now, but they are not claimed as durable
-repository artifacts. Regenerate them from the source before a later release
-or review.
+This is explicitly ephemeral local QA evidence, not a durable repository
+artifact. Regenerate it from an authorized source capture before a later
+release or review.
 
 The full view keeps all critical detail legible at the native 1280x360
 comparison size. Focused regions were evaluated through the active card grid

@@ -2,9 +2,7 @@
 
 ## Source
 
-- File: `/home/sbull/Downloads/herdr-xeneon-edge-concept.mp4`
-- SHA-256:
-  `a8a4d8bbda6034b301f527463e2938828184a60c6edecc4e323f3f7bbca6ad07`
+- File: local concept capture, intentionally not committed.
 - Media: H.264, 1280x720, 24 fps, 240 frames, 10.083 seconds
 - The photographed EDGE content was perspective-rectified to 1280x360 for
   comparison with the portal preview. The synthetic names and telemetry in the

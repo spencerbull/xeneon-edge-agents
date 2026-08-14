@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible problem with the agent command center
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include prompts, terminal contents, credentials, or local hardware identifiers.
+        Report suspected vulnerabilities privately as described in SECURITY.md.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest safe sequence that reproduces the issue.
+      placeholder: |
+        1. Start ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit SHA, branch, or package version.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Omarchy, Hyprland, Quickshell, Herdr, and relevant hardware versions without unique identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already performed
+      description: Include safe logs or test results with private data removed.

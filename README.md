@@ -1,9 +1,28 @@
 # XENEON EDGE Agent Command Center
 
+[![CI](https://github.com/spencerbull/xeneon-edge-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/spencerbull/xeneon-edge-agents/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A native Omarchy command center for the Corsair XENEON EDGE. It keeps Herdr as
 the session and interaction authority while providing a dedicated 2560x720
 touch surface for agent status, safe triage, provider capacity, and connected
 tool status.
+
+[Watch the XENEON EDGE Agent Command Center in action on X.](https://x.com/SpencerGBull/status/2088048447525966150?s=20)
+
+> [!NOTE]
+> This is an early, hardware-specific project developed and validated on
+> Omarchy with a Corsair XENEON EDGE. There is not yet a general-purpose
+> packaged release; use the source installer and commissioning flow below.
+
+## Highlights
+
+- A glanceable command center and animated Ambient view for Herdr agents.
+- Exact, fail-closed display and touchscreen identity checks.
+- Typed, narrowly scoped agent actions mediated by the Rust daemon.
+- Normalized Claude, Codex, OpenCode, host-health, and connected-tool status.
+- Reversible user-owned installation in XDG locations; no packaged Omarchy
+  files are modified.
 
 Production output matching is fail-closed: the portal creates no surface
 unless the commissioned EDID, model, serial, and touchscreen all match exactly
@@ -25,6 +44,9 @@ or shell commands. Open and zoom are narrow public Herdr API calls. Interrupt
 requires a short-lived capability issued and revalidated by a compatible Herdr
 server; approval is deliberately unavailable until a current prompt can be
 grounded safely.
+
+For the full boundary model, see the [architecture](docs/architecture.md) and
+[protocol](docs/protocol.md) documentation.
 
 ## Develop and preview
 
@@ -165,6 +187,24 @@ The remaining physical checklist covers touch coordinates, focus restoration,
 hotplug, DPMS, suspend/resume, lock-screen privacy, and read-only DDC discovery.
 Brightness control stays disabled until exact read/restore is proven.
 
-See [architecture](docs/architecture.md), [protocol](docs/protocol.md), and
-[commissioning](docs/commissioning.md) for the boundaries and verification
-details. `TODO.md` is the resumable implementation ledger.
+See the [commissioning guide](docs/commissioning.md) for the complete safety
+and verification checklist. `TODO.md` is the resumable implementation ledger.
+
+## Security and privacy
+
+The portal intentionally excludes terminal contents, prompts, credentials, and
+raw provider payloads. Production display matching fails closed when hardware
+identity is absent or ambiguous, and QML cannot execute arbitrary shell input.
+
+Please report security issues through the process in [SECURITY.md](SECURITY.md)
+instead of opening a public issue.
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), keep
+the authority and hardware-safety boundaries intact, and run the repository
+checks before opening a pull request.
+
+## License
+
+This project is available under the [MIT License](LICENSE).
