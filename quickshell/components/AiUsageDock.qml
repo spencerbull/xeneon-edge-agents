@@ -1,9 +1,11 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property var usage: ({"providers": []})
+    property var theme: ThemePalette.fallback
     property var agents: []
     property var sessions: []
     property bool reducedMotion: false
@@ -161,10 +163,18 @@ Item {
         if (state === "LIVE")
             return accent
         if (state === "WARNING" || state === "STALE")
-            return "#e8b56d"
+            return theme.yellow
         if (state === "NO DATA")
-            return "#647787"
-        return "#e08a68"
+            return theme.textMuted
+        return theme.orange
+    }
+
+    function readableColor(color) {
+        return ThemePalette.ensureContrast(
+            String(color),
+            String(theme.surface),
+            4.5
+        )
     }
 
     Timer {
@@ -177,8 +187,10 @@ Item {
 
     component UsageLine: Item {
         property var usageWindow: null
+        property string providerId: ""
+        property string windowRole: ""
         property bool providerAvailable: false
-        property color accent: "#6f8aa7"
+        property color accent: root.theme.accent
         property bool reducedMotion: false
 
         visible: usageWindow !== null
@@ -190,13 +202,16 @@ Item {
             spacing: 8
 
             Text {
-                width: 72
+                id: windowLabel
+
+                objectName: "usageLabel_" + providerId + "_" + windowRole
+                width: 128
                 anchors.verticalCenter: parent.verticalCenter
                 text: usageWindow === null
                     ? ""
                     : String(usageWindow.label || "USAGE").toUpperCase()
                 textFormat: Text.PlainText
-                color: "#8aa8bd"
+                color: root.theme.textSecondary
                 elide: Text.ElideRight
                 font {
                     family: "monospace"
@@ -207,11 +222,11 @@ Item {
             }
 
             Rectangle {
-                width: Math.max(60, parent.width - 72 - 42 - 122 - 24)
+                width: Math.max(60, parent.width - 128 - 42 - 112 - 24)
                 height: 6
                 anchors.verticalCenter: parent.verticalCenter
                 radius: 3
-                color: "#162333"
+                color: root.theme.surfaceRaised
 
                 Rectangle {
                     width: parent.width * (
@@ -239,7 +254,9 @@ Item {
                     ? root.percent(usageWindow) + "%"
                     : "—"
                 textFormat: Text.PlainText
-                color: providerAvailable ? accent : "#647787"
+                color: providerAvailable
+                    ? root.readableColor(accent)
+                    : root.theme.textMuted
                 horizontalAlignment: Text.AlignRight
                 font {
                     family: "monospace"
@@ -249,11 +266,11 @@ Item {
             }
 
             Text {
-                width: 122
+                width: 112
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.resetLabel(usageWindow)
                 textFormat: Text.PlainText
-                color: "#617f99"
+                color: root.theme.textMuted
                 elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
                 font {
@@ -273,9 +290,9 @@ Item {
             width: 286
             height: parent.height
             radius: 16
-            color: "#09131f"
+            color: root.theme.surface
             border.width: 1
-            border.color: "#244963"
+            border.color: root.theme.border
 
             Column {
                 anchors {
@@ -288,7 +305,7 @@ Item {
                 Text {
                     text: "HERDR FLEET"
                     textFormat: Text.PlainText
-                    color: "#dff9ff"
+                    color: root.theme.textPrimary
                     font {
                         family: "monospace"
                         pixelSize: 17
@@ -300,7 +317,7 @@ Item {
                 Text {
                     text: root.fleetSummary()
                     textFormat: Text.PlainText
-                    color: "#5f7f9c"
+                    color: root.theme.textMuted
                     font {
                         family: "monospace"
                         pixelSize: 10
@@ -311,7 +328,7 @@ Item {
                 Text {
                     text: root.focusedSummary()
                     textFormat: Text.PlainText
-                    color: "#47718d"
+                    color: root.theme.textSecondary
                     font {
                         family: "monospace"
                         pixelSize: 9
@@ -339,20 +356,20 @@ Item {
                 readonly property string activityLabel:
                     root.activitySummary(provider)
                 readonly property color accent: modelData === "claude"
-                    ? "#e89562"
+                    ? root.theme.orange
                     : modelData === "codex"
-                        ? "#63e6ba"
-                        : "#a998ff"
+                        ? root.theme.green
+                        : root.theme.magenta
 
                 objectName: "usageCard_" + modelData
                 width: (root.width - 286 - 42) / 3
                 height: parent.height
                 radius: 16
-                color: "#09131f"
+                color: root.theme.surface
                 border.width: 1
                 border.color: provider.available
                     ? Qt.alpha(accent, provider.stale ? 0.34 : 0.62)
-                    : "#263847"
+                    : root.theme.border
 
                 Row {
                     id: providerHeader
@@ -372,7 +389,7 @@ Item {
                         width: Math.min(132, implicitWidth)
                         text: String(parent.parent.provider.label || "").toUpperCase()
                         textFormat: Text.PlainText
-                        color: "#dceff7"
+                        color: root.theme.textPrimary
                         elide: Text.ElideRight
                         font {
                             family: "monospace"
@@ -390,7 +407,7 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: root.providerDetail(parent.parent.provider)
                         textFormat: Text.PlainText
-                        color: "#5f7f9c"
+                        color: root.theme.textMuted
                         elide: Text.ElideRight
                         font {
                             family: "monospace"
@@ -405,9 +422,11 @@ Item {
                         anchors.verticalCenter: parent.verticalCenter
                         text: parent.parent.statusLabel
                         textFormat: Text.PlainText
-                        color: root.statusColor(
-                            parent.parent.provider,
-                            parent.parent.accent
+                        color: root.readableColor(
+                            root.statusColor(
+                                parent.parent.provider,
+                                parent.parent.accent
+                            )
                         )
                         font {
                             family: "monospace"
@@ -431,6 +450,8 @@ Item {
 
                     UsageLine {
                         width: parent.width
+                        providerId: parent.parent.modelData
+                        windowRole: "primary"
                         usageWindow: parent.parent.primaryUsage
                         providerAvailable: parent.parent.provider.available
                         accent: parent.parent.accent
@@ -439,6 +460,8 @@ Item {
 
                     UsageLine {
                         width: parent.width
+                        providerId: parent.parent.modelData
+                        windowRole: "secondary"
                         usageWindow: parent.parent.secondaryUsage
                         providerAvailable: parent.parent.provider.available
                         accent: parent.parent.accent
@@ -463,7 +486,7 @@ Item {
                         width: parent.width * 0.58
                         text: parent.parent.activityLabel
                         textFormat: Text.PlainText
-                        color: "#7898ae"
+                        color: root.theme.textSecondary
                         elide: Text.ElideRight
                         font {
                             family: "monospace"
@@ -477,7 +500,7 @@ Item {
                         width: parent.width - parent.children[0].width - 10
                         text: root.updatedLabel(parent.parent.provider)
                         textFormat: Text.PlainText
-                        color: "#54728c"
+                        color: root.theme.textMuted
                         elide: Text.ElideRight
                         horizontalAlignment: Text.AlignRight
                         font {

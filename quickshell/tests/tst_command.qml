@@ -103,6 +103,18 @@ TestCase {
         }
     }
 
+    function test_orderActionsAreTypedAndCannotTargetAgents() {
+        for (var index = 0; index < 2; index += 1) {
+            var action = ["order_grouped", "order_priority"][index]
+            var command = builder.build(action, "", "", 46)
+            verify(command !== null)
+            compare(command.action, action)
+            compare(command.agent_id, undefined)
+            compare(command.capability_id, undefined)
+            compare(builder.build(action, "agent-1", "", 46), null)
+        }
+    }
+
     function test_rejectsRawOrUnknownActions() {
         compare(builder.build("send_keys", "agent-1", "", 42), null)
         compare(builder.build("shell", "agent-1", "", 42), null)

@@ -1,10 +1,12 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property string label: "HOLD"
-    property color accent: "#66f7ff"
+    property var theme: ThemePalette.fallback
+    property color accent: theme.accent
     property bool reducedMotion: false
     property bool completed: false
     property bool armed: false
@@ -99,9 +101,13 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 10
-        color: holdHandler.pressed ? Qt.alpha(root.accent, 0.18) : "#0b1422"
+        color: holdHandler.pressed
+            ? Qt.alpha(root.accent, 0.18)
+            : root.theme.surfaceRaised
         border.width: 1
-        border.color: root.enabled ? Qt.alpha(root.accent, 0.72) : "#263143"
+        border.color: root.enabled
+            ? Qt.alpha(root.accent, 0.72)
+            : root.theme.border
         opacity: root.enabled ? 1 : 0.36
     }
 
@@ -140,7 +146,9 @@ Item {
         anchors.centerIn: parent
         text: root.label
         textFormat: Text.PlainText
-        color: root.enabled ? "#edfaff" : "#718096"
+        color: root.enabled
+            ? root.theme.textPrimary
+            : root.theme.textMuted
         font {
             family: "monospace"
             pixelSize: 15

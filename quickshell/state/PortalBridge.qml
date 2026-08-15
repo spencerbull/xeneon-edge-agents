@@ -170,4 +170,12 @@ QtObject {
     function cancelVoice() {
         return sendBuilt("voice_cancel", "", "", store.sequence)
     }
+
+    function setAgentOrder(mode) {
+        if (mode !== "grouped" && mode !== "priority") {
+            commandRejected("Agent order must be grouped or priority")
+            return ""
+        }
+        return sendBuilt("order_" + mode, "", "", store.sequence)
+    }
 }

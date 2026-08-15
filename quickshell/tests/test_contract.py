@@ -95,6 +95,8 @@ class QmlSafetyContractTests(unittest.TestCase):
             "voice_start",
             "voice_stop",
             "voice_cancel",
+            "order_grouped",
+            "order_priority",
         ):
             self.assertIn(f'"{action}"', builder)
         self.assertIn('"type": "command"', builder)
@@ -159,7 +161,11 @@ class QmlSafetyContractTests(unittest.TestCase):
         portal = source("components/PortalView.qml")
         activity = source("state/ActivityController.qml")
         shell = source("shell.qml")
-        self.assertIn("readonly property int pageSize: 6", portal)
+        self.assertIn("readonly property int pageSize: 14", portal)
+        self.assertIn("return Math.ceil(count / 2)", portal)
+        ambient = source("components/AmbientView.qml")
+        self.assertIn("readonly property int nodeLimit: 14", ambient)
+        self.assertIn("readonly property bool denseConstellation", ambient)
         self.assertIn("ListView.Horizontal", portal)
         self.assertIn("ListView.SnapOneItem", portal)
         self.assertIn("property int inactivityMs: 60000", activity)
@@ -494,6 +500,102 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("StateDirectory=xeneon-edge-agents/portal", service)
         self.assertIn("StateDirectoryMode=0700", service)
         self.assertIn("UMask=0077", service)
+
+    def test_omarchy_theme_reload_is_runtime_owned_and_chrome_is_bound(self):
+        shell = source("shell.qml")
+        theme = source("state/OmarchyTheme.qml")
+        palette = source("state/ThemePalette.js")
+        status_palette = source("components/PortalPalette.js")
+        agent_card = source("components/AgentCard.qml")
+        ai_usage = source("components/AiUsageDock.qml")
+        ambient = source("components/AmbientView.qml")
+        display_setting = source("components/DisplaySettingButton.qml")
+        micro_drawer = source("components/MicroDrawer.qml")
+        portal = source("components/PortalView.qml")
+        voice = source("components/VoiceControl.qml")
+        qml_sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in ROOT.rglob("*.qml")
+            if "tests" not in path.parts
+        )
+
+        self.assertEqual(shell.count("OmarchyTheme {"), 1)
+        self.assertIn('Quickshell.env("XDG_STATE_HOME")', theme)
+        self.assertIn('/omarchy/current"', theme)
+        self.assertIn('readonly property string themeNamePath:', theme)
+        self.assertIn('readonly property string colorsPath:', theme)
+        self.assertIn("id: themeNameReader", theme)
+        self.assertIn("watchChanges: true", theme)
+        self.assertRegex(
+            theme,
+            r"onFileChanged:\s*\{\s*"
+            r"root\.requestPaletteReload\(\)\s*"
+            r"themeNameReader\.reload\(\)",
+        )
+        self.assertIn("root.requestPaletteReload()", theme)
+        self.assertIn("id: paletteReloadDebounce", theme)
+        self.assertIn('colorsReadPath = ""', theme)
+        self.assertIn(
+            "onTriggered: root.colorsReadPath = root.colorsPath",
+            theme,
+        )
+        self.assertIn("id: colorsReader", theme)
+        self.assertIn("path: root.colorsReadPath", theme)
+        self.assertIn("watchChanges: false", theme)
+        self.assertNotIn("Process {", theme)
+
+        self.assertIn("function validColor(value)", palette)
+        self.assertIn("function parse(text)", palette)
+        self.assertIn("return theme.blue", status_palette)
+        self.assertIn("return theme.yellow", status_palette)
+        self.assertIn("return theme.green", status_palette)
+        self.assertIn("return theme.red", status_palette)
+        self.assertNotRegex(status_palette, r"#[0-9A-Fa-f]{6,8}")
+        self.assertIn("String(theme.surface)", ambient)
+        self.assertNotIn("String(theme.canvas),\n        4.5", ambient)
+
+        # Omarchy owns chrome and semantic hues. State meaning remains stable
+        # through role mapping, while text variants are contrast normalized.
+        self.assertIn("accent: root.theme.green", agent_card)
+        self.assertIn("accent: root.theme.red", agent_card)
+        self.assertIn("color: root.cardBackground", agent_card)
+        self.assertIn("String(cardBackground)", agent_card)
+        self.assertIn("color: root.readablePrimary", agent_card)
+        self.assertIn("color: root.readableMuted", agent_card)
+        self.assertIn("String(statePillBackground)", agent_card)
+        self.assertIn("color: root.readablePillAccent", agent_card)
+        self.assertIn("microStatusColor: store.micro.connected", portal)
+        self.assertIn("degradedColor: theme.yellow", portal)
+        self.assertIn("toastColor: toastSuccess", portal)
+        self.assertIn("border.color: root.theme.red", voice)
+        self.assertIn("String(controlBackground)", voice)
+        self.assertIn("color: root.readableSecondary", voice)
+        self.assertIn("root.readableColor(accent)", ai_usage)
+        self.assertIn("root.readableColor(\n                            root.statusColor", ai_usage)
+        self.assertIn("ThemePalette.ensureContrast(", display_setting)
+        self.assertIn("color: root.readableConnectionColor", micro_drawer)
+        self.assertIn("color: root.readableSurfaceMessageColor", portal)
+
+        self.assertNotIn(
+            "color: providerAvailable ? accent", ai_usage
+        )
+        self.assertNotIn(
+            "color: root.checked ? root.accent : root.theme.textMuted\n"
+            "                font {",
+            display_setting,
+        )
+        self.assertNotIn("? root.theme.green", micro_drawer)
+        self.assertNotIn("? root.theme.red", micro_drawer)
+        self.assertIn("return root.theme.muted", micro_drawer)
+        self.assertIn('? theme.muted\n        : Palette.ambientColor', ambient)
+
+        # The only literal left in production QML is the intentional black
+        # minimum-screen veil. Theme defaults live in the reviewed palette JS;
+        # state color meaning maps onto those runtime theme roles.
+        self.assertEqual(
+            set(re.findall(r"#[0-9A-Fa-f]{6,8}", qml_sources)),
+            {"#000000"},
+        )
 
 
 if __name__ == "__main__":

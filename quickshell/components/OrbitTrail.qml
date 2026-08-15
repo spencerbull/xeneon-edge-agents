@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
@@ -10,7 +11,7 @@ Item {
     property real radiusY: 170
     property real angleDegrees: 0
     property real reveal: 0
-    property color accent: "#55e9ff"
+    property color accent: ThemePalette.fallback.accent
     property real sweepDegrees: 44
 
     // One broad after-image is built from nested arcs that share the same head.

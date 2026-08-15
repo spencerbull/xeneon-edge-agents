@@ -1,4 +1,5 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
@@ -6,6 +7,7 @@ Item {
     property bool motionReduced: false
     property bool dimmed: false
     property bool motionForced: false
+    property var theme: ThemePalette.fallback
 
     signal motionToggleRequested()
     signal dimToggleRequested()
@@ -27,7 +29,8 @@ Item {
                 : root.motionReduced
                     ? "REDUCED"
                     : "FULL"
-            accent: "#55e9ff"
+            accent: root.theme.accent
+            theme: root.theme
             checked: root.motionReduced
             enabled: !root.motionForced
             onToggled: root.motionToggleRequested()
@@ -39,7 +42,8 @@ Item {
             height: parent.height
             label: "SCREEN"
             stateLabel: root.dimmed ? "MINIMUM" : "NORMAL"
-            accent: "#9a7cff"
+            accent: root.theme.magenta
+            theme: root.theme
             checked: root.dimmed
             onToggled: root.dimToggleRequested()
         }

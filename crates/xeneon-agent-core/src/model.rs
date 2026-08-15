@@ -78,6 +78,22 @@ pub enum ActionKind {
     VoiceStart,
     VoiceStop,
     VoiceCancel,
+    OrderGrouped,
+    OrderPriority,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOrderMode {
+    #[default]
+    Grouped,
+    Priority,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOrderSnapshot {
+    pub available: bool,
+    pub mode: AgentOrderMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +134,8 @@ pub struct AgentView {
     pub session: String,
     pub focused: bool,
     pub observed_for_seconds: u64,
+    #[serde(default)]
+    pub state_change_seq: u64,
     pub source_order: usize,
     pub actions: AgentActions,
 }
@@ -189,6 +207,7 @@ pub fn sort_agents(agents: &mut [AgentView]) {
     agents.sort_by(|left, right| {
         agent_attention_rank(left)
             .cmp(&agent_attention_rank(right))
+            .then_with(|| right.state_change_seq.cmp(&left.state_change_seq))
             .then_with(|| left.source_order.cmp(&right.source_order))
             .then_with(|| left.id.cmp(&right.id))
     });
@@ -280,6 +299,8 @@ pub struct PortalSnapshot {
     pub connection: ConnectionState,
     pub sessions: Vec<SessionView>,
     pub agents: Vec<AgentView>,
+    #[serde(default)]
+    pub agent_order: AgentOrderSnapshot,
     pub voice: VoiceSnapshot,
     pub usage: AiUsageSnapshot,
     pub micro: MicroSnapshot,
@@ -296,6 +317,7 @@ impl PortalSnapshot {
             connection: ConnectionState::Offline,
             sessions: Vec::new(),
             agents: Vec::new(),
+            agent_order: AgentOrderSnapshot::default(),
             voice: VoiceSnapshot::default(),
             usage: AiUsageSnapshot::default(),
             micro: MicroSnapshot::default(),
@@ -375,13 +397,14 @@ mod tests {
             session: "default".into(),
             focused: false,
             observed_for_seconds: 0,
+            state_change_seq: 0,
             source_order,
             actions: AgentActions::default(),
         }
     }
 
     #[test]
-    fn attention_sort_preserves_source_order_within_status() {
+    fn attention_sort_uses_newest_change_then_source_order_within_status() {
         let mut done = agent("done", AgentStatus::Done, 1);
         done.review_ready = true;
         let mut agents = vec![
@@ -396,6 +419,14 @@ mod tests {
 
         let ids: Vec<_> = agents.iter().map(|agent| agent.id.as_str()).collect();
         assert_eq!(ids, ["blocked", "done", "working-1", "working-2", "idle"]);
+
+        let mut older = agent("older", AgentStatus::Working, 0);
+        older.state_change_seq = 3;
+        let mut newer = agent("newer", AgentStatus::Working, 1);
+        newer.state_change_seq = 9;
+        let mut tied = vec![older, newer];
+        sort_agents(&mut tied);
+        assert_eq!(tied[0].id, "newer");
     }
 
     #[test]

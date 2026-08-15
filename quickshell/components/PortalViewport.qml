@@ -7,6 +7,7 @@ Item {
     required property var bridge
     required property var activity
     required property var preferences
+    required property var theme
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
@@ -24,7 +25,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#02050b"
+        color: root.theme.canvas
     }
 
     Item {
@@ -43,6 +44,7 @@ Item {
             bridge: root.bridge
             activity: root.activity
             preferences: root.preferences
+            theme: root.theme
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.restoreVoiceFocus

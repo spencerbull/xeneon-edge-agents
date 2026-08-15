@@ -1,10 +1,12 @@
 import QtQuick
 import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     required property var agent
+    property var theme: ThemePalette.fallback
     property real centerX: 0
     property real centerY: 0
     property real radiusX: 320
@@ -12,18 +14,19 @@ Item {
     property real angleDegrees: 0
     property real reveal: 0
     property bool reducedMotion: false
+    property bool dense: false
     property real glowPulse: 0.55
 
     readonly property string agentState:
         Palette.effectiveAgentState(agent)
-    readonly property color accent: Palette.agentColor(agent)
+    readonly property color accent: Palette.agentColor(agent, theme)
     readonly property real angleRadians: angleDegrees * Math.PI / 180
     readonly property bool pulsing: !reducedMotion
         && reveal > 0
         && (agentState === "working" || agentState === "blocked")
 
-    width: 216
-    height: 80
+    width: dense ? 168 : 216
+    height: dense ? 50 : 80
     x: centerX + Math.cos(angleRadians) * radiusX - width / 2
     y: centerY + Math.sin(angleRadians) * radiusY - height / 2
     opacity: reveal
@@ -51,7 +54,7 @@ Item {
     Rectangle {
         anchors {
             fill: parent
-            margins: -12
+            margins: root.dense ? -8 : -12
         }
         radius: height / 2
         color: "transparent"
@@ -63,7 +66,7 @@ Item {
     Rectangle {
         anchors {
             fill: parent
-            margins: -6
+            margins: root.dense ? -4 : -6
         }
         radius: height / 2
         color: Qt.alpha(root.accent, 0.04)
@@ -75,7 +78,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: height / 2
-        color: "#ed08111d"
+        color: Qt.alpha(root.theme.surfaceRaised, 0.93)
         border.width: 2
         border.color: root.accent
     }
@@ -83,12 +86,12 @@ Item {
     Rectangle {
         anchors {
             left: parent.left
-            leftMargin: 18
+            leftMargin: root.dense ? 12 : 18
             verticalCenter: parent.verticalCenter
         }
-        width: 10
-        height: 10
-        radius: 5
+        width: root.dense ? 8 : 10
+        height: width
+        radius: width / 2
         color: root.accent
         opacity: root.agentState === "idle" ? 0.62 : 1
     }
@@ -97,21 +100,21 @@ Item {
         objectName: "ambientAgentDisplayName"
         anchors {
             left: parent.left
-            leftMargin: 38
+            leftMargin: root.dense ? 27 : 38
             right: parent.right
-            rightMargin: 18
+            rightMargin: root.dense ? 10 : 18
             verticalCenter: parent.verticalCenter
         }
         text: String(root.agent.display_name || "AGENT").toUpperCase()
         textFormat: Text.PlainText
-        color: "#e7f8ff"
+        color: root.theme.textPrimary
         horizontalAlignment: Text.AlignHCenter
         elide: Text.ElideRight
         font {
             family: "monospace"
-            pixelSize: 16
+            pixelSize: root.dense ? 13 : 16
             weight: Font.DemiBold
-            letterSpacing: 0.8
+            letterSpacing: root.dense ? 0.5 : 0.8
         }
     }
 

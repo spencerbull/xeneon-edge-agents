@@ -1,11 +1,13 @@
 import QtQuick
 import QtQuick.Effects
 import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property var agent: null
+    property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property double snapshotSequence: -1
     property bool actionsEnabled: true
@@ -24,11 +26,36 @@ Item {
     signal interacted()
 
     readonly property string agentState: Palette.effectiveAgentState(agent)
-    readonly property color accent: Palette.agentColor(agent)
-    readonly property color readableAccent:
-        agentState === "idle" || agentState === "unknown"
-            ? "#a9b7c7"
-            : accent
+    readonly property color accent: Palette.agentColor(agent, theme)
+    readonly property color cardBackground:
+        focusHandler.pressed || guardedFocusHandler.pressed
+            ? theme.surfacePressed
+            : theme.surface
+    readonly property color readableAccent: ThemePalette.ensureContrast(
+        String(accent),
+        String(cardBackground),
+        4.5
+    )
+    readonly property color readablePrimary: ThemePalette.ensureContrast(
+        String(theme.textPrimary),
+        String(cardBackground),
+        7
+    )
+    readonly property color readableMuted: ThemePalette.ensureContrast(
+        String(theme.textMuted),
+        String(cardBackground),
+        4.5
+    )
+    readonly property color statePillBackground: ThemePalette.mixColors(
+        String(theme.surface),
+        String(accent),
+        0.14
+    )
+    readonly property color readablePillAccent: ThemePalette.ensureContrast(
+        String(accent),
+        String(statePillBackground),
+        4.5
+    )
     readonly property bool hasApproveAction:
         capability("approve") !== null
     readonly property bool hasInterruptAction:
@@ -109,6 +136,13 @@ Item {
         return context.length > 0 ? context.join("  ·  ") : "LOCAL WORKSPACE"
     }
 
+    function spaceLine() {
+        if (agent === null)
+            return ""
+        var workspace = String(agent.workspace || "").trim()
+        return "SPACE // " + (workspace !== "" ? workspace : "LOCAL")
+    }
+
     function requestFocus() {
         if (!root.enabled || agent === null || !canAction("open"))
             return false
@@ -126,7 +160,8 @@ Item {
         : "Focus " + String(agent.display_name || "Agent") + " in Herdr"
     Accessible.description: agent === null
         ? ""
-        : processLine() + ". " + contextLine() + ". Tap to focus in Herdr."
+        : processLine() + ". " + spaceLine() + ". " + contextLine()
+            + ". Tap to focus in Herdr."
     Accessible.onPressAction: root.requestFocus()
 
     MouseArea {
@@ -144,9 +179,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 18
-        color: focusHandler.pressed || guardedFocusHandler.pressed
-            ? "#0d1726"
-            : "#0a101d"
+        color: root.cardBackground
         border.width: root.agent !== null && root.agent.focused ? 2 : 1
         border.color: Qt.alpha(
             root.accent,
@@ -319,7 +352,7 @@ Item {
                     ? ""
                     : String(root.agent.display_name || "")
                 textFormat: Text.PlainText
-                color: "#f3fbff"
+                color: root.readablePrimary
                 elide: Text.ElideRight
                 font {
                     family: "monospace"
@@ -335,7 +368,7 @@ Item {
                 height: 28
                 radius: 14
                 anchors.verticalCenter: parent.verticalCenter
-                color: Qt.alpha(root.accent, 0.14)
+                color: root.statePillBackground
                 border.width: 1
                 border.color: Qt.alpha(root.accent, 0.62)
 
@@ -345,7 +378,7 @@ Item {
                     anchors.centerIn: parent
                     text: root.stateLabel(root.agentState)
                     textFormat: Text.PlainText
-                    color: root.readableAccent
+                    color: root.readablePillAccent
                     font {
                         family: "monospace"
                         pixelSize: 12
@@ -357,6 +390,8 @@ Item {
         }
 
         Text {
+            id: processText
+
             anchors {
                 left: parent.left
                 right: parent.right
@@ -376,6 +411,26 @@ Item {
         }
 
         Text {
+            objectName: "agentSpaceName"
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: processText.bottom
+                topMargin: 6
+            }
+            text: root.spaceLine().toUpperCase()
+            textFormat: Text.PlainText
+            color: root.readableMuted
+            elide: Text.ElideRight
+            font {
+                family: "monospace"
+                pixelSize: 11
+                weight: Font.DemiBold
+                letterSpacing: 0.5
+            }
+        }
+
+        Text {
             anchors {
                 left: parent.left
                 right: parent.right
@@ -383,7 +438,7 @@ Item {
             }
             text: root.contextLine()
             textFormat: Text.PlainText
-            color: "#7894ae"
+            color: root.readableMuted
             elide: Text.ElideMiddle
             font {
                 family: "monospace"
@@ -428,7 +483,8 @@ Item {
             visible: root.hasApproveAction
             enabled: visible
             label: "HOLD APPROVE"
-            accent: "#6cf7b0"
+            accent: root.theme.green
+            theme: root.theme
             reducedMotion: root.reducedMotion
             targetAgentId: root.agent === null ? "" : String(root.agent.id)
             targetCapabilityId: root.capabilityId("approve")
@@ -447,7 +503,8 @@ Item {
             visible: root.hasInterruptAction
             enabled: visible
             label: "HOLD INTERRUPT"
-            accent: "#ff5d83"
+            accent: root.theme.red
+            theme: root.theme
             reducedMotion: root.reducedMotion
             targetAgentId: root.agent === null ? "" : String(root.agent.id)
             targetCapabilityId: root.capabilityId("interrupt")

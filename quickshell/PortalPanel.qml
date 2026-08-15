@@ -11,6 +11,7 @@ PanelWindow {
     required property var bridge
     required property var activity
     required property var preferences
+    required property var theme
     property bool reducedMotion: false
     property string hostName: "LOCAL"
     property bool recoveryVisible: true
@@ -20,7 +21,7 @@ PanelWindow {
 
     screen: modelData
     visible: recoveryVisible
-    color: "#02050b"
+    color: root.theme.canvas
     surfaceFormat.opaque: true
     focusable: false
     mask: null
@@ -97,6 +98,7 @@ PanelWindow {
         bridge: root.bridge
         activity: root.activity
         preferences: root.preferences
+        theme: root.theme
         reducedMotion: root.reducedMotion
         previewMode: false
         hostName: root.hostName

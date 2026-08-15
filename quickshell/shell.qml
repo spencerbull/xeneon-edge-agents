@@ -131,6 +131,10 @@ ShellRoot {
             id: portalStore
         }
 
+        OmarchyTheme {
+            id: portalTheme
+        }
+
         ActivityController {
             id: activityController
             inactivityMs: root.previewWindowMode
@@ -177,6 +181,7 @@ ShellRoot {
                 bridge: portalBridge
                 activity: activityController
                 preferences: portalPreferences
+                theme: portalTheme
                 reducedMotion: root.reducedMotion
                 hostName: root.hostName
             }
@@ -191,7 +196,7 @@ ShellRoot {
         implicitWidth: 1280
         implicitHeight: 360
         minimumSize: Qt.size(960, 270)
-        color: "#02050b"
+        color: portalTheme.canvas
         surfaceFormat.opaque: true
 
         onClosed: {
@@ -212,6 +217,7 @@ ShellRoot {
             bridge: portalBridge
             activity: activityController
             preferences: portalPreferences
+            theme: portalTheme
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.livePreviewMode

@@ -1,10 +1,12 @@
 import QtQuick
 import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property bool active: false
+    property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property var agents: []
     property var health: ({})
@@ -20,7 +22,8 @@ Item {
 
     readonly property int entryDurationMs: 1350
     readonly property int exitDurationMs: 1000
-    readonly property int nodeLimit: 6
+    readonly property int nodeLimit: 14
+    readonly property bool denseConstellation: visibleAgentCount > 6
     readonly property int visibleAgentCount: Math.min(
         nodeLimit,
         agents.length
@@ -31,8 +34,13 @@ Item {
         connectionState
     )
     readonly property color modeAccent: mode === "off"
-        ? "#55e9ff"
-        : Palette.ambientColor(mode)
+        ? theme.muted
+        : Palette.ambientColor(mode, theme)
+    readonly property color readableModeAccent: ThemePalette.ensureContrast(
+        String(modeAccent),
+        String(theme.surface),
+        4.5
+    )
     readonly property bool orbiting: !reducedMotion
         && (active || exitShield || revealProgress > 0)
     readonly property real curtainProgress: stage(
@@ -202,15 +210,16 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#020711"
+        color: root.theme.canvas
         opacity: root.curtainProgress
     }
 
     Item {
         id: constellation
+        objectName: "ambientConstellation"
 
-        width: 1540
-        height: 560
+        width: 1900
+        height: 580
         anchors.centerIn: parent
 
         Repeater {
@@ -230,7 +239,7 @@ Item {
                 color: "transparent"
                 border.width: index === 4 ? 2 : 1
                 border.color: Qt.alpha(
-                    index % 2 === 0 ? root.modeAccent : "#7a65ff",
+                    index % 2 === 0 ? root.modeAccent : root.theme.magenta,
                     0.1 + (4 - index) * 0.025
                 )
                 opacity: root.ringProgress
@@ -250,7 +259,7 @@ Item {
                 radiusX: root.radiusXFor(index)
                 radiusY: root.radiusYFor(index)
                 angleDegrees: root.nodeAngleDegrees(index)
-                accent: Palette.agentColor(root.agents[index])
+                accent: Palette.agentColor(root.agents[index], root.theme)
                 reveal: root.reducedMotion
                     ? 0
                     : root.nodeProgress
@@ -268,6 +277,7 @@ Item {
 
                 objectName: "ambientAgentNode-" + index
                 agent: root.agents[index]
+                theme: root.theme
                 centerX: constellation.width / 2
                 centerY: constellation.height / 2
                 radiusX: root.radiusXFor(index)
@@ -275,6 +285,7 @@ Item {
                 angleDegrees: root.nodeAngleDegrees(index)
                 reveal: root.nodeProgress
                 reducedMotion: root.reducedMotion
+                dense: root.denseConstellation
             }
         }
 
@@ -301,7 +312,7 @@ Item {
             Rectangle {
                 anchors.fill: parent
                 radius: width / 2
-                color: "#d9060c16"
+                color: Qt.alpha(root.theme.surface, 0.85)
                 border.width: 2
                 border.color: Qt.alpha(root.modeAccent, 0.54)
             }
@@ -349,7 +360,7 @@ Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: root.centerTitle()
                     textFormat: Text.PlainText
-                    color: root.modeAccent
+                    color: root.readableModeAccent
                     font {
                         family: "monospace"
                         pixelSize: 34
@@ -362,7 +373,7 @@ Item {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: root.centerDetail()
                     textFormat: Text.PlainText
-                    color: "#7e9bb4"
+                    color: root.theme.textSecondary
                     font {
                         family: "monospace"
                         pixelSize: 13
@@ -382,7 +393,7 @@ Item {
         }
         text: "TOUCH TO WAKE"
         textFormat: Text.PlainText
-        color: "#7892ad"
+        color: root.theme.textMuted
         opacity: root.nodeProgress
         font {
             family: "monospace"
@@ -419,32 +430,47 @@ Item {
     }
 
     function speedFor(index) {
-        // Integer multipliers ensure every shared phase reset is an exact
-        // number of full turns, so no node or trail can jump at a loop.
-        return [1, 2, 1, 3, 2, 1][index % nodeLimit]
+        // Preserve the original independent-lane character at every count.
+        // Integer multipliers keep phase resets continuous while allowing
+        // agents to advance and cross instead of revolving as one rigid shape.
+        if (!denseConstellation)
+            return [1, 2, 1, 3, 2, 1][index % 6]
+        return [1, 2, 1, 3, 2, 1, 2, 3, 1, 2, 3, 1, 2, 3][index % 14]
     }
 
     function baseAngleFor(index) {
-        return [-88, -30, 30, 92, 154, 214][index % nodeLimit]
+        if (!denseConstellation && !reducedMotion)
+            return [-88, -30, 30, 92, 154, 214][index % 6]
+        var count = Math.max(1, visibleAgentCount)
+        var startAngle = count === 2 ? 0 : -90
+        return startAngle + index * 360 / count
     }
 
     function radiusXFor(index) {
         if (reducedMotion)
-            return 520
-        return [410, 530, 650, 470, 600, 510][index % nodeLimit]
+            return denseConstellation ? 820 : 520
+        if (!denseConstellation)
+            return [410, 530, 650, 470, 600, 510][index % 6]
+        return [
+            720, 800, 660, 780, 700, 820, 750,
+            680, 810, 730, 770, 650, 790, 710
+        ][index % 14]
     }
 
     function radiusYFor(index) {
         if (reducedMotion)
-            return 230
-        return [152, 205, 174, 238, 214, 188][index % nodeLimit]
+            return denseConstellation ? 242 : 230
+        if (!denseConstellation)
+            return [152, 205, 174, 238, 214, 188][index % 6]
+        return [
+            190, 230, 205, 242, 215, 185, 235,
+            200, 225, 195, 240, 210, 180, 220
+        ][index % 14]
     }
 
     function nodeAngleDegrees(index) {
         if (reducedMotion) {
-            var count = Math.max(1, visibleAgentCount)
-            var startAngle = count === 2 ? 0 : -90
-            return startAngle + index * 360 / count
+            return baseAngleFor(index)
         }
         return baseAngleFor(index)
             + orbitPhase * 360 * speedFor(index)

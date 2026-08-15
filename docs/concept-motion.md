@@ -15,9 +15,9 @@
 | 0.00-2.25 s | Stable compact header, 3x2 cards, and slim telemetry strip | Keep the operational portal and real Herdr data path unchanged |
 | 2.25-2.75 s | Dashboard globally dims while the first center reticle appears | Use an opaque staged crossfade, not a card-to-node identity morph |
 | 2.75-3.75 s | Concentric radar rings expand outward with a smooth ease-out | Reveal structural rings from the center on entry |
-| 3.75-4.25 s | Center label and six neutral capsules fade and scale in, then colorize | Stage center before nodes and derive node color from normalized state |
+| 3.75-4.25 s | Center label and up to fourteen neutral capsules fade and scale in, then colorize | Stage center before nodes and derive node color from normalized state |
 | 4.25-7.25 s | Quiet ambient hold with subtle drift and breathing | Preserve a glanceable low-power hierarchy before stronger motion |
-| 7.25-10.08 s | Upright capsules orbit clockwise on nearby radii while soft, tapered colored after-images intensify | Move nodes independently and render one bounded segmented comet tail per state-colored node |
+| 7.25-10.08 s | Upright capsules orbit clockwise while soft, tapered colored after-images intensify | Preserve the original independent speeds, angles, and radii exactly through six agents, then extend that advancing-and-crossing multi-lane character with smaller capsules and fourteen bounded radii through fourteen agents |
 
 The source ends in ambient mode and does not show the reverse transition. The
 implemented ambient-to-control-center path deliberately mirrors its visual
@@ -31,12 +31,17 @@ the source.
 - Near-black navy canvas with dim slate/cyan structural geometry.
 - Narrow uppercase monospaced display type with generous tracking.
 - Bright ice/cyan system copy and low-contrast blue-gray metadata.
-- Agent color remains the reviewed Codex Micro semantic palette. Capsule
+- Agent color retains the reviewed Codex Micro semantic meaning while taking
+  its blue/yellow/green/error hues from the active Omarchy palette. Capsule
   strokes, quiet glow layers, and their trail segments share the same state
   accent.
 - The strong halo is an on-canvas tapered after-image. Overlapping segments
   share one path, fall off quadratically, and leave a small gap behind the
   capsule so the tail reads as motion instead of parallel orbit rails.
+- The dense seven-to-fourteen-agent composition keeps every capsule and halo
+  inside the constellation while independent integer-rate lanes intentionally
+  advance, cross, and sometimes overlap. Reduced motion alone uses static,
+  evenly spaced nodes.
 - The perimeter light is one GPU-blurred status bloom with two opposing
   clockwise runners, short soft glints, and six bounded trailing motes per
   runner. It represents active agent execution only: working is blue, blocked

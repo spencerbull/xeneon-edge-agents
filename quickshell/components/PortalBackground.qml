@@ -1,26 +1,30 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
+    property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property bool ambientMode: false
 
     Rectangle {
         anchors.fill: parent
-        color: "#02050b"
+        color: root.theme.canvas
         gradient: Gradient {
             GradientStop {
                 position: 0
-                color: root.ambientMode ? "#020813" : "#03101a"
+                color: root.theme.canvas
             }
             GradientStop {
                 position: 0.54
-                color: "#05091a"
+                color: root.theme.surface
             }
             GradientStop {
                 position: 1
-                color: root.ambientMode ? "#09051a" : "#100721"
+                color: root.ambientMode
+                    ? Qt.alpha(root.theme.magenta, 0.16)
+                    : Qt.alpha(root.theme.accent, 0.12)
             }
         }
     }
@@ -34,7 +38,7 @@ Item {
             x: index * 80
             width: 1
             height: root.height
-            color: index % 4 === 0 ? "#19436a" : "#102942"
+            color: root.theme.accent
             opacity: index % 4 === 0 ? 0.24 : 0.12
         }
     }
@@ -48,7 +52,7 @@ Item {
             y: index * 80
             width: root.width
             height: 1
-            color: index % 2 === 0 ? "#153c60" : "#10263d"
+            color: root.theme.border
             opacity: index % 2 === 0 ? 0.2 : 0.1
         }
     }
@@ -64,7 +68,9 @@ Item {
             width: index % 5 === 0 ? 4 : 2
             height: width
             radius: width / 2
-            color: index % 3 === 0 ? "#62f5ff" : "#9367ff"
+            color: index % 3 === 0
+                ? root.theme.accentSecondary
+                : root.theme.magenta
             opacity: 0.18 + (index % 4) * 0.08
         }
     }
@@ -79,7 +85,7 @@ Item {
         radius: height / 2
         color: "transparent"
         border.width: 2
-        border.color: "#173c7a"
+        border.color: root.theme.blue
         opacity: root.ambientMode ? 0.42 : 0.22
     }
 
@@ -89,7 +95,7 @@ Item {
         width: root.width
         height: 2
         y: -4
-        color: "#5cf6ff"
+        color: root.theme.accentSecondary
         opacity: 0.15
 
         NumberAnimation on y {

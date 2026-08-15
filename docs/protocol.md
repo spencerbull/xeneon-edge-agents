@@ -18,6 +18,7 @@ versions must be rejected.
   "connection": "connected",
   "sessions": [],
   "agents": [],
+  "agent_order": {"available": true, "mode": "grouped"},
   "voice": {"state": "unavailable", "owned": false},
   "usage": {
     "providers": [
@@ -53,6 +54,9 @@ Terminal titles and prompt-derived content are never display-name sources.
 Optional `repository` and `worktree` values are sanitized checkout identity,
 not terminal content. `launch_pending` means Herdr has observed a launch request
 without yet observing a live agent; it is not treated as an agent state.
+`state_change_seq` is Herdr's monotonic state-change ordering scalar. Priority
+mode uses it descending within the same attention bucket so the EDGE and Herdr
+panels retain the same tie ordering; grouped mode continues to use Space order.
 
 Voice state is exactly `idle`, `recording`, `processing`, `error`, or
 `unavailable`. `owned` says only whether this daemon instance owns the private
@@ -63,20 +67,23 @@ or voice errors from stderr.
 activity. Utilization is a fraction from 0 through 1; reset timestamps, plan,
 model, `today_tokens`, and `tokens_per_hour` are optional bounded metadata.
 The aggregate token fields are provider-wide local activity totals, not
-per-request records. Usage never includes credentials, prompts, per-model
-history, cache file contents, or provider response bodies. `micro` is a
+per-request records. Usage never includes credentials, prompts, message
+contents, per-model history, cache/database contents, or provider response
+bodies. `micro` is a
 read-only normalized view of the local Codex Micro connection and optional
 device status. It never exposes the Micro socket protocol to QML.
 
 These additive v1 fields are optional for compatibility with older recorded
 fixtures. Clients default voice to unavailable, review-ready and launch-pending
 to false (except a legacy raw `done` agent), usage to an empty provider list,
-and Micro to disconnected.
+Micro to disconnected, and ordering to unavailable. When ordering is available,
+`grouped` preserves Herdr Space order and `priority` promotes attention states.
 Connection and action failures are separate fields, not invented agent states.
 Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
 
-The Herdr adapter accepts protocol 19 from Herdr v0.8.0. A different value from `ping` produces
+The Herdr adapter accepts protocol 20 from the Omarchy Herdr v0.8.0.r13 base.
+A different value from `ping` produces
 an `incompatible` session with no agents, targets, actions, snapshot request,
 or event subscription; the daemon does not guess compatibility across a Herdr
 protocol boundary.
@@ -132,6 +139,10 @@ The only actions are:
   none exists.
 - `claude_desktop`: takes no agent or capability and applies the same
   focus-or-launch policy to the fixed Claude Desktop identity.
+- `order_grouped` and `order_priority`: take no agent or capability and apply
+  one typed, idempotent ordering value through Herdr's public API. The daemon
+  polls the same authoritative Herdr setting, so changes made in either UI
+  converge without a portal-owned preference.
 
 There is no method, key, text, shell-command, prompt, close, or server-control
 passthrough. Desktop actions do not accept a desktop ID, executable, title,

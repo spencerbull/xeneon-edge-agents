@@ -34,6 +34,14 @@ Fable 5 over a persistent ACP session. Any verified findings are fixed only on
 `claude-fable-review`, revalidated through the required software gates, and
 returned to the same reviewer until no substantive findings remained.
 
+The completed source theme-sync checkpoint makes portal chrome follow Omarchy's current
+runtime palette without copying a named theme. The project-owned QML reader
+watches Omarchy's stable theme-name beacon, reloads the atomically replaced
+`colors.toml`, validates an allowlisted palette, and retains the fixed agent
+state meanings while mapping their hues to the active theme's blue, yellow,
+green, and red roles.
+Installation and a physical theme switch remain a separate live gate.
+
 The active hotplug checkpoint replaces connector-pinned autostart with an
 event-driven lifecycle. The commissioned EDID, serial/model, and USB touch
 identity remain authoritative while the current connector becomes runtime
@@ -51,8 +59,9 @@ state; the daemon and portal run only while that exact hardware is present.
       user-owned configuration.
 - [x] Automated checks and completed independent reviews pass.
 - [x] Portal cards use the same public agent names as Herdr's Agents section.
-- [x] Agent colors, voice states, and ambient perimeter behavior match the
-      reviewed Codex Micro state contract with reduced-motion support.
+- [x] Agent colors, voice states, and ambient perimeter behavior retain the
+      reviewed Codex Micro meanings, use active Omarchy hue roles, and support
+      reduced motion.
 - [x] Ambient transition and orbital motion match the concept timing and
       hierarchy without changing portal action authority.
 - [x] Revised live laptop preview is visually compared with rectified concept
@@ -97,6 +106,7 @@ state; the daemon and portal run only while that exact hardware is present.
 | --- | --- | --- | --- |
 | Foundation and Rust adapter | `main` | Rust workspace, schemas, fixtures | Complete through `c32b5cd` |
 | Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Installed from reviewed v0.8.0 head `fd53378d`; not pushed |
+| Shared agent ordering | `xeneon-order-mode-sync` in `herdr-worktrees/xeneon-order-mode-sync` plus `omarchy-theme-sync` here | Herdr `agent.order.get/set`, adapter snapshot/action, QML toggle, ordering and motion tests | XENEON follow-up installed and independently reviewed; Herdr live handoff is blocked by the running server's 64-pane limit (67 panes present), so ordering remains unavailable |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
@@ -104,6 +114,7 @@ state; the daemon and portal run only while that exact hardware is present.
 | AI usage detail expansion | `main` | bounded usage protocol, AI dock, tests/docs | Complete, installed, and physically verified |
 | Full Claude Fable 5 review | `claude-fable-review` | complete tracked repository; preserve untracked `packaging/` artifacts | Complete: all 14 findings fixed and ACP re-review clean |
 | Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
+| Omarchy runtime theme sync | `omarchy-theme-sync` | project-owned QML palette reader, semantic chrome and state tokens, theme reload/fallback tests | Theme sync and semantic state roles installed, reviewed, and physically verified |
 | Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
 | Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
@@ -248,13 +259,123 @@ state; the daemon and portal run only while that exact hardware is present.
       Apps menu, launched it through that menu, rendered its success
       notification, kept already-running service PIDs stable, and separately
       restored a deliberately stopped portal through `gtk-launch` on DP-1.
-- [x] Herdr v0.8 compatibility gate: protocol-19 adapter fixture and full
-      repository software checks pass against the rebased Herdr API contract.
+- [x] Historical Herdr v0.8 compatibility gate: protocol-19 adapter fixture and
+      full repository software checks passed against that earlier rebased API
+      contract; the current protocol-20 checkpoint below supersedes it.
+- [x] Omarchy theme-sync base source gate: strict palette parsing and fallback
+      tests, repeated atomic theme-directory replacement in a source preview,
+      full QML lint/tests, 31 installer scenarios, Rust and ShellCheck gates,
+      plus independent review with no P0-P2 findings.
+- [x] Install the reviewed theme-sync base and verify its active Omarchy
+      palette renders on the physical EDGE.
+- [x] Finish review, install the semantic state-role follow-up, and verify the
+      theme-derived blue/yellow/green/red meanings on the physical EDGE.
+- [x] Restore Claude, Codex, and OpenCode capacity after Omarchy replaced the
+      legacy model-usage caches with schema-v1 agent records. Done requires
+      legacy compatibility, fail-closed normalized parsing, a read-only local
+      OpenCode fallback, Rust/full-repository gates, independent review, and
+      live EDGE verification with all three cards populated.
 - [ ] Physical hardware gate (hotplug, DPMS, suspend/resume, privacy,
       guarded-hold behavior, and DDC restore remain).
+- [ ] Fit 14 agents per fixed 2560x720 command-center page, keep the full
+      Claude/Codex quota-window labels visible, and show each card's Herdr
+      space name for dense grouping. Show up to the same 14 agents on a
+      bounded independent-lane ambient animation instead of the previous
+      six-node cap; full-motion lanes may intentionally cross and overlap,
+      while reduced motion stays static and evenly spaced.
+      Done requires QML gates,
+      independent review, a reviewed reinstall, a temporary 20-agent Herdr
+      population proving 14+6 pagination, physical EDGE screenshots, and
+      cleanup of only the disposable test tabs.
+- [ ] Synchronize the EDGE grouped/priority control with Herdr's authoritative
+      persisted ordering and restore the exact original independent ambient
+      motion through six agents while extending the same independent-lane
+      character through fourteen bounded nodes. Done requires Herdr and XENEON
+      tests, independent reviews, a
+      reviewed Herdr live handoff, physical toggle verification from both UIs,
+      and physical ambient visual QA.
 
 ## Current local state
 
+- Active goal (2026-08-13): replace the stock Omarchy Herdr protocol-20
+  installation with the reviewed custom fork rebased onto exact packaged commit
+  `0766aa57ee0ceb4410ae064e94c0f0557853eee7`, update XENEON for protocol 20,
+  and restore guarded actions plus grouped/priority synchronization. Done
+  requires focused and broad gates in both repositories, independent review,
+  a state-preserving Herdr live handoff, reviewed XENEON reinstall, live API
+  and physical EDGE verification, and cleanup of only loop-created resources.
+  Visible implementation worker `herdr_p20_impl` (Codex) runs in Herdr pane
+  `wW:pF`, tab `wW:t1`, workspace `wW`, cwd/worktree
+  `/home/sbull/src/github.com/spencerbull/herdr-worktrees/xeneon-order-mode-sync`,
+  branch `xeneon-order-mode-sync`; the orchestrator owns verification and pane
+  cleanup. A second visible Codex worker, `herdr_handoff_cap`, owns only the
+  bounded 79-pane live-handoff prerequisite in pane `wW:pG`, tab `wW:t1`,
+  workspace `wW`, cwd/worktree
+  `/home/sbull/src/github.com/spencerbull/herdr-worktrees/xeneon-handoff-capacity`,
+  branch `xeneon-handoff-capacity`; the orchestrator owns integration, review,
+  and cleanup. The XENEON independent pre-install review found three P2
+  acceptance/handoff gaps (explicit protocol-19 rejection, rendered degraded
+  reason coverage, and stale ledger evidence); all were remediated and the
+  final re-review is GO with no P0-P2 findings. XENEON is installed and live;
+  the Herdr branch is pushed and its reviewed package is built, but privileged
+  package installation remains at the visible sudo prompt. No PR is planned
+  against upstream under its external-contributor policy.
+
+- The 14-agent layout source and cleanup gates are complete: QML tests prove
+  14+6 pagination, a temporary 20-agent Herdr population physically verified
+  the first 14-card page plus the fourteen-node ambient view, and all 11
+  disposable tabs were closed. A physical second-page screenshot remains open.
+- The grouped/priority follow-up is source-complete in isolated Herdr branch
+  `xeneon-order-mode-sync`, now rebased onto exact Omarchy protocol-20 commit
+  `0766aa57` with a reviewed 128-descriptor handoff prerequisite for the current
+  79-pane session, plus the current XENEON branch. The integrated Herdr gate
+  passes 3,465 Rust tests, strict Clippy including Windows, UI/integration/
+  marketplace suites, and 98 maintenance/schema/docs/vendor tests. The current
+  XENEON gate passes 78 Rust core tests, 104 Qt tests, 27 Python contracts, and
+  all 31 installer scenarios. The final XENEON re-review is GO; the reviewed
+  release binaries and full Quickshell tree are installed. Live validation
+  reports one connected protocol-20 session with 18 agents, zero service
+  restarts, 0-1% sampled daemon CPU after replacing the stale release artifact,
+  clean `scripts/check.sh`/`hyprctl configerrors`, and a visually inspected
+  2560x720 EDGE frame with 14 cards on page one. The prior reviewed Herdr
+  handoff made no state change because the
+  then-running server had 67 panes and v0.8.0 refused more than 64. The retained
+  backup remains available. The custom Herdr branch is pushed to the fork at
+  `51af53be`; its epoch-1 Arch package is built and reviewed, but awaits the
+  user's sudo password. The running stock server remains intentionally intact,
+  so ordering is unavailable in the portal until a future controlled cold
+  restart activates the installed fork; the stock 64-descriptor exporter cannot
+  preserve the current 79-plus-pane session through a live handoff.
+  The previously reviewed XENEON side is installed: physical EDGE frames
+  with 14 agents confirm the bounded independent lanes change relative order,
+  cross, and overlap instead of moving as a rigid revolving formation. Both
+  application services remained active with zero restarts during that check.
+
+- `omarchy-theme-sync` is based on current `origin/main` and contains the
+  uncommitted theme integration plus a semantic state-role follow-up. The
+  theme/QML and usage-remediation source is installed and physically verified
+  but is not yet committed or pushed.
+- Production reinstall reverified the exact DP-2 EDID, XENEON serial/model,
+  and USB touchscreen identity before activation, then correctly followed the
+  same hardware after connector drift to live `DP-1`. The deployed Quickshell
+  tree matches current source. Both services are active with zero restarts,
+  the lifecycle reports `state=running`, and one inspected portal layer
+  renders only on the XENEON using the active `rebel-rebel` palette.
+- The source preview followed the real `rebel-rebel` palette and an isolated
+  atomic purple-to-cyan theme replacement without restart. A final current
+  fixture preview was visually inspected and closed cleanly.
+- Theme validation passes 27 Python QML contracts, 93 Qt tests, all 31
+      installer scenarios, 60 Rust core tests, the CLI fixture test, Clippy,
+      rustfmt, ShellCheck, and `git diff --check`.
+- The August 11 Omarchy usage migration regression is fixed in the installed
+  daemon. Claude and Codex consume fresh fail-closed schema-v1 Omarchy records;
+  OpenCode derives its documented local soft-budget signal from bounded scalar
+  counters in the read-only message ledger. Two independent final reviews
+  reported no P0-P2 findings. Full gates pass: 68 Rust core tests plus the CLI
+  fixture, strict Clippy/rustfmt, 27 Python and 93 Qt QML tests, 30 installer
+  scenarios, ShellCheck, and `git diff --check`. The live snapshot reports all
+  three providers available and fresh, and the physical DP-1 EDGE screenshot
+  shows populated Claude 9%/4%, Codex 58%, and OpenCode 1%/0% cards.
 - PR #2 is squash-merged on `main` at `7eb773c`, including the reviewed
   physical commissioning, naming/voice/ring UX, card accents, and persistent
   display controls.
@@ -277,8 +398,8 @@ state; the daemon and portal run only while that exact hardware is present.
   reset timing, plan/freshness and explicit status, plus bounded aggregate
   today/hour activity when available; no prompts, per-model history,
   credentials, or raw provider payloads cross the protocol.
-- The uncommitted `claude-fable-review` remediation isolates Herdr refreshes
-  from the privacy-sensitive collector loop, fails closed on non-17 Herdr
+- The uncommitted remediation isolates Herdr refreshes
+  from the privacy-sensitive collector loop, fails closed on non-20 Herdr
   protocols and untrusted usage text, repairs QML recovery behavior, removes
   the retired HealthStrip, and adds ShellCheck plus an Arch/Quickshell CI gate.
 - Portal preferences persist at

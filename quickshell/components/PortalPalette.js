@@ -1,15 +1,7 @@
 .pragma library
 
-// Mirrors the reviewed Codex Micro status palette. QML owns only presentation;
-// daemon and Herdr state remain authoritative.
-var working = "#0066ff"
-var blocked = "#ffaa00"
-var review = "#00ff00"
-var idle = "#303030"
-var error = "#ff2020"
-var unknown = "#300840"
-var recording = "#2e8b57"
-var processing = "#ffffff"
+// Maps authoritative state meaning onto the active Omarchy palette. QML owns
+// only presentation; daemon and Herdr state remain authoritative.
 
 function effectiveAgentState(agent) {
     if (agent === null || agent === undefined)
@@ -25,18 +17,18 @@ function effectiveAgentState(agent) {
     return "unknown"
 }
 
-function agentColor(agent) {
+function agentColor(agent, theme) {
     switch (effectiveAgentState(agent)) {
     case "working":
-        return working
+        return theme.blue
     case "blocked":
-        return blocked
+        return theme.yellow
     case "review":
-        return review
+        return theme.green
     case "idle":
-        return idle
+        return theme.muted
     default:
-        return unknown
+        return theme.magenta
     }
 }
 
@@ -84,23 +76,23 @@ function perimeterMode(agents) {
     return hasWorking ? "working" : "off"
 }
 
-function ambientColor(mode) {
+function ambientColor(mode, theme) {
     switch (mode) {
     case "voice-recording":
-        return recording
+        return theme.green
     case "voice-processing":
-        return processing
+        return theme.cyan
     case "voice-error":
     case "error":
-        return error
+        return theme.red
     case "blocked":
-        return blocked
+        return theme.yellow
     case "review":
-        return review
+        return theme.green
     case "working":
-        return working
+        return theme.blue
     default:
-        return "#000000"
+        return theme.muted
     }
 }
 

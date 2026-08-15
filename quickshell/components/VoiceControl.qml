@@ -1,10 +1,11 @@
 import QtQuick
-import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property var voice: ({})
+    property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property bool actionsEnabled: true
     property bool pressOwned: false
@@ -20,12 +21,30 @@ Item {
     readonly property bool available: voice.available === true
     readonly property bool daemonOwned: voice.owned === true
     readonly property color accent: voiceState === "recording"
-        ? Palette.recording
+        ? theme.green
         : voiceState === "processing"
-            ? Palette.processing
+            ? theme.cyan
             : voiceState === "error"
-                ? Palette.error
-                : "#6f8ba8"
+                ? theme.red
+                : theme.muted
+    readonly property color controlBackground:
+        pressHandler.pressed || voiceState === "recording"
+            ? ThemePalette.mixColors(
+                String(theme.surfaceRaised),
+                String(accent),
+                0.2
+            )
+            : theme.surfaceRaised
+    readonly property color readableAccent: ThemePalette.ensureContrast(
+        String(accent),
+        String(controlBackground),
+        4.5
+    )
+    readonly property color readableSecondary: ThemePalette.ensureContrast(
+        String(theme.textMuted),
+        String(controlBackground),
+        4.5
+    )
     readonly property bool ownedError: voiceState === "error"
         && daemonOwned
     readonly property string stateLabel: voiceState === "recording"
@@ -92,9 +111,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: height / 2
-        color: pressHandler.pressed || root.voiceState === "recording"
-            ? Qt.alpha(root.accent, 0.2)
-            : "#0b1422"
+        color: root.controlBackground
         border.width: root.voiceState === "recording" ? 2 : 1
         border.color: Qt.alpha(root.accent, root.available ? 0.72 : 0.28)
 
@@ -194,7 +211,7 @@ Item {
             width: parent.width
             text: root.stateLabel
             textFormat: Text.PlainText
-            color: root.accent
+            color: root.readableAccent
             elide: Text.ElideRight
             font {
                 family: "monospace"
@@ -216,7 +233,7 @@ Item {
                             : "RETRY OR CHECK VOXTYPE"
                     : "OMARCHY // VOXTYPE"
             textFormat: Text.PlainText
-            color: "#617f9c"
+            color: root.readableSecondary
             elide: Text.ElideRight
             font {
                 family: "monospace"
@@ -241,9 +258,11 @@ Item {
         width: 68
         height: parent.height - 14
         radius: height / 2
-        color: cancelHandler.pressed ? "#401420" : "#22101a"
+        color: cancelHandler.pressed
+            ? Qt.alpha(root.theme.red, 0.28)
+            : Qt.alpha(root.theme.red, 0.14)
         border.width: 1
-        border.color: "#8f3a55"
+        border.color: root.theme.red
         z: 4
 
         Accessible.role: Accessible.Button
@@ -260,7 +279,11 @@ Item {
             anchors.centerIn: parent
             text: "CANCEL"
             textFormat: Text.PlainText
-            color: "#ff789a"
+            color: ThemePalette.ensureContrast(
+                String(root.theme.red),
+                String(root.theme.surfaceRaised),
+                4.5
+            )
             font {
                 family: "monospace"
                 pixelSize: 10

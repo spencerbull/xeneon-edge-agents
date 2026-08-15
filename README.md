@@ -79,16 +79,34 @@ scripts/preview --live --ambient-after 6
 ```
 
 The control center shows safe Herdr identity, state duration, repository and
-worktree context, plus the Omarchy AI module's normalized Claude, Codex, and
-OpenCode capacity. The AI footer shows both reported usage windows, resets,
-plan/freshness state, and bounded today/hour token activity when available.
+worktree context, plus normalized Claude, Codex, and OpenCode capacity. The
+daemon consumes Omarchy's schema-v1 Claude/Codex agent records, keeps legacy
+cache compatibility, and derives OpenCode's local soft-budget windows from its
+newly processed token counters (input, output, reasoning, and cache-write;
+reused cache-read context is excluded) in the
+read-only SQLite message ledger. The AI footer shows both reported usage
+windows, resets, plan/freshness state, and bounded today/hour token activity
+when available.
 Header controls use typed daemon actions to focus or launch the fixed ChatGPT
 Desktop and Claude Desktop entries. The Micro control opens a read-only virtual
 projection of the connected device and current agent slots.
+The Order control reads and writes Herdr's own grouped/priority setting, so the
+Herdr Agents panel and EDGE cards stay synchronized instead of keeping separate
+preferences.
 The upper-right Motion and Screen controls are shared by the command-center
 and Ambient views. Motion snaps the ambient constellation to fixed positions
 and removes perimeter/trail animation; Screen applies a reversible near-black
 portal veil. These presentation settings persist across portal restarts.
+
+Portal chrome follows Omarchy's active runtime theme. The named Quickshell
+configuration reads the allowlisted colors in
+`$XDG_STATE_HOME/omarchy/current/theme/colors.toml` and watches the stable
+`theme.name` file, so `omarchy theme set` updates backgrounds, surfaces, text,
+borders, and semantic accents without restarting the portal. Missing or
+invalid colors fall back safely. State meaning stays stable while its hue comes
+from the active theme: working uses blue, blocked uses yellow, review-ready
+uses green, and errors use red. Light Omarchy themes are translated into
+contrast-checked dark EDGE chrome while retaining their palette hues.
 
 The live preview exposes the real narrow agent-focus, desktop-app, and voice
 actions. Voice

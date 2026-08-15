@@ -219,6 +219,15 @@ TestCase {
     function test_agentCardUsesAuthoritativeStateAgeWithoutGenericSummary() {
         compare(hostileCard.processLine(), "WORKING  ·  1S IN STATE")
         compare(hostileCard.contextLine(), "<b>workspace</b>")
+        compare(hostileCard.spaceLine(), "SPACE // <b>workspace</b>")
+        var spaceName = findChild(hostileCard, "agentSpaceName")
+        verify(spaceName !== null)
+        compare(spaceName.textFormat, Text.PlainText)
+        verify(
+            hostileCard.Accessible.description.indexOf(
+                "SPACE // <b>workspace</b>"
+            ) >= 0
+        )
     }
 
     function test_agentCardHasOneWholeCardFocusAction() {
