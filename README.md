@@ -107,6 +107,12 @@ invalid colors fall back safely. State meaning stays stable while its hue comes
 from the active theme: working uses blue, blocked uses yellow, review-ready
 uses green, and errors use red. Light Omarchy themes are translated into
 contrast-checked dark EDGE chrome while retaining their palette hues.
+The top-right Palette control shows the live Omarchy swatches and lets you map
+those allowlisted theme roles onto XENEON's Ready, Success, Working, Needs
+Help, Review Ready, Error, Unknown, Recording, and Processing meanings. Mappings
+apply immediately to the command center and Ambient view, persist beside the
+Motion and Screen preferences, and can be reset to the reviewed defaults.
+Arbitrary colors are not accepted; chrome and text contrast remain automatic.
 
 The live preview exposes the real narrow agent-focus, desktop-app, and voice
 actions. Voice

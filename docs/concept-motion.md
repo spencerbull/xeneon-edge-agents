@@ -32,7 +32,9 @@ the source.
 - Narrow uppercase monospaced display type with generous tracking.
 - Bright ice/cyan system copy and low-contrast blue-gray metadata.
 - Agent color retains the reviewed Codex Micro semantic meaning while taking
-  its blue/yellow/green/error hues from the active Omarchy palette. Capsule
+  its default blue/yellow/green/error hues from the active Omarchy palette.
+  The Palette pane can remap each XENEON meaning to another current-theme
+  swatch without changing the authoritative state. Capsule
   strokes, quiet glow layers, and their trail segments share the same state
   accent.
 - The strong halo is an on-canvas tapered after-image. Overlapping segments
@@ -44,10 +46,10 @@ the source.
   evenly spaced nodes.
 - The perimeter light is one GPU-blurred status bloom with two opposing
   clockwise runners, short soft glints, and six bounded trailing motes per
-  runner. It represents active agent execution only: working is blue, blocked
-  is amber, and the halo disappears when every agent is idle or no agent is
-  present. Voice and review-ready state remain explicit in the center/header
-  treatments instead of creating unrelated edge motion.
+  runner. It represents active agent execution only: working and blocked use
+  their configured semantic roles, and the halo disappears when every agent
+  is idle or no agent is present. Voice and review-ready state remain explicit
+  in the center/header treatments instead of creating unrelated edge motion.
 - Voice can override the center and ambient treatment through the existing
   bounded `idle`, `recording`, `processing`, `error`, and `unavailable`
   protocol states. QML does not infer audio level or transcript content.

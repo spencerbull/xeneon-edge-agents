@@ -7,12 +7,15 @@ Item {
     property bool motionReduced: false
     property bool dimmed: false
     property bool motionForced: false
+    property bool paletteOpen: false
+    property bool paletteCustom: false
     property var theme: ThemePalette.fallback
 
     signal motionToggleRequested()
     signal dimToggleRequested()
+    signal paletteToggleRequested()
 
-    width: 200
+    width: 304
     height: 52
 
     Row {
@@ -46,6 +49,22 @@ Item {
             theme: root.theme
             checked: root.dimmed
             onToggled: root.dimToggleRequested()
+        }
+
+        DisplaySettingButton {
+            objectName: "paletteSettingButton"
+            width: 96
+            height: parent.height
+            label: "PALETTE"
+            stateLabel: root.paletteOpen
+                ? "OPEN"
+                : root.paletteCustom
+                    ? "CUSTOM"
+                    : "THEME"
+            accent: root.theme.accent
+            theme: root.theme
+            checked: root.paletteOpen || root.paletteCustom
+            onToggled: root.paletteToggleRequested()
         }
     }
 }

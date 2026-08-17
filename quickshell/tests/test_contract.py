@@ -444,6 +444,7 @@ class QmlSafetyContractTests(unittest.TestCase):
         shell = source("shell.qml")
         portal = source("components/PortalView.qml")
         controls = source("components/DisplaySettingsControls.qml")
+        palette_pane = source("components/PaletteSettingsPane.qml")
         button = source("components/DisplaySettingButton.qml")
         ring = source("components/AmbientRing.qml")
         service = (ROOT.parent / "config/systemd/user/"
@@ -462,9 +463,21 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn('category: "display"', shell)
         self.assertIn("property bool reduceMotion: false", shell)
         self.assertIn("property bool dimmed: false", shell)
+        for setting in (
+            'readyColorRole: "muted"',
+            'successColorRole: "green"',
+            'workingColorRole: "blue"',
+            'needsHelpColorRole: "yellow"',
+            'reviewReadyColorRole: "green"',
+            'errorColorRole: "red"',
+            'unknownColorRole: "magenta"',
+            'recordingColorRole: "green"',
+            'processingColorRole: "cyan"',
+        ):
+            self.assertIn(setting, shell)
         self.assertEqual(
             shell.count("preferences: portalPreferences"),
-            2,
+            3,
         )
 
         self.assertEqual(portal.count("DisplaySettingsControls {"), 1)
@@ -483,12 +496,14 @@ class QmlSafetyContractTests(unittest.TestCase):
 
         self.assertIn('label: "MOTION"', controls)
         self.assertIn('label: "SCREEN"', controls)
+        self.assertIn('label: "PALETTE"', controls)
         self.assertIn('stateLabel: root.dimmed ? "MINIMUM" : "NORMAL"', controls)
         self.assertIn("Accessible.role: Accessible.Button", button)
         self.assertIn("TapHandler.ReleaseWithinBounds", button)
         self.assertIn("property bool suppressRunners: false", ring)
         self.assertIn('mode !== "off" && !suppressRunners', ring)
         self.assertNotIn("Process {", controls)
+        self.assertNotIn("Process {", palette_pane)
         self.assertNotIn("Process {", button)
         self.assertEqual(len(re.findall(r"\bProcess\s*\{", qml)), 1)
 
@@ -505,7 +520,9 @@ class QmlSafetyContractTests(unittest.TestCase):
         shell = source("shell.qml")
         theme = source("state/OmarchyTheme.qml")
         palette = source("state/ThemePalette.js")
+        mapped_theme = source("state/MappedTheme.qml")
         status_palette = source("components/PortalPalette.js")
+        palette_pane = source("components/PaletteSettingsPane.qml")
         agent_card = source("components/AgentCard.qml")
         ai_usage = source("components/AiUsageDock.qml")
         ambient = source("components/AmbientView.qml")
@@ -520,6 +537,7 @@ class QmlSafetyContractTests(unittest.TestCase):
         )
 
         self.assertEqual(shell.count("OmarchyTheme {"), 1)
+        self.assertEqual(shell.count("MappedTheme {"), 1)
         self.assertIn('Quickshell.env("XDG_STATE_HOME")', theme)
         self.assertIn('/omarchy/current"', theme)
         self.assertIn('readonly property string themeNamePath:', theme)
@@ -546,18 +564,34 @@ class QmlSafetyContractTests(unittest.TestCase):
 
         self.assertIn("function validColor(value)", palette)
         self.assertIn("function parse(text)", palette)
-        self.assertIn("return theme.blue", status_palette)
-        self.assertIn("return theme.yellow", status_palette)
-        self.assertIn("return theme.green", status_palette)
-        self.assertIn("return theme.red", status_palette)
+        self.assertIn("function selectableRole(value, fallbackRole)", palette)
+        self.assertIn("function roleColor(theme, role, fallbackRole)", palette)
+        for role in (
+            "theme.working",
+            "theme.needsHelp",
+            "theme.reviewReady",
+            "theme.error",
+            "theme.ready",
+            "theme.unknown",
+            "theme.recording",
+            "theme.processing",
+        ):
+            self.assertIn(role, status_palette)
         self.assertNotRegex(status_palette, r"#[0-9A-Fa-f]{6,8}")
         self.assertIn("String(theme.surface)", ambient)
         self.assertNotIn("String(theme.canvas),\n        4.5", ambient)
 
-        # Omarchy owns chrome and semantic hues. State meaning remains stable
-        # through role mapping, while text variants are contrast normalized.
-        self.assertIn("accent: root.theme.green", agent_card)
-        self.assertIn("accent: root.theme.red", agent_card)
+        # Omarchy owns the source hues. XENEON persists only allowlisted role
+        # names and maps explicit app meanings while text remains normalized.
+        self.assertIn('mappedColor("workingColorRole", "blue")', mapped_theme)
+        self.assertIn('mappedColor("successColorRole", "green")', mapped_theme)
+        self.assertIn('mappedColor("needsHelpColorRole", "yellow")', mapped_theme)
+        self.assertIn('mappedColor("reviewReadyColorRole", "green")', mapped_theme)
+        self.assertIn('mappedColor("errorColorRole", "red")', mapped_theme)
+        self.assertIn("ThemePalette.selectableRoles.indexOf(role) < 0", palette_pane)
+        self.assertNotIn("property color", palette_pane)
+        self.assertIn("accent: root.theme.reviewReady", agent_card)
+        self.assertIn("accent: root.theme.error", agent_card)
         self.assertIn("color: root.cardBackground", agent_card)
         self.assertIn("String(cardBackground)", agent_card)
         self.assertIn("color: root.readablePrimary", agent_card)
@@ -565,9 +599,10 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("String(statePillBackground)", agent_card)
         self.assertIn("color: root.readablePillAccent", agent_card)
         self.assertIn("microStatusColor: store.micro.connected", portal)
-        self.assertIn("degradedColor: theme.yellow", portal)
+        self.assertIn("? theme.success\n        : theme.error", portal)
+        self.assertIn("degradedColor: theme.needsHelp", portal)
         self.assertIn("toastColor: toastSuccess", portal)
-        self.assertIn("border.color: root.theme.red", voice)
+        self.assertIn("border.color: root.theme.error", voice)
         self.assertIn("String(controlBackground)", voice)
         self.assertIn("color: root.readableSecondary", voice)
         self.assertIn("root.readableColor(accent)", ai_usage)
@@ -586,8 +621,9 @@ class QmlSafetyContractTests(unittest.TestCase):
         )
         self.assertNotIn("? root.theme.green", micro_drawer)
         self.assertNotIn("? root.theme.red", micro_drawer)
-        self.assertIn("return root.theme.muted", micro_drawer)
-        self.assertIn('? theme.muted\n        : Palette.ambientColor', ambient)
+        self.assertIn("? theme.success\n        : theme.error", micro_drawer)
+        self.assertIn("return root.theme.ready", micro_drawer)
+        self.assertIn('? theme.ready\n        : Palette.ambientColor', ambient)
 
         # The only literal left in production QML is the intentional black
         # minimum-screen veil. Theme defaults live in the reviewed palette JS;

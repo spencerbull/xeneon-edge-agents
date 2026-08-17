@@ -20,15 +20,15 @@ function effectiveAgentState(agent) {
 function agentColor(agent, theme) {
     switch (effectiveAgentState(agent)) {
     case "working":
-        return theme.blue
+        return theme.working
     case "blocked":
-        return theme.yellow
+        return theme.needsHelp
     case "review":
-        return theme.green
+        return theme.reviewReady
     case "idle":
-        return theme.muted
+        return theme.ready
     default:
-        return theme.magenta
+        return theme.unknown
     }
 }
 
@@ -79,20 +79,20 @@ function perimeterMode(agents) {
 function ambientColor(mode, theme) {
     switch (mode) {
     case "voice-recording":
-        return theme.green
+        return theme.recording
     case "voice-processing":
-        return theme.cyan
+        return theme.processing
     case "voice-error":
     case "error":
-        return theme.red
+        return theme.error
     case "blocked":
-        return theme.yellow
+        return theme.needsHelp
     case "review":
-        return theme.green
+        return theme.reviewReady
     case "working":
-        return theme.blue
+        return theme.working
     default:
-        return theme.muted
+        return theme.ready
     }
 }
 

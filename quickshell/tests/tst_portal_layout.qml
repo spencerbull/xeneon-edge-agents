@@ -65,7 +65,11 @@ TestCase {
         id: mockActivity
 
         property bool ambientMode: false
-        function noteUserActivity() {}
+        property int noteCount: 0
+        function noteUserActivity() {
+            noteCount += 1
+            ambientMode = false
+        }
     }
 
     QtObject {
@@ -73,7 +77,17 @@ TestCase {
 
         property bool reduceMotion: false
         property bool dimmed: false
-        function sync() {}
+        property string readyColorRole: "muted"
+        property string successColorRole: "green"
+        property string workingColorRole: "blue"
+        property string needsHelpColorRole: "yellow"
+        property string reviewReadyColorRole: "green"
+        property string errorColorRole: "red"
+        property string unknownColorRole: "magenta"
+        property string recordingColorRole: "green"
+        property string processingColorRole: "cyan"
+        property int syncCount: 0
+        function sync() { syncCount += 1 }
     }
 
     PortalView {
@@ -125,6 +139,19 @@ TestCase {
         mockBridge.orderRequests = 0
         mockBridge.lastOrder = ""
         portal.pendingAgentOrderRequest = ""
+        portal.paletteSettingsOpen = false
+        mockPreferences.readyColorRole = "muted"
+        mockPreferences.successColorRole = "green"
+        mockPreferences.workingColorRole = "blue"
+        mockPreferences.needsHelpColorRole = "yellow"
+        mockPreferences.reviewReadyColorRole = "green"
+        mockPreferences.errorColorRole = "red"
+        mockPreferences.unknownColorRole = "magenta"
+        mockPreferences.recordingColorRole = "green"
+        mockPreferences.processingColorRole = "cyan"
+        mockPreferences.syncCount = 0
+        mockActivity.ambientMode = false
+        mockActivity.noteCount = 0
         portal.currentPage = 0
         wait(0)
     }
@@ -132,6 +159,7 @@ TestCase {
     function cleanup() {
         mockStore.agents = []
         portal.currentPage = 0
+        portal.paletteSettingsOpen = false
         wait(0)
     }
 
@@ -244,5 +272,78 @@ TestCase {
         compare(label.text, "DEGRADED // " + reason.toUpperCase())
         compare(label.textFormat, Text.PlainText)
         verify(label.truncated)
+    }
+
+    function test_palettePaneMapsAllowlistedThemeRolesAndResets() {
+        var controls = findChild(portal, "globalDisplaySettings")
+        var toggle = findChild(controls, "paletteSettingButton")
+        var pane = findChild(portal, "paletteSettingsPane")
+        var scrim = findChild(portal, "paletteModalScrim")
+        var dimmer = findChild(portal, "displayDimmer")
+        verify(controls !== null)
+        verify(toggle !== null)
+        verify(pane !== null)
+        verify(scrim !== null)
+        verify(dimmer !== null)
+        compare(toggle.stateLabel, "THEME")
+        verify(toggle.activate())
+        compare(portal.paletteSettingsOpen, true)
+        compare(pane.open, true)
+        compare(toggle.stateLabel, "OPEN")
+        compare(mockActivity.noteCount, 1)
+        verify(pane.x >= 0)
+        verify(pane.y >= 0)
+        verify(pane.x + pane.width <= portal.width)
+        verify(pane.y + pane.height <= portal.height)
+        verify(scrim.z < pane.z)
+        verify(pane.z < dimmer.z)
+
+        var lastChoice = findChild(
+            pane, "paletteRole_processing_magenta"
+        )
+        verify(lastChoice !== null)
+        verify(lastChoice.x + lastChoice.width <= pane.width)
+        verify(lastChoice.y + lastChoice.height <= pane.height)
+
+        var redWorking = findChild(pane, "paletteRole_working_red")
+        verify(redWorking !== null)
+        verify(redWorking.activate())
+        compare(mockPreferences.workingColorRole, "red")
+        compare(mockPreferences.syncCount, 1)
+        compare(mockActivity.noteCount, 2)
+        compare(pane.customized, true)
+
+        var close = findChild(pane, "paletteCloseButton")
+        verify(close.activate())
+        compare(portal.paletteSettingsOpen, false)
+        compare(toggle.stateLabel, "CUSTOM")
+
+        portal.paletteSettingsOpen = true
+        var reset = findChild(pane, "paletteResetButton")
+        verify(reset.enabled)
+        verify(reset.activate())
+        compare(mockPreferences.workingColorRole, "blue")
+        compare(mockPreferences.syncCount, 2)
+        compare(pane.customized, false)
+        compare(pane.setMapping("working", "not-a-theme-role"), false)
+        compare(mockPreferences.workingColorRole, "blue")
+
+        mockPreferences.workingColorRole = "not-a-theme-role"
+        compare(pane.customized, true)
+        compare(pane.selectionFor("working", "blue"), "blue")
+        verify(reset.activate())
+        compare(mockPreferences.workingColorRole, "blue")
+    }
+
+    function test_palettePaneWakesAmbientAndClosesBeforeReentry() {
+        mockActivity.ambientMode = true
+        wait(0)
+        verify(portal.togglePaletteSettings())
+        compare(portal.paletteSettingsOpen, true)
+        compare(mockActivity.ambientMode, false)
+        compare(mockActivity.noteCount, 1)
+
+        mockActivity.ambientMode = true
+        tryCompare(portal, "paletteSettingsOpen", false)
     }
 }

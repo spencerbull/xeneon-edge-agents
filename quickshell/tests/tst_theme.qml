@@ -21,7 +21,8 @@ TestCase {
         compare(parsed.foreground, "#abcdef")
         compare(parsed.muted, "#334455")
         compare(parsed.accent, "#102030")
-        verify(parsed.unknown === undefined)
+        compare(parsed.unknown, parsed.magenta)
+        verify(parsed.unknown !== "#ffffff")
     }
 
     function test_invalidOrPartialPaletteUsesSafeDefaults() {

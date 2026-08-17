@@ -195,7 +195,10 @@ TestCase {
 
     function test_reviewReadyUsesExactPaletteAndPlainText() {
         compare(reviewNode.agentState, "review")
-        compare(String(reviewNode.accent), String(reviewNode.theme.green))
+        compare(
+            String(reviewNode.accent),
+            String(reviewNode.theme.reviewReady)
+        )
 
         var label = findChild(reviewNode, "ambientAgentDisplayName")
         verify(label !== null)

@@ -163,7 +163,7 @@ Item {
         if (state === "LIVE")
             return accent
         if (state === "WARNING" || state === "STALE")
-            return theme.yellow
+            return theme.needsHelp
         if (state === "NO DATA")
             return theme.textMuted
         return theme.orange
@@ -205,7 +205,7 @@ Item {
                 id: windowLabel
 
                 objectName: "usageLabel_" + providerId + "_" + windowRole
-                width: 128
+                width: Math.max(128, Math.ceil(implicitWidth) + 2)
                 anchors.verticalCenter: parent.verticalCenter
                 text: usageWindow === null
                     ? ""
@@ -222,7 +222,11 @@ Item {
             }
 
             Rectangle {
-                width: Math.max(60, parent.width - 128 - 42 - 112 - 24)
+                width: Math.max(
+                    60,
+                    parent.width - windowLabel.width - 42 - 112
+                        - parent.spacing * 3
+                )
                 height: 6
                 anchors.verticalCenter: parent.verticalCenter
                 radius: 3

@@ -8,6 +8,7 @@ Item {
     required property var activity
     required property var preferences
     required property var theme
+    property var sourceTheme: theme
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
@@ -45,6 +46,7 @@ Item {
             activity: root.activity
             preferences: root.preferences
             theme: root.theme
+            sourceTheme: root.sourceTheme
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.restoreVoiceFocus

@@ -34,7 +34,7 @@ Item {
         connectionState
     )
     readonly property color modeAccent: mode === "off"
-        ? theme.muted
+        ? theme.ready
         : Palette.ambientColor(mode, theme)
     readonly property color readableModeAccent: ThemePalette.ensureContrast(
         String(modeAccent),

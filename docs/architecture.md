@@ -21,6 +21,14 @@ Light desktop palettes are mapped to a dark-adaptive command surface and small
 semantic text roles are normalized to at least 4.5:1 contrast against their
 surface; primary text targets 7:1.
 
+The user-owned portal preferences persist only allowlisted Omarchy role names
+for nine XENEON meanings: Ready, Success, Working, Needs Help, Review Ready,
+Error, Unknown, Recording, and Processing. A presentation-only mapped-theme object
+resolves those names against the current live palette, so switching the
+Omarchy theme preserves the mapping intent while replacing every source hue.
+Invalid or missing selections fail closed to the reviewed defaults. The editor
+cannot store arbitrary colors or alter background, surface, or text roles.
+
 ```text
 Herdr public sockets     /proc, /sys, Hyprland
 AI usage records/DB        Voxtype, microd

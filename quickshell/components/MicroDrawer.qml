@@ -13,8 +13,8 @@ Item {
     property var agents: []
     property var voice: ({"state": "unavailable", "owned": false})
     readonly property color connectionColor: micro.connected
-        ? theme.green
-        : theme.red
+        ? theme.success
+        : theme.error
     readonly property color readableConnectionColor: readableStateColor(
         connectionColor,
         theme.surface
@@ -52,19 +52,19 @@ Item {
     function ringColor() {
         switch (ringState()) {
         case "recording":
-            return root.theme.green
+            return root.theme.recording
         case "processing":
-            return root.theme.cyan
+            return root.theme.processing
         case "error":
-            return root.theme.red
+            return root.theme.error
         case "blocked":
-            return root.theme.yellow
+            return root.theme.needsHelp
         case "review":
-            return root.theme.green
+            return root.theme.reviewReady
         case "working":
-            return root.theme.blue
+            return root.theme.working
         default:
-            return root.theme.muted
+            return root.theme.ready
         }
     }
 
@@ -115,7 +115,7 @@ Item {
         border.width: 1
         border.color: root.micro.connected
             ? root.theme.borderStrong
-            : root.theme.red
+            : root.theme.error
 
         Column {
             anchors {

@@ -270,6 +270,12 @@ state; the daemon and portal run only while that exact hardware is present.
       palette renders on the physical EDGE.
 - [x] Finish review, install the semantic state-role follow-up, and verify the
       theme-derived blue/yellow/green/red meanings on the physical EDGE.
+- [ ] Add a top-right persisted Palette pane that shows the current Omarchy
+      swatches and maps allowlisted roles onto Ready, Success, Working, Needs
+      Help, Review Ready, Error, Unknown, Recording, and Processing. Done requires
+      focused and full QML gates, hosted CI, independent review, a reviewed
+      reinstall, and physical verification in command-center and Ambient
+      views across at least two Omarchy themes.
 - [x] Restore Claude, Codex, and OpenCode capacity after Omarchy replaced the
       legacy model-usage caches with schema-v1 agent records. Done requires
       legacy compatibility, fail-closed normalized parsing, a read-only local
@@ -352,9 +358,24 @@ state; the daemon and portal run only while that exact hardware is present.
   application services remained active with zero restarts during that check.
 
 - `omarchy-theme-sync` is based on current `origin/main` and contains the
-  uncommitted theme integration plus a semantic state-role follow-up. The
-  theme/QML and usage-remediation source is installed and physically verified
-  but is not yet committed or pushed.
+  pushed theme integration, semantic state-role follow-up, dense layout,
+  protocol-20 adapter, and usage remediation in draft PR #7. A persisted
+  allowlisted Palette pane and the hosted font-metric fix are now being added
+  before merge; neither incremental change is installed or pushed yet.
+  Independent read-only reviewer `xeneon_palette_review` (Claude) completed
+  the review/fix/re-review loop with no remaining P0-P2 findings; its Herdr
+  pane `wW:pN` was closed after graceful agent exit. Physical pane/two-theme
+  QA, push, and hosted CI remain. Final local
+  revalidation passes 78 Rust core tests, the CLI test, strict Clippy/rustfmt,
+  ShellCheck, 27 Python and 112 Qt QML tests, all 31 installer scenarios, and
+  `git diff --check`. The reviewed tree is installed after exact output/touch
+  preflight; both services are active with zero restarts, installed Quickshell
+  files match source, and Hyprland reports no config errors. A compositor-native
+  2560x720 Tokyo Night capture confirms the new Palette button and 14-card
+  command-center layout. The installed `cua-driver` 0.7.1 cannot capture this
+  multi-monitor Wayland layer surface (`GetImage` Match failure), so opening
+  the pane and two-theme physical QA remain human/live gates; no CUA action was
+  attempted after capture failed.
 - Production reinstall reverified the exact DP-2 EDID, XENEON serial/model,
   and USB touchscreen identity before activation, then correctly followed the
   same hardware after connector drift to live `DP-1`. The deployed Quickshell

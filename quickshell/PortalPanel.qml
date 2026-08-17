@@ -12,6 +12,7 @@ PanelWindow {
     required property var activity
     required property var preferences
     required property var theme
+    required property var sourceTheme
     property bool reducedMotion: false
     property string hostName: "LOCAL"
     property bool recoveryVisible: true
@@ -99,6 +100,7 @@ PanelWindow {
         activity: root.activity
         preferences: root.preferences
         theme: root.theme
+        sourceTheme: root.sourceTheme
         reducedMotion: root.reducedMotion
         previewMode: false
         hostName: root.hostName

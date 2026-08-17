@@ -19,6 +19,37 @@ var rawFallback = {
     orange: "#e89562"
 }
 
+var selectableRoles = [
+    "accent",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "cyan",
+    "blue",
+    "magenta",
+    "muted"
+]
+
+function selectableRole(value, fallbackRole) {
+    var requested = String(value || "").toLowerCase()
+    if (selectableRoles.indexOf(requested) >= 0)
+        return requested
+    return selectableRoles.indexOf(fallbackRole) >= 0
+        ? fallbackRole
+        : "accent"
+}
+
+function roleColor(theme, role, fallbackRole) {
+    var name = selectableRole(role, fallbackRole)
+    var value = theme === null || theme === undefined
+        ? undefined
+        : theme[name]
+    if (value !== undefined && value !== null && String(value) !== "")
+        return value
+    return rawFallback[selectableRole(fallbackRole, "accent")]
+}
+
 var linePattern = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]+)"/
 
 function validColor(value) {
@@ -151,7 +182,18 @@ function semantic(raw) {
         textMuted: textMuted,
         border: mixColors(raw.muted, raw.accent, 0.32),
         borderStrong: mixColors(raw.muted, raw.accent, 0.68),
-        accentSecondary: raw.cyan
+        accentSecondary: raw.cyan,
+        // Defaults for the app-level semantic roles. MappedTheme.qml replaces
+        // these aliases from persisted, allowlisted palette-role selections.
+        ready: raw.muted,
+        success: raw.green,
+        working: raw.blue,
+        needsHelp: raw.yellow,
+        reviewReady: raw.green,
+        error: raw.red,
+        unknown: raw.magenta,
+        recording: raw.green,
+        processing: raw.cyan
     })
 }
 

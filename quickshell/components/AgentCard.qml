@@ -483,7 +483,7 @@ Item {
             visible: root.hasApproveAction
             enabled: visible
             label: "HOLD APPROVE"
-            accent: root.theme.green
+            accent: root.theme.reviewReady
             theme: root.theme
             reducedMotion: root.reducedMotion
             targetAgentId: root.agent === null ? "" : String(root.agent.id)
@@ -503,7 +503,7 @@ Item {
             visible: root.hasInterruptAction
             enabled: visible
             label: "HOLD INTERRUPT"
-            accent: root.theme.red
+            accent: root.theme.error
             theme: root.theme
             reducedMotion: root.reducedMotion
             targetAgentId: root.agent === null ? "" : String(root.agent.id)

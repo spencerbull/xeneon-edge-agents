@@ -21,12 +21,12 @@ Item {
     readonly property bool available: voice.available === true
     readonly property bool daemonOwned: voice.owned === true
     readonly property color accent: voiceState === "recording"
-        ? theme.green
+        ? theme.recording
         : voiceState === "processing"
-            ? theme.cyan
+            ? theme.processing
             : voiceState === "error"
-                ? theme.red
-                : theme.muted
+                ? theme.error
+                : theme.ready
     readonly property color controlBackground:
         pressHandler.pressed || voiceState === "recording"
             ? ThemePalette.mixColors(
@@ -259,10 +259,10 @@ Item {
         height: parent.height - 14
         radius: height / 2
         color: cancelHandler.pressed
-            ? Qt.alpha(root.theme.red, 0.28)
-            : Qt.alpha(root.theme.red, 0.14)
+            ? Qt.alpha(root.theme.error, 0.28)
+            : Qt.alpha(root.theme.error, 0.14)
         border.width: 1
-        border.color: root.theme.red
+        border.color: root.theme.error
         z: 4
 
         Accessible.role: Accessible.Button
@@ -280,7 +280,7 @@ Item {
             text: "CANCEL"
             textFormat: Text.PlainText
             color: ThemePalette.ensureContrast(
-                String(root.theme.red),
+                String(root.theme.error),
                 String(root.theme.surfaceRaised),
                 4.5
             )

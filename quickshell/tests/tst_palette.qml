@@ -14,6 +14,15 @@ TestCase {
         "magenta": "#864209",
         "cyan": "#135724",
         "muted": "#555555",
+        "working": "#112233",
+        "needsHelp": "#332211",
+        "reviewReady": "#224422",
+        "error": "#442222",
+        "unknown": "#442244",
+        "ready": "#444444",
+        "success": "#225522",
+        "recording": "#225533",
+        "processing": "#224455",
         "border": "#333333",
         "surface": "#111111",
         "textPrimary": "#eeeeee"
@@ -50,42 +59,54 @@ TestCase {
     function test_agentColorsFollowThemeSemanticRoles() {
         compare(
             String(Palette.agentColor(agent("working"), semanticTheme)),
-            semanticTheme.blue
+            semanticTheme.working
         )
         compare(
             String(Palette.agentColor(agent("blocked"), semanticTheme)),
-            semanticTheme.yellow
+            semanticTheme.needsHelp
         )
         compare(
             String(Palette.agentColor(agent("done", true), semanticTheme)),
-            semanticTheme.green
+            semanticTheme.reviewReady
         )
         compare(
             String(Palette.agentColor(agent("done", false), semanticTheme)),
-            semanticTheme.muted
+            semanticTheme.ready
         )
         compare(
             String(Palette.agentColor(agent("unknown"), semanticTheme)),
-            semanticTheme.magenta
+            semanticTheme.unknown
         )
     }
 
     function test_ambientColorsFollowThemeSemanticRoles() {
-        compare(Palette.ambientColor("working", semanticTheme), semanticTheme.blue)
-        compare(Palette.ambientColor("blocked", semanticTheme), semanticTheme.yellow)
-        compare(Palette.ambientColor("review", semanticTheme), semanticTheme.green)
-        compare(Palette.ambientColor("error", semanticTheme), semanticTheme.red)
+        compare(
+            Palette.ambientColor("working", semanticTheme),
+            semanticTheme.working
+        )
+        compare(
+            Palette.ambientColor("blocked", semanticTheme),
+            semanticTheme.needsHelp
+        )
+        compare(
+            Palette.ambientColor("review", semanticTheme),
+            semanticTheme.reviewReady
+        )
+        compare(
+            Palette.ambientColor("error", semanticTheme),
+            semanticTheme.error
+        )
         compare(
             Palette.ambientColor("voice-processing", semanticTheme),
-            semanticTheme.cyan
+            semanticTheme.processing
         )
         compare(
             Palette.ambientColor("voice-recording", semanticTheme),
-            semanticTheme.green
+            semanticTheme.recording
         )
         compare(
             Palette.ambientColor("off", semanticTheme),
-            semanticTheme.muted
+            semanticTheme.ready
         )
     }
 

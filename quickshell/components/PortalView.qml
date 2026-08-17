@@ -9,6 +9,7 @@ Item {
     required property var activity
     required property var preferences
     required property var theme
+    property var sourceTheme: theme
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
@@ -22,15 +23,15 @@ Item {
     )
     readonly property string surfaceState: store.surfaceState()
     readonly property color microStatusColor: store.micro.connected
-        ? theme.green
-        : theme.red
+        ? theme.success
+        : theme.error
     readonly property color readableMicroStatusColor:
         ThemePalette.ensureContrast(
             String(microStatusColor),
             String(theme.surfaceRaised),
             4.5
         )
-    readonly property color degradedColor: theme.yellow
+    readonly property color degradedColor: theme.needsHelp
     readonly property color readableDegradedColor:
         ThemePalette.ensureContrast(
             String(degradedColor),
@@ -38,11 +39,11 @@ Item {
             4.5
         )
     readonly property color toastColor: toastSuccess
-        ? theme.green
-        : theme.red
+        ? theme.success
+        : theme.error
     readonly property color surfaceMessageColor:
         surfaceState === "disconnected"
-            ? theme.red
+            ? theme.error
             : theme.accent
     readonly property color readableSurfaceMessageColor:
         ThemePalette.ensureContrast(
@@ -60,6 +61,7 @@ Item {
         !activity.ambientMode
         && ambientView.controlCenterProgress >= 0.999
         && !ambientView.exitShield
+        && !paletteSettingsOpen
     property int currentPage: 0
     property bool userPaging: false
     property string toastTitle: ""
@@ -70,6 +72,7 @@ Item {
     property var pendingDesktopActions: ({})
     property string pendingAgentOrderRequest: ""
     property bool microDrawerOpen: false
+    property bool paletteSettingsOpen: false
     readonly property bool agentOrderAvailable:
         store.agentOrder !== undefined
         && store.agentOrder.available === true
@@ -209,6 +212,14 @@ Item {
         return true
     }
 
+    function togglePaletteSettings() {
+        activity.noteUserActivity()
+        paletteSettingsOpen = !paletteSettingsOpen
+        if (paletteSettingsOpen)
+            microDrawerOpen = false
+        return true
+    }
+
     onPageCountChanged: {
         currentPage = Math.min(currentPage, pageCount - 1)
         pages.positionViewAtIndex(currentPage, ListView.SnapPosition)
@@ -217,6 +228,15 @@ Item {
     onControlCenterInteractiveChanged: {
         if (!controlCenterInteractive)
             microDrawerOpen = false
+    }
+
+    Connections {
+        target: root.activity
+
+        function onAmbientModeChanged() {
+            if (root.activity.ambientMode)
+                root.paletteSettingsOpen = false
+        }
     }
 
     PortalBackground {
@@ -255,6 +275,25 @@ Item {
         }
     }
 
+    Rectangle {
+        objectName: "paletteModalScrim"
+        anchors.fill: parent
+        visible: root.paletteSettingsOpen
+        color: "#000000"
+        opacity: 0.46
+        z: 68
+
+        Accessible.ignored: true
+
+        TapHandler {
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: {
+                root.activity.noteUserActivity()
+                root.paletteSettingsOpen = false
+            }
+        }
+    }
+
     DisplaySettingsControls {
         id: displaySettings
 
@@ -268,11 +307,14 @@ Item {
         motionReduced: root.effectiveReducedMotion
         motionForced: root.reducedMotion
         dimmed: root.displayDimmed
+        paletteOpen: root.paletteSettingsOpen
+        paletteCustom: paletteSettings.customized
         theme: root.theme
         opacity: root.displayDimmed ? 0.58 : 1
         z: 80
         onMotionToggleRequested: root.toggleMotionReduction()
         onDimToggleRequested: root.toggleDisplayDim()
+        onPaletteToggleRequested: root.togglePaletteSettings()
 
         Behavior on opacity {
             NumberAnimation {
@@ -280,6 +322,24 @@ Item {
                 easing.type: Easing.OutCubic
             }
         }
+    }
+
+    PaletteSettingsPane {
+        id: paletteSettings
+
+        anchors {
+            right: parent.right
+            top: parent.top
+            rightMargin: 24
+            topMargin: 82
+        }
+        open: root.paletteSettingsOpen
+        preferences: root.preferences
+        sourceTheme: root.sourceTheme
+        theme: root.theme
+        z: 69
+        onCloseRequested: root.paletteSettingsOpen = false
+        onInteractionOccurred: root.activity.noteUserActivity()
     }
 
     Item {
@@ -824,7 +884,7 @@ Item {
             color: Qt.alpha(root.theme.surface, 0.92)
             border.width: 1
             border.color: root.surfaceState === "disconnected"
-                ? root.theme.red
+                ? root.theme.error
                 : root.theme.border
         }
 
