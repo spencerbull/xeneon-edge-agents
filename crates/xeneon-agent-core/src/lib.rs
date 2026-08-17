@@ -11,10 +11,10 @@ pub mod voice;
 
 pub use config::Config;
 pub use model::{
-    ActionCapability, ActionKind, ActionResult, AgentActions, AgentStatus, AgentView,
-    AiUsageSnapshot, ConnectionState, HealthSnapshot, Metric, MicroSnapshot, PortalCommand,
-    PortalSnapshot, ProviderUsage, ServerMessage, SessionState, SessionView, UsageKind,
-    UsageWindow, VoiceSnapshot, VoiceState,
+    ActionCapability, ActionKind, ActionResult, AgentActions, AgentOrderMode, AgentOrderSnapshot,
+    AgentStatus, AgentView, AiUsageSnapshot, ConnectionState, HealthSnapshot, Metric,
+    MicroSnapshot, PortalCommand, PortalSnapshot, ProviderUsage, ServerMessage, SessionState,
+    SessionView, UsageKind, UsageWindow, VoiceSnapshot, VoiceState,
 };
 pub use runtime::{DaemonRuntime, socket_path};
 pub use voice::cleanup_owned_dictation;

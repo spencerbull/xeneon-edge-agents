@@ -22,6 +22,10 @@ QtObject {
     })
     property var sessions: []
     property var agents: []
+    property var agentOrder: ({
+        "available": false,
+        "mode": "grouped"
+    })
     property var health: ({})
     property var voice: ({
         "available": false,
@@ -97,6 +101,7 @@ QtObject {
         }
         sessions = []
         agents = []
+        agentOrder = {"available": false, "mode": "grouped"}
         health = {}
         voice = {
             "available": false,
@@ -214,6 +219,10 @@ QtObject {
                 0,
                 Math.floor(finiteNumber(value.source_order, 0))
             ),
+            "state_change_seq": Math.max(
+                0,
+                Math.floor(finiteNumber(value.state_change_seq, 0))
+            ),
             "actions": {
                 "open": rawActions.open === true,
                 "zoom": rawActions.zoom === true,
@@ -229,7 +238,7 @@ QtObject {
         }
     }
 
-    function normalizeAgents(values) {
+    function normalizeAgents(values, orderMode) {
         var normalized = []
         for (var index = 0; index < values.length; index += 1) {
             var agent = normalizeAgent(values[index])
@@ -238,18 +247,40 @@ QtObject {
         }
 
         normalized.sort(function(left, right) {
+            if (orderMode === "grouped") {
+                if (left.source_order !== right.source_order)
+                    return left.source_order - right.source_order
+                return left.id.localeCompare(right.id)
+            }
             var priorityDifference = statePriority(
                 left.status,
                 left.review_ready
             ) - statePriority(right.status, right.review_ready)
             if (priorityDifference !== 0)
                 return priorityDifference
+            if (left.state_change_seq !== right.state_change_seq)
+                return right.state_change_seq - left.state_change_seq
             if (left.source_order !== right.source_order)
                 return left.source_order - right.source_order
             return left.id.localeCompare(right.id)
         })
 
         return normalized
+    }
+
+    function normalizeAgentOrder(value) {
+        var source = value !== null
+                && value !== undefined
+                && typeof value === "object"
+            ? value
+            : {}
+        var mode = safeString(source.mode, "grouped", 16).toLowerCase()
+        if (mode !== "grouped" && mode !== "priority")
+            mode = "grouped"
+        return {
+            "available": source.available === true,
+            "mode": mode
+        }
     }
 
     function normalizeSessions(values) {
@@ -279,13 +310,14 @@ QtObject {
                 "last_sync_ms": Math.max(
                     0,
                     finiteNumber(session.last_sync_ms, 0)
-                )
+                ),
+                "message": safeString(session.message, "", 160)
             })
         }
         return normalized
     }
 
-    function normalizeConnection(value) {
+    function normalizeConnection(value, sessionViews) {
         var state = safeString(value, "degraded", 24).toLowerCase()
         if (allowedConnectionStates.indexOf(state) === -1)
             state = "degraded"
@@ -296,9 +328,19 @@ QtObject {
             "reconnecting": "Reconnecting to Herdr",
             "offline": "Herdr is offline"
         }
+        var detail = details[state]
+        if (state === "degraded" || state === "reconnecting") {
+            for (var index = 0; index < sessionViews.length; index += 1) {
+                if (sessionViews[index].state === "incompatible"
+                        && sessionViews[index].message !== "") {
+                    detail = sessionViews[index].message
+                    break
+                }
+            }
+        }
         return {
             "state": state,
-            "detail": details[state]
+            "detail": detail
         }
     }
 
@@ -626,8 +668,16 @@ QtObject {
 
         var hadSnapshot = hasSnapshot
         var previousSignature = activitySignature
-        var nextConnection = normalizeConnection(snapshot.connection)
-        var nextAgents = normalizeAgents(snapshot.agents)
+        var nextSessions = normalizeSessions(snapshot.sessions)
+        var nextConnection = normalizeConnection(
+            snapshot.connection,
+            nextSessions
+        )
+        var nextAgentOrder = normalizeAgentOrder(snapshot.agent_order)
+        var nextAgents = normalizeAgents(
+            snapshot.agents,
+            nextAgentOrder.available ? nextAgentOrder.mode : "priority"
+        )
         var nextVoice = normalizeVoice(snapshot.voice)
         var nextUsage = normalizeUsage(snapshot.usage)
         var nextMicro = normalizeMicro(snapshot.micro)
@@ -640,8 +690,9 @@ QtObject {
         sequence = nextSequence
         generatedAtMs = nextGeneratedAtMs
         connection = nextConnection
-        sessions = normalizeSessions(snapshot.sessions)
+        sessions = nextSessions
         agents = nextAgents
+        agentOrder = nextAgentOrder
         health = normalizeHealth(snapshot.health)
         voice = nextVoice
         usage = nextUsage

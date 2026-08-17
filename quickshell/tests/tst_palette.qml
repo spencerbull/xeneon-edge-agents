@@ -6,6 +6,28 @@ import "../components/PortalPalette.js" as Palette
 TestCase {
     name: "PortalPalette"
 
+    property var semanticTheme: ({
+        "blue": "#123456",
+        "yellow": "#654321",
+        "green": "#246813",
+        "red": "#975310",
+        "magenta": "#864209",
+        "cyan": "#135724",
+        "muted": "#555555",
+        "working": "#112233",
+        "needsHelp": "#332211",
+        "reviewReady": "#224422",
+        "error": "#442222",
+        "unknown": "#442244",
+        "ready": "#444444",
+        "success": "#225522",
+        "recording": "#225533",
+        "processing": "#224455",
+        "border": "#333333",
+        "surface": "#111111",
+        "textPrimary": "#eeeeee"
+    })
+
     AmbientRing {
         id: halo
 
@@ -14,6 +36,7 @@ TestCase {
         reducedMotion: true
         connectionState: "connected"
         voice: ({"state": "idle"})
+        theme: semanticTheme
     }
 
     function agent(status, reviewReady) {
@@ -33,13 +56,58 @@ TestCase {
         halo.agents = []
     }
 
-    function test_microAgentPaletteIsExact() {
-        compare(String(Palette.agentColor(agent("working"))), "#0066ff")
-        compare(String(Palette.agentColor(agent("blocked"))), "#ffaa00")
-        compare(String(Palette.agentColor(agent("done", true))), "#00ff00")
-        compare(String(Palette.agentColor(agent("done", false))), "#303030")
-        compare(String(Palette.agentColor(agent("idle"))), "#303030")
-        compare(String(Palette.agentColor(agent("unknown"))), "#300840")
+    function test_agentColorsFollowThemeSemanticRoles() {
+        compare(
+            String(Palette.agentColor(agent("working"), semanticTheme)),
+            semanticTheme.working
+        )
+        compare(
+            String(Palette.agentColor(agent("blocked"), semanticTheme)),
+            semanticTheme.needsHelp
+        )
+        compare(
+            String(Palette.agentColor(agent("done", true), semanticTheme)),
+            semanticTheme.reviewReady
+        )
+        compare(
+            String(Palette.agentColor(agent("done", false), semanticTheme)),
+            semanticTheme.ready
+        )
+        compare(
+            String(Palette.agentColor(agent("unknown"), semanticTheme)),
+            semanticTheme.unknown
+        )
+    }
+
+    function test_ambientColorsFollowThemeSemanticRoles() {
+        compare(
+            Palette.ambientColor("working", semanticTheme),
+            semanticTheme.working
+        )
+        compare(
+            Palette.ambientColor("blocked", semanticTheme),
+            semanticTheme.needsHelp
+        )
+        compare(
+            Palette.ambientColor("review", semanticTheme),
+            semanticTheme.reviewReady
+        )
+        compare(
+            Palette.ambientColor("error", semanticTheme),
+            semanticTheme.error
+        )
+        compare(
+            Palette.ambientColor("voice-processing", semanticTheme),
+            semanticTheme.processing
+        )
+        compare(
+            Palette.ambientColor("voice-recording", semanticTheme),
+            semanticTheme.recording
+        )
+        compare(
+            Palette.ambientColor("off", semanticTheme),
+            semanticTheme.ready
+        )
     }
 
     function test_reviewReadyOverridesIdleButNotActiveAttention() {

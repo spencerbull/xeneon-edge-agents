@@ -32,7 +32,9 @@ pub fn validate_command(command: &PortalCommand) -> Result<(), CommandError> {
         | ActionKind::ClaudeDesktop
         | ActionKind::VoiceStart
         | ActionKind::VoiceStop
-        | ActionKind::VoiceCancel => {
+        | ActionKind::VoiceCancel
+        | ActionKind::OrderGrouped
+        | ActionKind::OrderPriority => {
             if command.agent_id.is_some() {
                 return Err(CommandError::UnexpectedAgentId);
             }
@@ -140,6 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn order_actions_are_typed_global_actions() {
+        for action in [ActionKind::OrderGrouped, ActionKind::OrderPriority] {
+            let mut command = command(action);
+            assert_eq!(
+                validate_command(&command),
+                Err(CommandError::UnexpectedAgentId)
+            );
+            command.agent_id = None;
+            assert_eq!(validate_command(&command), Ok(()));
+            command.capability_id = Some("not-accepted".into());
+            assert_eq!(
+                validate_command(&command),
+                Err(CommandError::UnexpectedCapability)
+            );
+        }
+    }
+
+    #[test]
     fn capability_must_match_current_agent_snapshot() {
         let mut command = command(ActionKind::Approve);
         command.capability_id = Some("stale".into());
@@ -156,6 +176,7 @@ mod tests {
             session: "default".into(),
             focused: false,
             observed_for_seconds: 0,
+            state_change_seq: 0,
             source_order: 0,
             actions: AgentActions {
                 open: true,

@@ -9,9 +9,29 @@ narrow action policy. It also owns the optional Voxtype start/stop/cancel
 boundary and a private per-daemon dictation marker.
 Quickshell owns rendering and touch gesture state only.
 
+The portal's project-owned theme reader consumes only Omarchy's current
+presentation palette under `$XDG_STATE_HOME/omarchy/current`. Omarchy replaces
+the theme directory atomically, so QML watches the stable `theme.name` beacon
+and then reopens `theme/colors.toml`. Parsing is allowlisted and fail-soft:
+invalid or absent colors use bundled presentation defaults. Working, blocked,
+review, and error meaning maps respectively to the active theme's blue,
+yellow, green, and red roles. Theme selection never changes daemon state,
+Herdr actions, output identity, or touch mapping.
+Light desktop palettes are mapped to a dark-adaptive command surface and small
+semantic text roles are normalized to at least 4.5:1 contrast against their
+surface; primary text targets 7:1.
+
+The user-owned portal preferences persist only allowlisted Omarchy role names
+for nine XENEON meanings: Ready, Success, Working, Needs Help, Review Ready,
+Error, Unknown, Recording, and Processing. A presentation-only mapped-theme object
+resolves those names against the current live palette, so switching the
+Omarchy theme preserves the mapping intent while replacing every source hue.
+Invalid or missing selections fail closed to the reviewed defaults. The editor
+cannot store arbitrary colors or alter background, surface, or text roles.
+
 ```text
 Herdr public sockets     /proc, /sys, Hyprland
-AI usage caches            Voxtype, microd
+AI usage records/DB        Voxtype, microd
           \                    /
                  xeneon-agentd
                        |
@@ -37,6 +57,12 @@ and live terminal identity. The current pane ID remains private action-routing
 state. Restarting the daemon invalidates every ID. Herdr disconnects immediately
 remove action targets and guarded capabilities.
 
+The adapter reads Herdr's durable `grouped`/`priority` agent-order mode on each
+normal reconciliation. The portal can request only those two typed values;
+the daemon applies them through `agent.order.set` and reorders the normalized
+cards from the returned authoritative state. An older Herdr without that API
+keeps agent telemetry working but exposes ordering as unavailable.
+
 Card names use Herdr's tab identity rather than terminal or prompt text. The
 daemon joins an agent's `tab_id` to the snapshot's tab label, with only
 `display_agent`, agent `name`, and canonical agent fallbacks.
@@ -51,11 +77,15 @@ Agent topology or state reconciliation does advance it.
 
 AI capacity and Micro refreshes do not advance the action sequence or count as
 portal interaction, so they cannot invalidate a guarded action or wake the
-ambient surface. Usage collection reads only the bounded normalized cache
-contracts already produced by the Omarchy Quickshell AI module. The daemon
-allowlists provider IDs, sources, status values, and safe metadata, clamps
-utilization and aggregate token activity, rejects oversized files, and never
-forwards credentials, prompts, per-model history, or raw provider payloads.
+ambient surface. Usage collection prefers the bounded schema-v1 Claude/Codex
+records produced by Omarchy, retains the former cache contract for transition
+compatibility, and reads only bounded aggregate input, output, reasoning, and
+cache-write counters from OpenCode's local
+SQLite message ledger to derive its soft-budget windows. The daemon allowlists
+provider IDs, record versions, status values, and safe metadata, clamps
+utilization and aggregate token activity, rejects oversized files and scans,
+and never forwards credentials, prompts, message contents, per-model history,
+or raw provider payloads.
 
 Micro collection uses one fixed read-only `device.status` request on the
 user-private local microd socket. Connected state requires a valid device

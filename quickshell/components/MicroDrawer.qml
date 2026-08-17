@@ -1,15 +1,24 @@
 import QtQuick
 import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property bool opened: false
+    property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property bool interactive: true
     property var micro: ({"connected": false})
     property var agents: []
     property var voice: ({"state": "unavailable", "owned": false})
+    readonly property color connectionColor: micro.connected
+        ? theme.success
+        : theme.error
+    readonly property color readableConnectionColor: readableStateColor(
+        connectionColor,
+        theme.surface
+    )
 
     signal closeRequested()
     signal interacted()
@@ -43,20 +52,28 @@ Item {
     function ringColor() {
         switch (ringState()) {
         case "recording":
-            return "#49e0cf"
+            return root.theme.recording
         case "processing":
-            return "#eefcff"
+            return root.theme.processing
         case "error":
-            return "#ff435f"
+            return root.theme.error
         case "blocked":
-            return "#ffad3d"
+            return root.theme.needsHelp
         case "review":
-            return "#5df09a"
+            return root.theme.reviewReady
         case "working":
-            return "#4d9dff"
+            return root.theme.working
         default:
-            return "#30465b"
+            return root.theme.ready
         }
+    }
+
+    function readableStateColor(color, background) {
+        return ThemePalette.ensureContrast(
+            String(color),
+            String(background),
+            4.5
+        )
     }
 
     visible: opened
@@ -69,7 +86,7 @@ Item {
             top: parent.top
             bottom: parent.bottom
         }
-        color: "#9c02050b"
+        color: Qt.alpha(root.theme.canvas, 0.62)
 
         TapHandler {
             enabled: root.enabled
@@ -94,9 +111,11 @@ Item {
         }
         width: 720
         radius: 22
-        color: "#f20a111d"
+        color: Qt.alpha(root.theme.surface, 0.95)
         border.width: 1
-        border.color: root.micro.connected ? "#3d7891" : "#5c3543"
+        border.color: root.micro.connected
+            ? root.theme.borderStrong
+            : root.theme.error
 
         Column {
             anchors {
@@ -112,7 +131,7 @@ Item {
             Text {
                 text: "CODEX MICRO // VIRTUAL PROJECTION"
                 textFormat: Text.PlainText
-                color: "#ecfbff"
+                color: root.theme.textPrimary
                 font {
                     family: "monospace"
                     pixelSize: 20
@@ -126,7 +145,7 @@ Item {
                     ? "DEVICE LINK ACTIVE · READ ONLY"
                     : "DEVICE LINK UNAVAILABLE"
                 textFormat: Text.PlainText
-                color: root.micro.connected ? "#62e5c2" : "#ff6d86"
+                color: root.readableConnectionColor
                 font {
                     family: "monospace"
                     pixelSize: 11
@@ -148,9 +167,11 @@ Item {
             width: 66
             height: 42
             radius: 10
-            color: closeTap.pressed ? "#1b3043" : "#101d2c"
+            color: closeTap.pressed
+                ? root.theme.surfacePressed
+                : root.theme.surfaceRaised
             border.width: 1
-            border.color: "#35536c"
+            border.color: root.theme.border
 
             Accessible.role: Accessible.Button
             Accessible.ignored: !root.enabled
@@ -164,7 +185,7 @@ Item {
                 anchors.centerIn: parent
                 text: "CLOSE"
                 textFormat: Text.PlainText
-                color: "#9ec7df"
+                color: root.theme.textSecondary
                 font {
                     family: "monospace"
                     pixelSize: 11
@@ -206,7 +227,7 @@ Item {
                     height: 158
                     radius: 79
                     anchors.horizontalCenter: parent.horizontalCenter
-                    color: "#06101a"
+                    color: root.theme.surface
                     border.width: 10
                     border.color: root.ringColor()
 
@@ -243,7 +264,7 @@ Item {
                                     : "LINK"
                                 : "OFF"
                             textFormat: Text.PlainText
-                            color: "#f0fbff"
+                            color: root.theme.textPrimary
                             font {
                                 family: "monospace"
                                 pixelSize: 27
@@ -255,7 +276,10 @@ Item {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: root.ringState().toUpperCase()
                             textFormat: Text.PlainText
-                            color: root.ringColor()
+                            color: root.readableStateColor(
+                                root.ringColor(),
+                                root.theme.surface
+                            )
                             font {
                                 family: "monospace"
                                 pixelSize: 10
@@ -282,7 +306,7 @@ Item {
                             )
                         : "WAITING FOR MICROD"
                     textFormat: Text.PlainText
-                    color: "#718da5"
+                    color: root.theme.textMuted
                     horizontalAlignment: Text.AlignHCenter
                     wrapMode: Text.Wrap
                     font {
@@ -311,12 +335,19 @@ Item {
                                 ? root.agents[index]
                                 : null
                         readonly property color accent:
-                            agent === null ? "#293b4c" : Palette.agentColor(agent)
+                            agent === null
+                                ? root.theme.border
+                                : Palette.agentColor(agent, root.theme)
+                        readonly property color readableAccent:
+                            root.readableStateColor(
+                                accent,
+                                root.theme.surfaceRaised
+                            )
 
                         width: (slotGrid.width - slotGrid.columnSpacing) / 2
                         height: (slotGrid.height - slotGrid.rowSpacing * 2) / 3
                         radius: 15
-                        color: "#0b1724"
+                        color: root.theme.surfaceRaised
                         border.width: 1
                         border.color: Qt.alpha(accent, agent === null ? 0.45 : 0.78)
 
@@ -348,7 +379,9 @@ Item {
                                     ? "SLOT " + (index + 1)
                                     : String(agent.display_name || "Agent")
                                 textFormat: Text.PlainText
-                                color: agent === null ? "#526779" : "#e8f7fc"
+                                color: agent === null
+                                    ? root.theme.textMuted
+                                    : root.theme.textPrimary
                                 elide: Text.ElideRight
                                 font {
                                     family: "monospace"
@@ -365,7 +398,7 @@ Item {
                                         agent
                                     ).toUpperCase()
                                 textFormat: Text.PlainText
-                                color: parent.parent.accent
+                                color: parent.parent.readableAccent
                                 elide: Text.ElideRight
                                 font {
                                     family: "monospace"

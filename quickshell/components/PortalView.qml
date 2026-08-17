@@ -1,4 +1,5 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
@@ -7,18 +8,49 @@ Item {
     required property var bridge
     required property var activity
     required property var preferences
+    required property var theme
+    property var sourceTheme: theme
     property bool reducedMotion: false
     property bool previewMode: false
     property bool restoreVoiceFocus: false
     property bool previewMicroOpen: false
     property string hostName: "LOCAL"
 
-    readonly property int pageSize: 6
+    readonly property int pageSize: 14
     readonly property int pageCount: Math.max(
         1,
         Math.ceil(store.agents.length / pageSize)
     )
     readonly property string surfaceState: store.surfaceState()
+    readonly property color microStatusColor: store.micro.connected
+        ? theme.success
+        : theme.error
+    readonly property color readableMicroStatusColor:
+        ThemePalette.ensureContrast(
+            String(microStatusColor),
+            String(theme.surfaceRaised),
+            4.5
+        )
+    readonly property color degradedColor: theme.needsHelp
+    readonly property color readableDegradedColor:
+        ThemePalette.ensureContrast(
+            String(degradedColor),
+            String(theme.canvas),
+            4.5
+        )
+    readonly property color toastColor: toastSuccess
+        ? theme.success
+        : theme.error
+    readonly property color surfaceMessageColor:
+        surfaceState === "disconnected"
+            ? theme.error
+            : theme.accent
+    readonly property color readableSurfaceMessageColor:
+        ThemePalette.ensureContrast(
+            String(surfaceMessageColor),
+            String(theme.surface),
+            4.5
+        )
     readonly property bool userMotionReduced:
         preferences.reduceMotion === true
     readonly property bool displayDimmed:
@@ -29,6 +61,7 @@ Item {
         !activity.ambientMode
         && ambientView.controlCenterProgress >= 0.999
         && !ambientView.exitShield
+        && !paletteSettingsOpen
     property int currentPage: 0
     property bool userPaging: false
     property string toastTitle: ""
@@ -37,7 +70,15 @@ Item {
     property bool toastVisible: false
     property var pendingVoiceFocus: ({})
     property var pendingDesktopActions: ({})
+    property string pendingAgentOrderRequest: ""
     property bool microDrawerOpen: false
+    property bool paletteSettingsOpen: false
+    readonly property bool agentOrderAvailable:
+        store.agentOrder !== undefined
+        && store.agentOrder.available === true
+    readonly property string agentOrderMode: agentOrderAvailable
+        ? String(store.agentOrder.mode)
+        : "grouped"
 
     clip: true
 
@@ -64,7 +105,7 @@ Item {
         var count = pageAgentCount(pageIndex)
         if (count <= 2)
             return Math.max(1, count)
-        return count <= 4 ? 2 : 3
+        return Math.ceil(count / 2)
     }
 
     function pageRows(pageIndex) {
@@ -145,6 +186,16 @@ Item {
         return true
     }
 
+    function requestAgentOrder(mode) {
+        if (!agentOrderAvailable || pendingAgentOrderRequest !== "")
+            return false
+        var requestId = bridge.setAgentOrder(mode)
+        if (requestId === "")
+            return false
+        pendingAgentOrderRequest = requestId
+        return true
+    }
+
     function toggleMotionReduction() {
         if (reducedMotion)
             return false
@@ -161,6 +212,14 @@ Item {
         return true
     }
 
+    function togglePaletteSettings() {
+        activity.noteUserActivity()
+        paletteSettingsOpen = !paletteSettingsOpen
+        if (paletteSettingsOpen)
+            microDrawerOpen = false
+        return true
+    }
+
     onPageCountChanged: {
         currentPage = Math.min(currentPage, pageCount - 1)
         pages.positionViewAtIndex(currentPage, ListView.SnapPosition)
@@ -171,14 +230,25 @@ Item {
             microDrawerOpen = false
     }
 
+    Connections {
+        target: root.activity
+
+        function onAmbientModeChanged() {
+            if (root.activity.ambientMode)
+                root.paletteSettingsOpen = false
+        }
+    }
+
     PortalBackground {
         anchors.fill: parent
+        theme: root.theme
         reducedMotion: root.effectiveReducedMotion
         ambientMode: root.activity.ambientMode
     }
 
     AmbientRing {
         anchors.fill: parent
+        theme: root.theme
         agents: root.store.agents
         voice: root.store.voice
         connectionState: root.store.connection.state
@@ -205,6 +275,25 @@ Item {
         }
     }
 
+    Rectangle {
+        objectName: "paletteModalScrim"
+        anchors.fill: parent
+        visible: root.paletteSettingsOpen
+        color: "#000000"
+        opacity: 0.46
+        z: 68
+
+        Accessible.ignored: true
+
+        TapHandler {
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: {
+                root.activity.noteUserActivity()
+                root.paletteSettingsOpen = false
+            }
+        }
+    }
+
     DisplaySettingsControls {
         id: displaySettings
 
@@ -218,10 +307,14 @@ Item {
         motionReduced: root.effectiveReducedMotion
         motionForced: root.reducedMotion
         dimmed: root.displayDimmed
+        paletteOpen: root.paletteSettingsOpen
+        paletteCustom: paletteSettings.customized
+        theme: root.theme
         opacity: root.displayDimmed ? 0.58 : 1
         z: 80
         onMotionToggleRequested: root.toggleMotionReduction()
         onDimToggleRequested: root.toggleDisplayDim()
+        onPaletteToggleRequested: root.togglePaletteSettings()
 
         Behavior on opacity {
             NumberAnimation {
@@ -229,6 +322,24 @@ Item {
                 easing.type: Easing.OutCubic
             }
         }
+    }
+
+    PaletteSettingsPane {
+        id: paletteSettings
+
+        anchors {
+            right: parent.right
+            top: parent.top
+            rightMargin: 24
+            topMargin: 82
+        }
+        open: root.paletteSettingsOpen
+        preferences: root.preferences
+        sourceTheme: root.sourceTheme
+        theme: root.theme
+        z: 69
+        onCloseRequested: root.paletteSettingsOpen = false
+        onInteractionOccurred: root.activity.noteUserActivity()
     }
 
     Item {
@@ -249,6 +360,8 @@ Item {
         }
 
         Row {
+            id: headerIdentity
+
             anchors {
                 left: parent.left
                 verticalCenter: parent.verticalCenter
@@ -259,7 +372,7 @@ Item {
                 width: 8
                 height: 52
                 radius: 4
-                color: "#55e9ff"
+                color: root.theme.accent
             }
 
             Column {
@@ -269,7 +382,7 @@ Item {
                     text: String(root.hostName || "LOCAL").toUpperCase()
                         + " // AGENT COMMAND"
                     textFormat: Text.PlainText
-                    color: "#ecfbff"
+                    color: root.theme.textPrimary
                     font {
                         family: "monospace"
                         pixelSize: 25
@@ -281,13 +394,93 @@ Item {
                 Text {
                     text: root.attentionSummary()
                     textFormat: Text.PlainText
-                    color: "#6385a5"
+                    color: root.theme.textMuted
                     font {
                         family: "monospace"
                         pixelSize: 13
                         letterSpacing: 0.6
                     }
                 }
+            }
+        }
+
+        Rectangle {
+            id: agentOrderToggle
+            objectName: "agentOrderToggle"
+
+            anchors {
+                left: headerIdentity.right
+                leftMargin: 44
+                verticalCenter: parent.verticalCenter
+            }
+            width: 184
+            height: 48
+            radius: 12
+            color: orderTap.pressed
+                ? root.theme.surfacePressed
+                : root.theme.surfaceRaised
+            border.width: 1
+            border.color: root.agentOrderAvailable
+                ? root.theme.accent
+                : root.theme.border
+            enabled: root.controlCenterInteractive
+                && root.agentOrderAvailable
+                && root.pendingAgentOrderRequest === ""
+
+            function activate() {
+                if (!enabled)
+                    return false
+                root.activity.noteUserActivity()
+                return root.requestAgentOrder(
+                    root.agentOrderMode === "grouped"
+                        ? "priority"
+                        : "grouped"
+                )
+            }
+
+            Accessible.role: Accessible.Button
+            // Disabled status is still meaningful: expose why synchronization
+            // is unavailable or currently in progress to assistive technology.
+            Accessible.ignored: false
+            Accessible.name: root.pendingAgentOrderRequest !== ""
+                ? "Agent ordering syncing"
+                : root.agentOrderAvailable
+                    ? "Agent ordering " + root.agentOrderMode
+                    : "Agent ordering unavailable"
+            Accessible.description: root.pendingAgentOrderRequest !== ""
+                ? "Synchronizing agent ordering with Herdr"
+                : root.agentOrderAvailable
+                    ? "Switch Herdr and the command center to "
+                    + (root.agentOrderMode === "grouped"
+                        ? "priority"
+                        : "grouped") + " ordering"
+                    : "Requires a Herdr version with agent ordering API support"
+            Accessible.onPressAction: activate()
+
+            Text {
+                objectName: "agentOrderLabel"
+                anchors.centerIn: parent
+                text: root.pendingAgentOrderRequest !== ""
+                    ? "ORDER // SYNCING"
+                    : root.agentOrderAvailable
+                        ? "ORDER // " + root.agentOrderMode.toUpperCase()
+                        : "ORDER // UNAVAILABLE"
+                textFormat: Text.PlainText
+                color: root.agentOrderAvailable
+                    ? root.theme.textPrimary
+                    : root.theme.textMuted
+                font {
+                    family: "monospace"
+                    pixelSize: 11
+                    weight: Font.DemiBold
+                    letterSpacing: 0.5
+                }
+            }
+
+            TapHandler {
+                id: orderTap
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onTapped: agentOrderToggle.activate()
             }
         }
 
@@ -328,8 +521,8 @@ Item {
                         height: 8
                         radius: 4
                         color: parent.index === root.currentPage
-                            ? "#55e9ff"
-                            : "#29445f"
+                            ? root.theme.accent
+                            : root.theme.border
 
                         Behavior on width {
                             NumberAnimation {
@@ -360,7 +553,8 @@ Item {
                 height: 58
                 anchors.verticalCenter: parent.verticalCenter
                 label: "CHATGPT"
-                accent: "#6cf7b0"
+                accent: root.theme.green
+                theme: root.theme
                 pending: root.desktopActionPending("chatgpt_desktop")
                 enabled: root.controlCenterInteractive
                     && !root.store.freshSnapshotRequired
@@ -373,7 +567,8 @@ Item {
                 height: 58
                 anchors.verticalCenter: parent.verticalCenter
                 label: "CLAUDE"
-                accent: "#e89562"
+                accent: root.theme.orange
+                theme: root.theme
                 pending: root.desktopActionPending("claude_desktop")
                 enabled: root.controlCenterInteractive
                     && !root.store.freshSnapshotRequired
@@ -386,6 +581,7 @@ Item {
                 height: 58
                 anchors.verticalCenter: parent.verticalCenter
                 voice: root.store.voice
+                theme: root.theme
                 reducedMotion: root.effectiveReducedMotion
                 enabled: root.controlCenterInteractive
                 actionsEnabled: root.controlCenterInteractive
@@ -413,11 +609,11 @@ Item {
                 height: 58
                 radius: 14
                 anchors.verticalCenter: parent.verticalCenter
-                color: microTap.pressed ? "#14283a" : "#0b1523"
+                color: microTap.pressed
+                    ? root.theme.surfacePressed
+                    : root.theme.surfaceRaised
                 border.width: 1
-                border.color: root.store.micro.connected
-                    ? "#3a8d83"
-                    : "#583b49"
+                border.color: root.microStatusColor
                 enabled: root.controlCenterInteractive
 
                 function activate() {
@@ -446,9 +642,7 @@ Item {
                         radius: 14
                         color: "transparent"
                         border.width: 4
-                        border.color: root.store.micro.connected
-                            ? "#49e0cf"
-                            : "#604253"
+                        border.color: root.microStatusColor
                     }
 
                     Column {
@@ -458,7 +652,7 @@ Item {
                         Text {
                             text: "MICRO"
                             textFormat: Text.PlainText
-                            color: "#e8f8fc"
+                            color: root.theme.textPrimary
                             font {
                                 family: "monospace"
                                 pixelSize: 15
@@ -474,9 +668,7 @@ Item {
                                     : "CONNECTED"
                                 : "OFFLINE"
                             textFormat: Text.PlainText
-                            color: root.store.micro.connected
-                                ? "#65d9c5"
-                                : "#b07888"
+                            color: root.readableMicroStatusColor
                             font {
                                 family: "monospace"
                                 pixelSize: 9
@@ -498,6 +690,7 @@ Item {
     }
 
     Rectangle {
+        objectName: "degradedBanner"
         anchors {
             top: header.bottom
             horizontalCenter: parent.horizontalCenter
@@ -505,15 +698,16 @@ Item {
         width: 960
         height: root.surfaceState === "degraded" ? 28 : 0
         radius: 14
-        color: "#d4362b0f"
+        color: Qt.alpha(root.degradedColor, 0.16)
         border.width: height > 0 ? 1 : 0
-        border.color: "#7f5d30"
+        border.color: root.degradedColor
         clip: true
         visible: height > 0
         z: 12
         opacity: ambientView.controlCenterProgress
 
         Text {
+            objectName: "degradedBannerText"
             anchors.centerIn: parent
             text: "DEGRADED // " + String(
                 root.store.connection.detail
@@ -521,7 +715,7 @@ Item {
                     || "PARTIAL TELEMETRY"
             ).toUpperCase()
             textFormat: Text.PlainText
-            color: "#ffc47c"
+            color: root.readableDegradedColor
             elide: Text.ElideRight
             width: parent.width - 40
             horizontalAlignment: Text.AlignHCenter
@@ -542,6 +736,7 @@ Item {
 
     ListView {
         id: pages
+        objectName: "agentPages"
 
         anchors {
             left: parent.left
@@ -593,6 +788,7 @@ Item {
 
             Grid {
                 id: cardGrid
+                objectName: "agentGrid_" + page.index
 
                 anchors {
                     fill: parent
@@ -610,6 +806,7 @@ Item {
 
                     AgentCard {
                         required property int index
+                        objectName: "agentCard_" + page.index + "_" + index
 
                         width: (
                             cardGrid.width
@@ -622,6 +819,7 @@ Item {
                                     * (root.pageRows(page.index) - 1)
                         ) / root.pageRows(page.index)
                         agent: root.agentAt(page.index, index)
+                        theme: root.theme
                         visible: agent !== null
                         enabled: visible && root.controlCenterInteractive
                         reducedMotion: root.effectiveReducedMotion
@@ -683,11 +881,11 @@ Item {
         Rectangle {
             anchors.fill: parent
             radius: 22
-            color: "#e8050a14"
+            color: Qt.alpha(root.theme.surface, 0.92)
             border.width: 1
             border.color: root.surfaceState === "disconnected"
-                ? "#6f3047"
-                : "#244a67"
+                ? root.theme.error
+                : root.theme.border
         }
 
         Column {
@@ -702,9 +900,7 @@ Item {
                         ? "HERDR DISCONNECTED"
                         : "NO ACTIVE AGENTS"
                 textFormat: Text.PlainText
-                color: root.surfaceState === "disconnected"
-                    ? "#ff769a"
-                    : "#77eaff"
+                color: root.readableSurfaceMessageColor
                 font {
                     family: "monospace"
                     pixelSize: 30
@@ -725,7 +921,7 @@ Item {
                         )
                         : "Herdr is connected and has no running local agents"
                 textFormat: Text.PlainText
-                color: "#718ca6"
+                color: root.theme.textMuted
                 font {
                     family: "sans-serif"
                     pixelSize: 16
@@ -747,6 +943,7 @@ Item {
         }
         height: 106
         usage: root.store.usage
+        theme: root.theme
         agents: root.store.agents
         sessions: root.store.sessions
         reducedMotion: root.effectiveReducedMotion
@@ -765,6 +962,7 @@ Item {
         micro: root.store.micro
         agents: root.store.agents
         voice: root.store.voice
+        theme: root.theme
         z: 35
         opacity: ambientView.controlCenterProgress
         onInteracted: root.activity.noteUserActivity()
@@ -782,9 +980,9 @@ Item {
         width: 780
         height: root.toastVisible ? 74 : 0
         radius: 16
-        color: root.toastSuccess ? "#ed0b241f" : "#ed2b0e1a"
+        color: Qt.alpha(root.toastColor, 0.15)
         border.width: root.toastVisible ? 1 : 0
-        border.color: root.toastSuccess ? "#377f69" : "#8b3d58"
+        border.color: root.toastColor
         clip: true
         visible: height > 0
         z: 60
@@ -801,7 +999,7 @@ Item {
                 width: 8
                 height: parent.height
                 radius: 4
-                color: root.toastSuccess ? "#6cf7b0" : "#ff5d83"
+                color: root.toastColor
             }
 
             Column {
@@ -813,7 +1011,7 @@ Item {
                     width: parent.width
                     text: root.toastTitle
                     textFormat: Text.PlainText
-                    color: "#e8fbff"
+                    color: root.theme.textPrimary
                     elide: Text.ElideRight
                     font {
                         family: "monospace"
@@ -827,7 +1025,7 @@ Item {
                     width: parent.width
                     text: root.toastDetail
                     textFormat: Text.PlainText
-                    color: "#8eabc3"
+                    color: root.theme.textSecondary
                     elide: Text.ElideRight
                     font {
                         family: "sans-serif"
@@ -857,6 +1055,18 @@ Item {
         target: root.store
 
         function onActionResultReceived(result) {
+            if (result.action === "order_grouped"
+                    || result.action === "order_priority") {
+                root.pendingAgentOrderRequest = ""
+                root.showToast(
+                    result.ok
+                        ? "ORDER // SYNCED"
+                        : "ORDER // " + String(result.code).toUpperCase(),
+                    result.message || result.request_id,
+                    result.ok
+                )
+                return
+            }
             if (result.action === "restore_focus") {
                 var intent = root.pendingVoiceFocus[result.request_id]
                 if (intent !== undefined) {
@@ -923,6 +1133,7 @@ Item {
             if (root.store.freshSnapshotRequired) {
                 root.pendingVoiceFocus = {}
                 root.pendingDesktopActions = {}
+                root.pendingAgentOrderRequest = ""
             }
         }
     }
@@ -955,6 +1166,7 @@ Item {
         health: root.store.health
         voice: root.store.voice
         connectionState: root.store.connection.state
+        theme: root.theme
         onWakeRequested: root.notePassiveInteraction()
     }
 }

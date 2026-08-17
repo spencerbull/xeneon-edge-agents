@@ -125,10 +125,29 @@ ShellRoot {
             category: "display"
             property bool reduceMotion: false
             property bool dimmed: false
+            property string readyColorRole: "muted"
+            property string successColorRole: "green"
+            property string workingColorRole: "blue"
+            property string needsHelpColorRole: "yellow"
+            property string reviewReadyColorRole: "green"
+            property string errorColorRole: "red"
+            property string unknownColorRole: "magenta"
+            property string recordingColorRole: "green"
+            property string processingColorRole: "cyan"
         }
 
         PortalStore {
             id: portalStore
+        }
+
+        OmarchyTheme {
+            id: portalTheme
+        }
+
+        MappedTheme {
+            id: mappedTheme
+            sourceTheme: portalTheme
+            preferences: portalPreferences
         }
 
         ActivityController {
@@ -177,6 +196,8 @@ ShellRoot {
                 bridge: portalBridge
                 activity: activityController
                 preferences: portalPreferences
+                theme: mappedTheme
+                sourceTheme: portalTheme
                 reducedMotion: root.reducedMotion
                 hostName: root.hostName
             }
@@ -191,7 +212,7 @@ ShellRoot {
         implicitWidth: 1280
         implicitHeight: 360
         minimumSize: Qt.size(960, 270)
-        color: "#02050b"
+        color: mappedTheme.canvas
         surfaceFormat.opaque: true
 
         onClosed: {
@@ -212,6 +233,8 @@ ShellRoot {
             bridge: portalBridge
             activity: activityController
             preferences: portalPreferences
+            theme: mappedTheme
+            sourceTheme: portalTheme
             reducedMotion: root.reducedMotion
             previewMode: root.previewMode
             restoreVoiceFocus: root.livePreviewMode

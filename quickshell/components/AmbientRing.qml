@@ -2,11 +2,13 @@ import QtQuick
 import QtQuick.Effects
 import QtQuick.Shapes
 import "PortalPalette.js" as Palette
+import "../state/ThemePalette.js" as ThemePalette
 
 Item {
     id: root
 
     property var agents: []
+    property var theme: ThemePalette.fallback
     property var voice: ({})
     property string connectionState: "reconnecting"
     property bool reducedMotion: false
@@ -14,7 +16,12 @@ Item {
     property real phase: 0
 
     readonly property string mode: Palette.perimeterMode(agents)
-    readonly property color accent: Palette.ambientColor(mode)
+    readonly property color accent: Palette.ambientColor(mode, theme)
+    readonly property color readableAccent: ThemePalette.ensureContrast(
+        String(accent),
+        String(theme.surface),
+        4.5
+    )
     readonly property bool active: mode !== "off" && !suppressRunners
     readonly property bool moving: active && !reducedMotion
     readonly property int runnerCount: 2
@@ -308,7 +315,7 @@ Item {
         )
 
         ShapePath {
-            strokeColor: "#e8fbff"
+            strokeColor: root.theme.textPrimary
             strokeWidth: runnerCore.strokeWidth
             fillColor: "transparent"
             capStyle: ShapePath.RoundCap
@@ -384,7 +391,7 @@ Item {
         width: haloText.implicitWidth + 30
         height: root.active ? 27 : 0
         radius: 14
-        color: "#e8070d18"
+        color: Qt.alpha(root.theme.surface, 0.9)
         border.width: height > 0 ? 1 : 0
         border.color: Qt.alpha(root.accent, 0.48)
         clip: true
@@ -396,7 +403,7 @@ Item {
             anchors.centerIn: parent
             text: Palette.ambientLabel(root.mode)
             textFormat: Text.PlainText
-            color: root.accent
+            color: root.readableAccent
             font {
                 family: "monospace"
                 pixelSize: 11

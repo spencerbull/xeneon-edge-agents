@@ -1,11 +1,13 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Rectangle {
     id: root
 
     property string label: ""
     property string stateLabel: ""
-    property color accent: "#55e9ff"
+    property var theme: ThemePalette.fallback
+    property color accent: theme.accent
     property bool checked: false
 
     signal toggled()
@@ -19,14 +21,14 @@ Rectangle {
 
     radius: 13
     color: settingTap.pressed
-        ? "#17283a"
+        ? theme.surfacePressed
         : checked
             ? Qt.alpha(accent, 0.12)
-            : "#0b1523"
+            : theme.surfaceRaised
     border.width: 1
     border.color: checked
         ? Qt.alpha(accent, 0.78)
-        : "#34506b"
+        : theme.border
 
     Accessible.role: Accessible.Button
     Accessible.ignored: !enabled
@@ -45,7 +47,7 @@ Rectangle {
             width: 9
             height: 9
             radius: width / 2
-            color: root.checked ? root.accent : "#526b82"
+            color: root.checked ? root.accent : root.theme.textMuted
 
             Rectangle {
                 anchors {
@@ -66,7 +68,7 @@ Rectangle {
             Text {
                 text: root.label
                 textFormat: Text.PlainText
-                color: "#e8f8fc"
+                color: root.theme.textPrimary
                 font {
                     family: "monospace"
                     pixelSize: 11
@@ -78,7 +80,13 @@ Rectangle {
             Text {
                 text: root.stateLabel
                 textFormat: Text.PlainText
-                color: root.checked ? root.accent : "#7892aa"
+                color: root.checked
+                    ? ThemePalette.ensureContrast(
+                        String(root.accent),
+                        String(root.theme.surfaceRaised),
+                        4.5
+                    )
+                    : root.theme.textMuted
                 font {
                     family: "monospace"
                     pixelSize: 8

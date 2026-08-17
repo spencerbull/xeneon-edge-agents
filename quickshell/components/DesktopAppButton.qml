@@ -1,17 +1,19 @@
 import QtQuick
+import "../state/ThemePalette.js" as ThemePalette
 
 Rectangle {
     id: root
 
     property string label: ""
     property string detail: "OPEN / FOCUS"
-    property color accent: "#55e9ff"
+    property var theme: ThemePalette.fallback
+    property color accent: theme.accent
     property bool pending: false
     signal triggered()
     signal interacted()
 
     radius: 14
-    color: tapHandler.pressed ? "#14283a" : "#0b1523"
+    color: tapHandler.pressed ? theme.surfacePressed : theme.surfaceRaised
     border.width: 1
     border.color: Qt.alpha(accent, pending ? 0.35 : 0.62)
     opacity: enabled ? 1 : 0.42
@@ -38,7 +40,7 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.label
             textFormat: Text.PlainText
-            color: "#ecfbff"
+            color: root.theme.textPrimary
             font {
                 family: "monospace"
                 pixelSize: 15
@@ -51,7 +53,11 @@ Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             text: root.pending ? "OPENING" : root.detail
             textFormat: Text.PlainText
-            color: root.accent
+            color: ThemePalette.ensureContrast(
+                String(root.accent),
+                String(root.theme.surfaceRaised),
+                4.5
+            )
             font {
                 family: "monospace"
                 pixelSize: 9

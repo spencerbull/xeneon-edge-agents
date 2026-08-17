@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -54,11 +53,10 @@ impl HealthCollector {
                 || Metric::unavailable("°C"),
                 |value| Metric::available(value, "°C"),
             ),
-            gpu: first_number_matching(&self.sys_root.join("class/drm"), "gpu_busy_percent", 1.0)
-                .map_or_else(
-                    || Metric::unavailable("%"),
-                    |value| Metric::available(value, "%"),
-                ),
+            gpu: gpu_busy_percent(&self.sys_root).map_or_else(
+                || Metric::unavailable("%"),
+                |value| Metric::available(value, "%"),
+            ),
             gpu_temperature: gpu_temperature(&self.sys_root).map_or_else(
                 || Metric::unavailable("°C"),
                 |value| Metric::available(value, "°C"),
@@ -198,40 +196,39 @@ fn first_temperature(root: &Path) -> Option<f64> {
 }
 
 fn gpu_temperature(sys_root: &Path) -> Option<f64> {
-    first_number_matching(&sys_root.join("class/drm"), "temp1_input", 1_000.0)
+    drm_cards(&sys_root.join("class/drm")).find_map(|card| {
+        let device = card.join("device");
+        sorted_dirs_following_symlinks(&device.join("hwmon"))
+            .into_iter()
+            .find_map(|hwmon| read_number(&hwmon.join("temp1_input"), 1_000.0))
+    })
 }
 
-fn first_number_matching(root: &Path, file_name: &str, divisor: f64) -> Option<f64> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut seen = HashSet::new();
-    let mut visited = 0;
-    while let Some(path) = stack.pop() {
-        if visited >= 512 {
-            break;
-        }
-        let Ok(canonical) = fs::canonicalize(&path) else {
-            continue;
-        };
-        if !seen.insert(canonical) {
-            continue;
-        }
-        visited += 1;
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let child = entry.path();
-            if child.file_name().is_some_and(|name| name == file_name)
-                && let Some(value) = read_number(&child, divisor)
-            {
-                return Some(value);
-            }
-            if fs::metadata(&child).is_ok_and(|metadata| metadata.is_dir()) {
-                stack.push(child);
-            }
-        }
-    }
-    None
+fn gpu_busy_percent(sys_root: &Path) -> Option<f64> {
+    drm_cards(&sys_root.join("class/drm")).find_map(|card| {
+        read_number(&card.join("device/gpu_busy_percent"), 1.0)
+            .or_else(|| read_number(&card.join("gpu_busy_percent"), 1.0))
+    })
+}
+
+fn drm_cards(root: &Path) -> impl Iterator<Item = PathBuf> {
+    let mut cards: Vec<_> = fs::read_dir(root)
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter(|entry| {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let Some(index) = name.strip_prefix("card") else {
+                return false;
+            };
+            !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map(|entry| entry.path())
+        .collect();
+    cards.sort();
+    cards.into_iter()
 }
 
 fn read_number(path: &Path, divisor: f64) -> Option<f64> {
@@ -249,6 +246,17 @@ fn sorted_dirs(root: &Path) -> Vec<PathBuf> {
         .flat_map(|entries| entries.flatten())
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn sorted_dirs_following_symlinks(root: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = fs::read_dir(root)
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
+        .filter(|path| fs::metadata(path).is_ok_and(|kind| kind.is_dir()))
         .collect();
     paths.sort();
     paths
@@ -330,17 +338,28 @@ mod tests {
     }
 
     #[test]
-    fn follows_drm_class_symlink_without_looping() {
+    fn reads_bounded_drm_card_metrics_without_recursive_device_walk() {
         let root = tempfile::tempdir().unwrap();
         let device = root.path().join("devices/gpu");
         write(&device.join("gpu_busy_percent"), "37\n");
+        write(&device.join("hwmon/hwmon0/temp1_input"), "51000\n");
+        write(&device.join("unrelated/nested/gpu_busy_percent"), "99\n");
         let drm = root.path().join("sys/class/drm");
-        fs::create_dir_all(&drm).unwrap();
-        symlink(&device, drm.join("card1")).unwrap();
+        fs::create_dir_all(drm.join("card1")).unwrap();
+        symlink(&device, drm.join("card1/device")).unwrap();
 
-        assert_eq!(
-            first_number_matching(&drm, "gpu_busy_percent", 1.0),
-            Some(37.0)
-        );
+        assert_eq!(gpu_busy_percent(&root.path().join("sys")), Some(37.0));
+        assert_eq!(gpu_temperature(&root.path().join("sys")), Some(51.0));
+    }
+
+    #[test]
+    fn ignores_connector_and_unbounded_drm_subtrees() {
+        let root = tempfile::tempdir().unwrap();
+        let drm = root.path().join("sys/class/drm");
+        write(&drm.join("card0-DP-1/device/gpu_busy_percent"), "88\n");
+        write(&drm.join("renderD128/nested/gpu_busy_percent"), "77\n");
+
+        assert_eq!(gpu_busy_percent(&root.path().join("sys")), None);
+        assert_eq!(gpu_temperature(&root.path().join("sys")), None);
     }
 }

@@ -13,7 +13,9 @@ QtObject {
         "claude_desktop",
         "voice_start",
         "voice_stop",
-        "voice_cancel"
+        "voice_cancel",
+        "order_grouped",
+        "order_priority"
     ]
 
     property int requestCounter: 0
@@ -47,6 +49,8 @@ QtObject {
             || action === "voice_start"
             || action === "voice_stop"
             || action === "voice_cancel"
+            || action === "order_grouped"
+            || action === "order_priority"
 
         if (systemAction) {
             if (normalizedAgentId !== ""

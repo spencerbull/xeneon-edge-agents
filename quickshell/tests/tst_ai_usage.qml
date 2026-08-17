@@ -33,12 +33,12 @@ TestCase {
                 "source": "oauth",
                 "status": "allowed_warning",
                 "primary": {
-                    "label": "5h",
+                    "label": "Session (5-hour)",
                     "utilization": 0.03,
                     "reset_at_ms": Date.now() + 7200000
                 },
                 "secondary": {
-                    "label": "Weekly",
+                    "label": "Weekly (7-day)",
                     "utilization": 0.07,
                     "reset_at_ms": Date.now() + 604800000
                 },
@@ -53,7 +53,7 @@ TestCase {
                 "status": "allowed",
                 "plan": "pro",
                 "primary": {
-                    "label": "Weekly",
+                    "label": "Weekly (7-day)",
                     "utilization": 0.74,
                     "reset_at_ms": Date.now() + 86400000
                 },
@@ -102,6 +102,9 @@ TestCase {
         )
         compare(opencode.statusLabel, "STALE")
         compare(opencode.activityLabel, "GPT-5.6-SOL (OPENAI)")
+        verify(!findChild(dock, "usageLabel_claude_primary").truncated)
+        verify(!findChild(dock, "usageLabel_claude_secondary").truncated)
+        verify(!findChild(dock, "usageLabel_codex_primary").truncated)
     }
 
     function test_statusAndFormattingStayBoundedAndExplicit() {

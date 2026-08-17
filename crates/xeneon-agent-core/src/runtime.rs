@@ -12,7 +12,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{Mutex, RwLock, mpsc, watch},
-    task::JoinHandle,
+    task::{JoinHandle, spawn_blocking},
     time::{MissedTickBehavior, interval, sleep},
 };
 use uuid::Uuid;
@@ -24,9 +24,9 @@ use crate::{
     herdr::{AgentTarget, HerdrClient, SessionDescriptor},
     micro::MicroCollector,
     model::{
-        ActionKind, ActionResult, AgentActions, AgentStatus, ConnectionState, PortalCommand,
-        PortalSnapshot, SCHEMA_VERSION, ServerMessage, SessionState, SessionView, VoiceState,
-        sort_agents,
+        ActionKind, ActionResult, AgentActions, AgentOrderMode, AgentOrderSnapshot, AgentStatus,
+        ConnectionState, PortalCommand, PortalSnapshot, SCHEMA_VERSION, ServerMessage,
+        SessionState, SessionView, VoiceState, sort_agents,
     },
     protocol::{command_capability_matches, validate_command},
     usage::UsageCollector,
@@ -34,6 +34,18 @@ use crate::{
 };
 
 const INVALIDATION_COALESCE: Duration = Duration::from_millis(200);
+
+fn apply_agent_order(agents: &mut [crate::model::AgentView], order: &AgentOrderSnapshot) {
+    if order.available && order.mode == AgentOrderMode::Grouped {
+        agents.sort_by(|left, right| {
+            left.source_order
+                .cmp(&right.source_order)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+    } else {
+        sort_agents(agents);
+    }
+}
 
 #[derive(Debug)]
 struct RuntimeState {
@@ -66,6 +78,7 @@ pub struct DaemonRuntime {
     state: Arc<RwLock<RuntimeState>>,
     desktop: Arc<DesktopController>,
     voice: Arc<Mutex<VoiceController>>,
+    order_operation: Arc<Mutex<()>>,
     updates: watch::Sender<String>,
     invalidations: mpsc::Sender<String>,
 }
@@ -94,6 +107,7 @@ impl DaemonRuntime {
                 })),
                 desktop: Arc::new(desktop),
                 voice: Arc::new(Mutex::new(voice)),
+                order_operation: Arc::new(Mutex::new(())),
                 updates,
                 invalidations,
             },
@@ -108,6 +122,10 @@ impl DaemonRuntime {
         let auxiliary_runtime = self.clone();
         let mut auxiliary_collector = tokio::spawn(async move {
             auxiliary_runtime.collect_auxiliary_loop().await;
+        });
+        let usage_runtime = self.clone();
+        let mut usage_collector = tokio::spawn(async move {
+            usage_runtime.collect_usage_loop().await;
         });
         let herdr_runtime = self.clone();
         let mut herdr_collector = tokio::spawn(async move {
@@ -124,6 +142,10 @@ impl DaemonRuntime {
                     result.context("joining Herdr state collector")?;
                     bail!("Herdr state collector stopped unexpectedly");
                 }
+                result = &mut usage_collector => {
+                    result.context("joining usage state collector")?;
+                    bail!("usage state collector stopped unexpectedly");
+                }
                 accepted = listener.accept() => {
                     let (stream, _) = accepted.context("accepting portal client")?;
                     let client_runtime = self.clone();
@@ -139,15 +161,12 @@ impl DaemonRuntime {
 
     async fn collect_auxiliary_loop(&self) {
         let mut health = HealthCollector::default();
-        let usage = UsageCollector::default();
         let micro = MicroCollector::default();
         let mut health_tick = interval(self.config.health_refresh_interval());
         let mut voice_tick = interval(self.config.voice_refresh_interval());
-        let mut usage_tick = interval(self.config.usage_refresh_interval());
         let mut micro_tick = interval(self.config.micro_refresh_interval());
         health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         voice_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        usage_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         micro_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -165,16 +184,6 @@ impl DaemonRuntime {
                 _ = voice_tick.tick() => {
                     self.refresh_voice().await;
                 }
-                _ = usage_tick.tick() => {
-                    let sample = usage.sample();
-                    let mut state = self.state.write().await;
-                    if state.snapshot.usage != sample {
-                        state.snapshot.usage = sample;
-                        state.snapshot.generated_at_ms = now_ms();
-                        drop(state);
-                        self.publish().await;
-                    }
-                }
                 _ = micro_tick.tick() => {
                     let sample = micro.sample().await;
                     let mut state = self.state.write().await;
@@ -185,6 +194,31 @@ impl DaemonRuntime {
                         self.publish().await;
                     }
                 }
+            }
+        }
+    }
+
+    async fn collect_usage_loop(&self) {
+        let usage = UsageCollector::default();
+        let mut usage_tick = interval(self.config.usage_refresh_interval());
+        usage_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            usage_tick.tick().await;
+            let collector = usage.clone();
+            let sample = match spawn_blocking(move || collector.sample()).await {
+                Ok(sample) => sample,
+                Err(error) => {
+                    tracing::warn!(%error, "usage collector task failed");
+                    continue;
+                }
+            };
+            let mut state = self.state.write().await;
+            if state.snapshot.usage != sample {
+                state.snapshot.usage = sample;
+                state.snapshot.generated_at_ms = now_ms();
+                drop(state);
+                self.publish().await;
             }
         }
     }
@@ -232,6 +266,9 @@ impl DaemonRuntime {
     }
 
     async fn refresh_herdr(&self, subscriptions: &mut HashMap<String, Subscription>) {
+        // Keep a collected ordering snapshot from publishing after a completed
+        // ordering mutation, and serialize collection with compensating writes.
+        let _order_guard = self.order_operation.lock().await;
         let observation_time_ms = now_ms();
         let descriptors = match self.herdr.discover().await {
             Ok(descriptors) => descriptors,
@@ -246,6 +283,8 @@ impl DaemonRuntime {
                 for agent in &mut state.snapshot.agents {
                     agent.actions = AgentActions::default();
                 }
+                state.snapshot.agent_order = AgentOrderSnapshot::default();
+                sort_agents(&mut state.snapshot.agents);
                 state.targets.clear();
                 state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
                 state.snapshot.generated_at_ms = now_ms();
@@ -261,6 +300,7 @@ impl DaemonRuntime {
         let mut agents = Vec::new();
         let mut targets = HashMap::new();
         let mut connected = 0usize;
+        let mut order_modes = Vec::new();
         let mut source_offset = 0usize;
         let mut active_names = Vec::new();
 
@@ -367,6 +407,9 @@ impl DaemonRuntime {
                         }
                     }
                     connected += 1;
+                    if let Some(mode) = observation.agent_order {
+                        order_modes.push(mode);
+                    }
                     source_offset += observation.agents.len();
                     sessions.push(observation.session);
                     targets.extend(observation.targets);
@@ -415,9 +458,22 @@ impl DaemonRuntime {
             ..
         } = &mut *state;
         apply_agent_observations(&mut agents, &targets, observed, focused_agents, now);
-        sort_agents(&mut agents);
+        let agent_order = if !descriptors.is_empty()
+            && connected == descriptors.len()
+            && order_modes.len() == connected
+            && order_modes.iter().all(|mode| *mode == order_modes[0])
+        {
+            AgentOrderSnapshot {
+                available: true,
+                mode: order_modes[0],
+            }
+        } else {
+            AgentOrderSnapshot::default()
+        };
+        apply_agent_order(&mut agents, &agent_order);
         state.snapshot.sessions = sessions;
         state.snapshot.agents = agents;
+        state.snapshot.agent_order = agent_order;
         state.snapshot.connection = if descriptors.is_empty() {
             ConnectionState::Offline
         } else if connected == descriptors.len() {
@@ -542,6 +598,13 @@ impl DaemonRuntime {
             return self.process_voice_command(&command, client_id).await;
         }
 
+        if matches!(
+            command.action,
+            ActionKind::OrderGrouped | ActionKind::OrderPriority
+        ) {
+            return self.process_agent_order_command(&command).await;
+        }
+
         let (snapshot_sequence, agent, target) = {
             let state = self.state.read().await;
             (
@@ -589,7 +652,9 @@ impl DaemonRuntime {
             | ActionKind::ClaudeDesktop
             | ActionKind::VoiceStart
             | ActionKind::VoiceStop
-            | ActionKind::VoiceCancel => true,
+            | ActionKind::VoiceCancel
+            | ActionKind::OrderGrouped
+            | ActionKind::OrderPriority => true,
         };
         if !enabled {
             return action_error(
@@ -649,6 +714,152 @@ impl DaemonRuntime {
                 action_error(&command.request_id, code, public_message)
             }
         }
+    }
+
+    async fn process_agent_order_command(&self, command: &PortalCommand) -> ActionResult {
+        let _order_guard = self.order_operation.lock().await;
+        let authoritative = self.state.read().await.snapshot.agent_order.clone();
+        let sequence = self.state.read().await.snapshot.sequence;
+        if command.sequence != sequence || !authoritative.available {
+            return action_error(
+                &command.request_id,
+                "stale_snapshot",
+                "the authoritative Herdr ordering changed before the action",
+            );
+        }
+        let mode = match command.action {
+            ActionKind::OrderGrouped => AgentOrderMode::Grouped,
+            ActionKind::OrderPriority => AgentOrderMode::Priority,
+            _ => unreachable!("ordering command filtered before dispatch"),
+        };
+        let descriptors = match self.herdr.discover().await {
+            Ok(descriptors) if !descriptors.is_empty() => descriptors,
+            Ok(_) => {
+                return action_error(
+                    &command.request_id,
+                    "session_disconnected",
+                    "no running Herdr session can change agent ordering",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Herdr discovery failed for agent ordering");
+                return action_error(
+                    &command.request_id,
+                    "session_disconnected",
+                    "Herdr agent ordering is unavailable",
+                );
+            }
+        };
+
+        let mut prior_modes = Vec::with_capacity(descriptors.len());
+        for descriptor in &descriptors {
+            match self.herdr.get_agent_order(descriptor).await {
+                Ok(prior) => prior_modes.push((descriptor.clone(), prior)),
+                Err(error) => {
+                    tracing::warn!(session = %descriptor.name, %error, "Herdr agent ordering preflight failed");
+                    let _ = self.invalidations.try_send(descriptor.name.clone());
+                    return action_error(
+                        &command.request_id,
+                        "target_unavailable",
+                        "Herdr could not verify agent ordering",
+                    );
+                }
+            }
+        }
+        if prior_modes
+            .iter()
+            .any(|(_, prior)| *prior != authoritative.mode)
+        {
+            for (descriptor, _) in &prior_modes {
+                let _ = self.invalidations.try_send(descriptor.name.clone());
+            }
+            return action_error(
+                &command.request_id,
+                "stale_snapshot",
+                "Herdr ordering changed before the action",
+            );
+        }
+
+        let mut attempted = Vec::new();
+        for (descriptor, prior) in &prior_modes {
+            if *prior == mode {
+                continue;
+            }
+            // A failed response is ambiguous: Herdr may have persisted the
+            // idempotent SET before the socket closed. Compensate every
+            // attempted descriptor, including the one returning the error.
+            attempted.push((descriptor.clone(), *prior));
+            if let Err(error) = self.herdr.set_agent_order(descriptor, mode).await {
+                tracing::warn!(session = %descriptor.name, %error, "Herdr agent ordering failed");
+                let mut compensated = true;
+                for (changed_descriptor, changed_prior) in attempted.iter().rev() {
+                    if let Err(compensation_error) = self
+                        .herdr
+                        .set_agent_order(changed_descriptor, *changed_prior)
+                        .await
+                    {
+                        compensated = false;
+                        tracing::error!(
+                            session = %changed_descriptor.name,
+                            %compensation_error,
+                            "Herdr agent ordering compensation failed"
+                        );
+                    }
+                }
+                for (checked_descriptor, checked_prior) in &prior_modes {
+                    match self.herdr.get_agent_order(checked_descriptor).await {
+                        Ok(actual) if actual == *checked_prior => {}
+                        Ok(actual) => {
+                            compensated = false;
+                            tracing::error!(
+                                session = %checked_descriptor.name,
+                                ?actual,
+                                expected = ?checked_prior,
+                                "Herdr ordering differs after compensation"
+                            );
+                        }
+                        Err(check_error) => {
+                            compensated = false;
+                            tracing::error!(
+                                session = %checked_descriptor.name,
+                                %check_error,
+                                "Herdr ordering compensation could not be verified"
+                            );
+                        }
+                    }
+                    let _ = self.invalidations.try_send(checked_descriptor.name.clone());
+                }
+                if !compensated {
+                    let mut state = self.state.write().await;
+                    state.snapshot.agent_order = AgentOrderSnapshot::default();
+                    state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
+                    state.snapshot.generated_at_ms = now_ms();
+                    drop(state);
+                    self.publish().await;
+                }
+                return action_error(
+                    &command.request_id,
+                    "target_unavailable",
+                    "Herdr could not synchronize agent ordering",
+                );
+            }
+        }
+
+        let mut state = self.state.write().await;
+        state.snapshot.agent_order = AgentOrderSnapshot {
+            available: true,
+            mode,
+        };
+        let ordering = state.snapshot.agent_order.clone();
+        apply_agent_order(&mut state.snapshot.agents, &ordering);
+        state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
+        state.snapshot.generated_at_ms = now_ms();
+        drop(state);
+        self.publish().await;
+        for descriptor in &descriptors {
+            let _ = self.invalidations.try_send(descriptor.name.clone());
+        }
+        action_ok(&command.request_id, "agent_order_updated")
     }
 
     async fn process_voice_command(
@@ -1010,6 +1221,375 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(value["type"], "snapshot");
         assert_eq!(value["voice"]["state"], "unavailable");
+        assert_eq!(value["agent_order"]["available"], false);
+    }
+
+    #[test]
+    fn agent_order_uses_source_order_for_grouped_and_attention_for_priority() {
+        let mut agents = vec![
+            AgentView {
+                source_order: 0,
+                ..test_agent("workspace-first", AgentStatus::Idle, false)
+            },
+            AgentView {
+                source_order: 1,
+                ..test_agent("attention-first", AgentStatus::Blocked, false)
+            },
+        ];
+        apply_agent_order(
+            &mut agents,
+            &AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            },
+        );
+        assert_eq!(agents[0].id, "workspace-first");
+        apply_agent_order(
+            &mut agents,
+            &AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Priority,
+            },
+        );
+        assert_eq!(agents[0].id, "attention-first");
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_clears_stale_ordering_and_restores_fallback_sort() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("herdr");
+        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+            state.snapshot.agents = vec![
+                AgentView {
+                    source_order: 0,
+                    ..test_agent("workspace-first", AgentStatus::Idle, false)
+                },
+                AgentView {
+                    source_order: 1,
+                    ..test_agent("attention-first", AgentStatus::Blocked, false)
+                },
+            ];
+        }
+
+        runtime.refresh_herdr(&mut HashMap::new()).await;
+
+        let state = runtime.state.read().await;
+        assert_eq!(state.snapshot.connection, ConnectionState::Offline);
+        assert!(!state.snapshot.agent_order.available);
+        assert_eq!(state.snapshot.agents[0].id, "attention-first");
+    }
+
+    #[tokio::test]
+    async fn order_command_updates_herdr_and_the_published_card_order_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "agent.order.get");
+            write
+                .write_all(b"{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n")
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "agent.order.set");
+            assert_eq!(request["params"], serde_json::json!({"order": "priority"}));
+            write
+                .write_all(b"{\"result\":{\"type\":\"agent_order\",\"order\":\"priority\"}}\n")
+                .await
+                .unwrap();
+        });
+        let binary = temp.path().join("herdr");
+        let session_list = serde_json::json!({
+            "sessions": [{
+                "name": "default",
+                "running": true,
+                "socket_path": socket
+            }]
+        });
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", session_list),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = Config {
+            herdr_bin: binary,
+            ..Config::default()
+        };
+        let (runtime, _) = DaemonRuntime::new(config).unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 7;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+            state.snapshot.agents = vec![
+                AgentView {
+                    source_order: 0,
+                    ..test_agent("workspace-first", AgentStatus::Idle, false)
+                },
+                AgentView {
+                    source_order: 1,
+                    ..test_agent("attention-first", AgentStatus::Blocked, false)
+                },
+            ];
+        }
+        let result = runtime
+            .process_agent_order_command(&PortalCommand {
+                schema_version: SCHEMA_VERSION,
+                request_id: "order".into(),
+                sequence: 7,
+                agent_id: None,
+                action: ActionKind::OrderPriority,
+                capability_id: None,
+            })
+            .await;
+
+        assert!(result.ok);
+        let state = runtime.state.read().await;
+        assert!(state.snapshot.agent_order.available);
+        assert_eq!(state.snapshot.agent_order.mode, AgentOrderMode::Priority);
+        assert_eq!(state.snapshot.agents[0].id, "attention-first");
+        assert_eq!(state.snapshot.sequence, 8);
+        drop(state);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn order_command_compensates_a_partial_multi_session_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_socket = temp.path().join("first.sock");
+        let second_socket = temp.path().join("second.sock");
+        let first_listener = tokio::net::UnixListener::bind(&first_socket).unwrap();
+        let second_listener = tokio::net::UnixListener::bind(&second_socket).unwrap();
+
+        let first = tokio::spawn(async move {
+            for (method, order, response) in [
+                (
+                    "agent.order.get",
+                    None,
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+                (
+                    "agent.order.set",
+                    Some("priority"),
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"priority\"}}\n",
+                ),
+                (
+                    "agent.order.set",
+                    Some("grouped"),
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+                (
+                    "agent.order.get",
+                    None,
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+            ] {
+                let (stream, _) = first_listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], method);
+                if let Some(order) = order {
+                    assert_eq!(request["params"]["order"], order);
+                }
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let second = tokio::spawn(async move {
+            for (method, order, response) in [
+                (
+                    "agent.order.get",
+                    None,
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+                ("agent.order.set", Some("priority"), ""),
+                (
+                    "agent.order.set",
+                    Some("grouped"),
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+                (
+                    "agent.order.get",
+                    None,
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n",
+                ),
+            ] {
+                let (stream, _) = second_listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], method);
+                if let Some(order) = order {
+                    assert_eq!(request["params"]["order"], order);
+                }
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let binary = temp.path().join("herdr");
+        let session_list = serde_json::json!({
+            "sessions": [
+                {"name": "first", "running": true, "socket_path": first_socket},
+                {"name": "second", "running": true, "socket_path": second_socket}
+            ]
+        });
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", session_list),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 7;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+        }
+
+        let result = runtime
+            .process_agent_order_command(&PortalCommand {
+                schema_version: SCHEMA_VERSION,
+                request_id: "order-partial".into(),
+                sequence: 7,
+                agent_id: None,
+                action: ActionKind::OrderPriority,
+                capability_id: None,
+            })
+            .await;
+
+        assert!(!result.ok);
+        assert_eq!(result.code, "target_unavailable");
+        let state = runtime.state.read().await;
+        assert_eq!(state.snapshot.sequence, 7);
+        assert_eq!(state.snapshot.agent_order.mode, AgentOrderMode::Grouped);
+        assert!(state.snapshot.agent_order.available);
+        drop(state);
+        first.await.unwrap();
+        second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_order_commands_serialize_and_recheck_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (preflight_started_tx, preflight_started_rx) = tokio::sync::oneshot::channel();
+        let (release_preflight_tx, release_preflight_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "agent.order.get");
+            preflight_started_tx.send(()).unwrap();
+            release_preflight_rx.await.unwrap();
+            write
+                .write_all(b"{\"result\":{\"type\":\"agent_order\",\"order\":\"grouped\"}}\n")
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "agent.order.set");
+            write
+                .write_all(b"{\"result\":{\"type\":\"agent_order\",\"order\":\"priority\"}}\n")
+                .await
+                .unwrap();
+        });
+        let binary = temp.path().join("herdr");
+        let session_list = serde_json::json!({
+            "sessions": [{"name": "default", "running": true, "socket_path": socket}]
+        });
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", session_list),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 7;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+        }
+        let command = PortalCommand {
+            schema_version: SCHEMA_VERSION,
+            request_id: "first".into(),
+            sequence: 7,
+            agent_id: None,
+            action: ActionKind::OrderPriority,
+            capability_id: None,
+        };
+        let first_runtime = runtime.clone();
+        let first =
+            tokio::spawn(async move { first_runtime.process_agent_order_command(&command).await });
+        preflight_started_rx.await.unwrap();
+        let second_runtime = runtime.clone();
+        let second = tokio::spawn(async move {
+            second_runtime
+                .process_agent_order_command(&PortalCommand {
+                    schema_version: SCHEMA_VERSION,
+                    request_id: "second".into(),
+                    sequence: 7,
+                    agent_id: None,
+                    action: ActionKind::OrderPriority,
+                    capability_id: None,
+                })
+                .await
+        });
+        release_preflight_tx.send(()).unwrap();
+
+        assert!(first.await.unwrap().ok);
+        let second = second.await.unwrap();
+        assert!(!second.ok);
+        assert_eq!(second.code, "stale_snapshot");
+        assert_eq!(runtime.state.read().await.snapshot.sequence, 8);
+        server.await.unwrap();
     }
 
     #[test]
@@ -1203,6 +1783,7 @@ mod tests {
             session: "default".into(),
             focused,
             observed_for_seconds: 0,
+            state_change_seq: 0,
             source_order: 0,
             actions: AgentActions::default(),
         }

@@ -82,6 +82,7 @@ TestCase {
             "focused": false,
             "review_ready": false,
             "observed_for_seconds": 3,
+            "state_change_seq": 0,
             "source_order": sourceOrder,
             "terminal_text": "must be discarded",
             "prompt_text": "must be discarded",
@@ -132,6 +133,74 @@ TestCase {
         compare(store.health.status, "partial")
         compare(store.voice.state, "idle")
         compare(store.surfaceState(), "ready")
+    }
+
+    function test_incompatibleSessionSurfacesBoundedReason() {
+        var incompatible = snapshot(
+            11,
+            "epoch-incompatible",
+            [],
+            "reconnecting"
+        )
+        incompatible.sessions[0].state = "incompatible"
+        incompatible.sessions[0].protocol = 21
+        incompatible.sessions[0].message =
+            "Herdr protocol 21 is unsupported; expected 20"
+
+        verify(store.ingestEnvelope(incompatible))
+        compare(store.sessions[0].state, "incompatible")
+        compare(store.sessions[0].message,
+                "Herdr protocol 21 is unsupported; expected 20")
+        compare(store.connection.state, "reconnecting")
+        compare(store.connection.detail,
+                "Herdr protocol 21 is unsupported; expected 20")
+    }
+
+    function test_agentOrderSwitchesBetweenHerdrGroupedAndPriorityOrder() {
+        var grouped = snapshot(
+            1,
+            "epoch-order",
+            [
+                agent("workspace-first", 0, "idle"),
+                agent("attention-first", 1, "blocked")
+            ]
+        )
+        grouped.agent_order = {"available": true, "mode": "grouped"}
+        verify(store.ingestEnvelope(grouped))
+        compare(store.agentOrder.mode, "grouped")
+        compare(store.agents[0].id, "workspace-first")
+
+        var priority = snapshot(
+            2,
+            "epoch-order",
+            grouped.agents
+        )
+        priority.agent_order = {"available": true, "mode": "priority"}
+        verify(store.ingestEnvelope(priority))
+        compare(store.agentOrder.mode, "priority")
+        compare(store.agents[0].id, "attention-first")
+
+        var priorityTie = snapshot(
+            3,
+            "epoch-order",
+            [
+                Object.assign(agent("older-working", 0, "working"), {
+                    "state_change_seq": 3
+                }),
+                Object.assign(agent("newer-working", 1, "working"), {
+                    "state_change_seq": 9
+                })
+            ]
+        )
+        priorityTie.agent_order = {"available": true, "mode": "priority"}
+        verify(store.ingestEnvelope(priorityTie))
+        compare(store.agents[0].id, "newer-working")
+
+        var unavailable = snapshot(4, "epoch-order", grouped.agents)
+        unavailable.agent_order = {"available": false, "mode": "grouped"}
+        verify(store.ingestEnvelope(unavailable))
+        compare(store.agentOrder.available, false)
+        compare(store.agents[0].id, "attention-first")
     }
 
     function test_rejectsStaleSequenceButAcceptsNewEpoch() {
