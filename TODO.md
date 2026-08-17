@@ -364,8 +364,9 @@ state; the daemon and portal run only while that exact hardware is present.
   before merge; neither incremental change is installed or pushed yet.
   Independent read-only reviewer `xeneon_palette_review` (Claude) completed
   the review/fix/re-review loop with no remaining P0-P2 findings; its Herdr
-  pane `wW:pN` was closed after graceful agent exit. Physical pane/two-theme
-  QA, push, and hosted CI remain. Final local
+  pane `wW:pN` was closed after graceful agent exit. PR #7 passed all hosted
+  Rust, QML, and integration jobs and squash-merged into `main` at `ae54cee`;
+  only physical pane/two-theme QA remains for this increment. Final local
   revalidation passes 78 Rust core tests, the CLI test, strict Clippy/rustfmt,
   ShellCheck, 27 Python and 112 Qt QML tests, all 31 installer scenarios, and
   `git diff --check`. The reviewed tree is installed after exact output/touch
