@@ -33,6 +33,7 @@ pub enum DesktopAppOutcome {
 struct DesktopAppSpec {
     desktop_id: &'static str,
     class: &'static str,
+    main_title: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ pub struct DesktopController {
     remembered_window: Arc<Mutex<Option<String>>>,
     launching_since: Arc<Mutex<HashMap<DesktopApp, Instant>>>,
     hyprctl_bin: PathBuf,
-    uwsm_app_bin: PathBuf,
+    uwsm_bin: PathBuf,
     launch_poll_interval: Duration,
     launch_observation_timeout: Duration,
     launch_coalesce_for: Duration,
@@ -56,8 +57,14 @@ struct HyprClient {
     initial_class: String,
     #[serde(default)]
     title: String,
+    #[serde(default, rename = "initialTitle")]
+    initial_title: String,
     pid: i32,
     monitor: i64,
+    #[serde(default)]
+    floating: bool,
+    #[serde(default, rename = "focusHistoryID")]
+    focus_history_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +82,7 @@ impl DesktopController {
             remembered_window: Arc::new(Mutex::new(None)),
             launching_since: Arc::new(Mutex::new(HashMap::new())),
             hyprctl_bin: PathBuf::from("hyprctl"),
-            uwsm_app_bin: PathBuf::from("uwsm-app"),
+            uwsm_bin: PathBuf::from("uwsm"),
             launch_poll_interval: Duration::from_millis(100),
             launch_observation_timeout: Duration::from_secs(12),
             launch_coalesce_for: Duration::from_secs(20),
@@ -133,14 +140,13 @@ impl DesktopController {
     pub async fn focus_or_launch(&self, app: DesktopApp) -> Result<DesktopAppOutcome> {
         let spec = desktop_app_spec(app);
         let clients = hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await?;
-        let candidates = desktop_candidates(&clients, spec);
-        match candidates.as_slice() {
-            [client] => {
+        match select_desktop_candidate(&clients, spec)? {
+            Some(client) => {
                 self.launching_since.lock().await.remove(&app);
                 dispatch_focus(&self.hyprctl_bin, &client.address).await?;
                 Ok(DesktopAppOutcome::Focused)
             }
-            [] => {
+            None => {
                 let now = Instant::now();
                 let mut launches = self.launching_since.lock().await;
                 let launch_in_flight = launches
@@ -150,19 +156,13 @@ impl DesktopController {
                     launches.insert(app, now);
                 }
                 drop(launches);
-                if !launch_in_flight
-                    && let Err(error) = launch_desktop(&self.uwsm_app_bin, spec).await
+                if !launch_in_flight && let Err(error) = launch_desktop(&self.uwsm_bin, spec).await
                 {
                     self.launching_since.lock().await.remove(&app);
                     return Err(error);
                 }
                 self.wait_for_launched_client(app, spec).await
             }
-            _ => bail!(
-                "expected at most one {} window, found {}",
-                spec.class,
-                candidates.len()
-            ),
         }
     }
 
@@ -174,23 +174,30 @@ impl DesktopController {
         let deadline = Instant::now() + self.launch_observation_timeout;
         loop {
             let clients =
-                hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await?;
-            let candidates = desktop_candidates(&clients, spec);
-            match candidates.as_slice() {
-                [client] => {
+                match hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await {
+                    Ok(clients) => clients,
+                    Err(error) => {
+                        self.launching_since.lock().await.remove(&app);
+                        return Err(error);
+                    }
+                };
+            let candidate = match select_desktop_candidate(&clients, spec) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.launching_since.lock().await.remove(&app);
+                    return Err(error);
+                }
+            };
+            match candidate {
+                Some(client) => {
                     self.launching_since.lock().await.remove(&app);
                     dispatch_focus(&self.hyprctl_bin, &client.address).await?;
                     return Ok(DesktopAppOutcome::LaunchedAndFocused);
                 }
-                [] if Instant::now() < deadline => sleep(self.launch_poll_interval).await,
-                [] => bail!("desktop client did not map before the launch deadline"),
-                _ => {
+                None if Instant::now() < deadline => sleep(self.launch_poll_interval).await,
+                None => {
                     self.launching_since.lock().await.remove(&app);
-                    bail!(
-                        "expected one {} window after launch, found {}",
-                        spec.class,
-                        candidates.len()
-                    );
+                    bail!("desktop client did not map before the launch deadline");
                 }
             }
         }
@@ -198,23 +205,84 @@ impl DesktopController {
 
     pub async fn activate_herdr(&self, session: &str, socket_path: &Path) -> Result<()> {
         let (clients, _) = hypr_state(&self.hyprctl_bin).await?;
-        let class = self.config.herdr_class.to_ascii_lowercase();
-        let candidates: Vec<_> = clients
-            .iter()
-            .filter(|client| {
-                client.class.to_ascii_lowercase().contains(&class)
-                    || client.title.to_ascii_lowercase().contains(&class)
-            })
-            .filter(|client| client_hosts_session(client.pid, session, socket_path))
-            .collect();
-        if candidates.len() != 1 {
-            bail!(
-                "expected one Herdr window for session {session}, found {}",
-                candidates.len()
-            );
-        }
-        dispatch_focus(&self.hyprctl_bin, &candidates[0].address).await
+        let processes = tokio::task::spawn_blocking(process_table)
+            .await
+            .context("inventorying Herdr client processes")?;
+        let candidate = select_herdr_candidate(
+            &clients,
+            &processes,
+            session,
+            socket_path,
+            &self.config.herdr_class,
+        )?;
+        dispatch_focus(&self.hyprctl_bin, &candidate.address).await
     }
+}
+
+fn select_herdr_candidate<'a>(
+    clients: &'a [HyprClient],
+    processes: &HashMap<i32, ProcessInfo>,
+    session: &str,
+    socket_path: &Path,
+    identity_hint: &str,
+) -> Result<&'a HyprClient> {
+    let session_clients: Vec<_> = clients
+        .iter()
+        .filter(|client| client_hosts_session_in(client.pid, session, socket_path, processes))
+        .collect();
+    if session_clients.is_empty() {
+        bail!("no compositor window hosts Herdr session {session}");
+    }
+
+    // Native Herdr windows can use the configured class/title. Terminal-hosted
+    // Herdr views inherit the terminal class, so the hint may legitimately
+    // match none; exact process/session ownership remains the authority.
+    let hint = identity_hint.to_ascii_lowercase();
+    let hinted: Vec<_> = session_clients
+        .iter()
+        .copied()
+        .filter(|client| {
+            client.class.to_ascii_lowercase().contains(&hint)
+                || client.initial_class.to_ascii_lowercase().contains(&hint)
+                || client.title.to_ascii_lowercase().contains(&hint)
+                || client.initial_title.to_ascii_lowercase().contains(&hint)
+        })
+        .collect();
+    let candidates = if hinted.is_empty() {
+        session_clients
+    } else {
+        hinted
+    };
+    if candidates.len() == 1 {
+        return Ok(candidates[0]);
+    }
+
+    if candidates
+        .iter()
+        .any(|client| client.focus_history_id.is_none())
+    {
+        bail!("Herdr session {session} has compositor windows without focus history");
+    }
+
+    let Some(most_recent) = candidates
+        .iter()
+        .filter_map(|client| client.focus_history_id)
+        .min()
+    else {
+        bail!("Herdr session {session} has no usable focus history");
+    };
+    let recent: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|client| client.focus_history_id == Some(most_recent))
+        .collect();
+    if recent.len() != 1 {
+        bail!(
+            "Herdr session {session} has {} equally recent compositor windows",
+            recent.len()
+        );
+    }
+    Ok(recent[0])
 }
 
 fn desktop_candidates(clients: &[HyprClient], spec: DesktopAppSpec) -> Vec<&HyprClient> {
@@ -227,22 +295,89 @@ fn desktop_candidates(clients: &[HyprClient], spec: DesktopAppSpec) -> Vec<&Hypr
         .collect()
 }
 
+fn select_desktop_candidate(
+    clients: &[HyprClient],
+    spec: DesktopAppSpec,
+) -> Result<Option<&HyprClient>> {
+    let candidates = desktop_candidates(clients, spec);
+    if candidates.len() <= 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let titled: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|client| client.initial_title.eq_ignore_ascii_case(spec.main_title))
+        .collect();
+    let candidates = if titled.is_empty() {
+        candidates
+    } else {
+        titled
+    };
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let tiled: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|client| !client.floating)
+        .collect();
+    let candidates = if tiled.is_empty() { candidates } else { tiled };
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    if candidates
+        .iter()
+        .any(|client| client.focus_history_id.is_none())
+    {
+        bail!("desktop candidates lack complete focus history");
+    }
+
+    let best_history = candidates
+        .iter()
+        .filter_map(|client| client.focus_history_id)
+        .min();
+    if let Some(best_history) = best_history {
+        let recent: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|client| client.focus_history_id == Some(best_history))
+            .collect();
+        if recent.len() == 1 {
+            return Ok(recent.into_iter().next());
+        }
+    }
+
+    bail!(
+        "ambiguous {} desktop clients after title, tiling, and focus-history checks",
+        spec.class
+    )
+}
+
 fn desktop_app_spec(app: DesktopApp) -> DesktopAppSpec {
     match app {
         DesktopApp::ChatGpt => DesktopAppSpec {
-            desktop_id: "chatgpt-linux-poc.desktop",
-            class: "chatgpt-linux-poc",
+            desktop_id: "chatgpt.desktop",
+            class: "chatgpt",
+            main_title: "ChatGPT",
         },
         DesktopApp::Claude => DesktopAppSpec {
             desktop_id: "com.anthropic.Claude.desktop",
             class: "com.anthropic.Claude",
+            main_title: "Claude",
         },
     }
 }
 
-async fn launch_desktop(uwsm_app_bin: &Path, spec: DesktopAppSpec) -> Result<()> {
-    let mut child = Command::new(uwsm_app_bin)
-        .args(["--", "gtk-launch", spec.desktop_id])
+async fn launch_desktop(uwsm_bin: &Path, spec: DesktopAppSpec) -> Result<()> {
+    let mut child = Command::new(uwsm_bin)
+        // Bypass uwsm-app's runtime-directory lock/FIFO wrapper: the daemon's
+        // sandbox can read the UWSM pipes but may only write its owned runtime
+        // directory. A graphical service also avoids moving this already
+        // service-owned caller into a scope.
+        .args(["app", "-t", "service", "--", spec.desktop_id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -329,10 +464,14 @@ fn focus_expression(address: &str) -> Result<String> {
     ))
 }
 
-fn client_hosts_session(client_pid: i32, session: &str, socket_path: &Path) -> bool {
-    let processes = process_table();
+fn client_hosts_session_in(
+    client_pid: i32,
+    session: &str,
+    socket_path: &Path,
+    processes: &HashMap<i32, ProcessInfo>,
+) -> bool {
     processes.iter().any(|(pid, process)| {
-        is_descendant(*pid, client_pid, &processes)
+        is_descendant(*pid, client_pid, processes)
             && command_matches_session(&process.command, &process.environment, session, socket_path)
     })
 }
@@ -357,12 +496,18 @@ fn process_table() -> HashMap<i32, ProcessInfo> {
         let Some(parent) = process_parent(&path.join("stat")) else {
             continue;
         };
+        let command = nul_fields(&path.join("cmdline"));
+        let environment = if interactive_herdr_session(&command).is_some() {
+            nul_fields(&path.join("environ"))
+        } else {
+            Vec::new()
+        };
         table.insert(
             pid,
             ProcessInfo {
                 parent,
-                command: nul_fields(&path.join("cmdline")),
-                environment: nul_fields(&path.join("environ")),
+                command,
+                environment,
             },
         );
     }
@@ -411,35 +556,84 @@ fn command_matches_session(
     session: &str,
     socket_path: &Path,
 ) -> bool {
+    let Some(command_session) = interactive_herdr_session(command) else {
+        return false;
+    };
+    let expected_socket = socket_path.to_string_lossy();
+    let environment_session = environment
+        .iter()
+        .find_map(|value| value.strip_prefix("HERDR_SESSION="));
+    let environment_socket = environment
+        .iter()
+        .find_map(|value| value.strip_prefix("HERDR_SOCKET_PATH="));
+    match command_session {
+        HerdrClientSession::Named(value) => {
+            !environment_session.is_some_and(|environment| environment != value) && value == session
+        }
+        HerdrClientSession::Default => {
+            if environment_session.is_some_and(|value| value != session)
+                || environment_socket.is_some_and(|value| value != expected_socket)
+            {
+                return false;
+            }
+            if environment_session.is_some() || environment_socket.is_some() {
+                return true;
+            }
+            session == "default"
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HerdrClientSession<'a> {
+    Default,
+    Named(&'a str),
+}
+
+fn interactive_herdr_session(command: &[String]) -> Option<HerdrClientSession<'_>> {
     let is_herdr = command
         .first()
         .and_then(|value| Path::new(value).file_name())
         .is_some_and(|name| name == "herdr");
     if !is_herdr {
-        return false;
+        return None;
+    }
+    if let [_, session, attach, name] = command
+        && session == "session"
+        && attach == "attach"
+        && !name.is_empty()
+    {
+        return Some(HerdrClientSession::Named(name));
     }
 
-    let session_argument = command
-        .windows(2)
-        .any(|pair| pair[0] == "--session" && pair[1] == session);
-    let session_environment = environment
-        .iter()
-        .any(|value| value == &format!("HERDR_SESSION={session}"));
-    let socket_environment = environment
-        .iter()
-        .any(|value| value == &format!("HERDR_SOCKET_PATH={}", socket_path.to_string_lossy()));
-
-    if session != "default" {
-        return session_argument || session_environment || socket_environment;
+    let mut named = None;
+    let mut index = 1;
+    while index < command.len() {
+        let argument = &command[index];
+        if argument == "--handoff" {
+            index += 1;
+            continue;
+        }
+        if argument == "--session" {
+            let value = command.get(index + 1)?;
+            if value.is_empty() || named.replace(value.as_str()).is_some() {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--session=") {
+            if value.is_empty() || named.replace(value).is_some() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        // All positional tokens are CLI subcommands, while remote/no-session
+        // and informational flags do not host the local persistent session.
+        return None;
     }
-    let names_other_session = command.iter().any(|value| value == "--session")
-        || environment
-            .iter()
-            .any(|value| value.starts_with("HERDR_SESSION="))
-        || environment
-            .iter()
-            .any(|value| value.starts_with("HERDR_SOCKET_PATH=") && !socket_environment);
-    !names_other_session || session_argument || session_environment || socket_environment
+    Some(named.map_or(HerdrClientSession::Default, HerdrClientSession::Named))
 }
 
 #[cfg(test)]
@@ -461,6 +655,52 @@ mod tests {
             &[],
             "work",
             Path::new("/tmp/work.sock")
+        ));
+        assert!(command_matches_session(
+            &[
+                "herdr".into(),
+                "session".into(),
+                "attach".into(),
+                "work".into()
+            ],
+            &[],
+            "work",
+            Path::new("/tmp/work.sock")
+        ));
+        assert!(!command_matches_session(
+            &[
+                "herdr".into(),
+                "session".into(),
+                "attach".into(),
+                "work".into()
+            ],
+            &[],
+            "default",
+            Path::new("/tmp/default.sock")
+        ));
+        assert!(!command_matches_session(
+            &["herdr".into(), "--session".into(), "work".into()],
+            &["HERDR_SESSION=default".into()],
+            "default",
+            Path::new("/tmp/default.sock")
+        ));
+        assert!(!command_matches_session(
+            &["herdr".into(), "--session".into(), "work".into()],
+            &["HERDR_SESSION=default".into()],
+            "work",
+            Path::new("/tmp/work.sock")
+        ));
+        assert!(command_matches_session(
+            &["herdr".into(), "--session".into(), "work".into()],
+            &["HERDR_SOCKET_PATH=/tmp/default.sock".into()],
+            "work",
+            Path::new("/tmp/work.sock")
+        ));
+        assert!(!command_matches_session(
+            &["herdr".into(), "--session".into(), "work".into()],
+            &["HERDR_SOCKET_PATH=/tmp/default.sock".into()],
+            "default",
+            Path::new("/tmp/default.sock")
         ));
     }
 
@@ -487,12 +727,231 @@ mod tests {
     }
 
     #[test]
+    fn only_interactive_herdr_clients_can_host_a_session() {
+        for command in [
+            vec!["herdr", "agent", "wait", "reviewer"],
+            vec!["herdr", "status"],
+            vec!["herdr", "api", "state"],
+            vec!["herdr", "workspace", "list"],
+            vec!["herdr", "update"],
+            vec!["herdr", "server"],
+            vec!["herdr", "--remote", "host"],
+            vec!["herdr", "--no-session"],
+            vec!["herdr", "--skill"],
+        ] {
+            assert!(
+                !command_matches_session(
+                    &command.into_iter().map(String::from).collect::<Vec<_>>(),
+                    &[],
+                    "default",
+                    Path::new("/tmp/default.sock")
+                ),
+                "CLI command must not claim the compositor client"
+            );
+        }
+        assert!(command_matches_session(
+            &["herdr".into(), "--handoff".into()],
+            &[],
+            "default",
+            Path::new("/tmp/default.sock")
+        ));
+        assert!(command_matches_session(
+            &["herdr".into(), "--session=work".into(), "--handoff".into()],
+            &[],
+            "work",
+            Path::new("/tmp/work.sock")
+        ));
+    }
+
+    #[test]
+    fn terminal_hosted_herdr_uses_most_recent_exact_session_window() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0xold","class":"kitty","initialClass":"kitty","title":"older workspace","initialTitle":"kitty","pid":100,"monitor":0,"focusHistoryID":7},
+                {"address":"0xnew","class":"kitty","initialClass":"kitty","title":"current workspace","initialTitle":"kitty","pid":200,"monitor":0,"focusHistoryID":1},
+                {"address":"0xother","class":"kitty","initialClass":"kitty","title":"shell","initialTitle":"kitty","pid":300,"monitor":0,"focusHistoryID":2},
+                {"address":"0xcli","class":"kitty","initialClass":"kitty","title":"recent CLI terminal","initialTitle":"kitty","pid":400,"monitor":0,"focusHistoryID":0}
+            ]"#,
+        )
+        .unwrap();
+        let processes = HashMap::from([
+            (
+                101,
+                ProcessInfo {
+                    parent: 100,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                201,
+                ProcessInfo {
+                    parent: 200,
+                    command: vec!["/home/user/.local/bin/herdr".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                301,
+                ProcessInfo {
+                    parent: 300,
+                    command: vec!["bash".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                401,
+                ProcessInfo {
+                    parent: 400,
+                    command: vec![
+                        "herdr".into(),
+                        "agent".into(),
+                        "wait".into(),
+                        "reviewer".into(),
+                    ],
+                    environment: vec![],
+                },
+            ),
+        ]);
+
+        let selected = select_herdr_candidate(
+            &clients,
+            &processes,
+            "default",
+            Path::new("/tmp/default.sock"),
+            "herdr",
+        )
+        .unwrap();
+        assert_eq!(selected.address, "0xnew");
+    }
+
+    #[test]
+    fn herdr_window_selection_prefers_native_identity_hint() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0xterminal","class":"kitty","initialClass":"kitty","title":"workspace","initialTitle":"kitty","pid":100,"monitor":0,"focusHistoryID":0},
+                {"address":"0xnative","class":"Herdr","initialClass":"Herdr","title":"Herdr","initialTitle":"Herdr","pid":200,"monitor":0,"focusHistoryID":4}
+            ]"#,
+        )
+        .unwrap();
+        let processes = HashMap::from([
+            (
+                101,
+                ProcessInfo {
+                    parent: 100,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                201,
+                ProcessInfo {
+                    parent: 200,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+        ]);
+
+        let selected = select_herdr_candidate(
+            &clients,
+            &processes,
+            "default",
+            Path::new("/tmp/default.sock"),
+            "herdr",
+        )
+        .unwrap();
+        assert_eq!(selected.address, "0xnative");
+    }
+
+    #[test]
+    fn herdr_window_selection_fails_closed_on_tied_focus_history() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"kitty","initialClass":"kitty","title":"one","initialTitle":"kitty","pid":100,"monitor":0,"focusHistoryID":0},
+                {"address":"0x2","class":"kitty","initialClass":"kitty","title":"two","initialTitle":"kitty","pid":200,"monitor":0,"focusHistoryID":0}
+            ]"#,
+        )
+        .unwrap();
+        let processes = HashMap::from([
+            (
+                101,
+                ProcessInfo {
+                    parent: 100,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                201,
+                ProcessInfo {
+                    parent: 200,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+        ]);
+
+        assert!(
+            select_herdr_candidate(
+                &clients,
+                &processes,
+                "default",
+                Path::new("/tmp/default.sock"),
+                "herdr",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn herdr_window_selection_fails_closed_on_partial_focus_history() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"kitty","initialClass":"kitty","title":"one","initialTitle":"kitty","pid":100,"monitor":0},
+                {"address":"0x2","class":"kitty","initialClass":"kitty","title":"two","initialTitle":"kitty","pid":200,"monitor":0,"focusHistoryID":0}
+            ]"#,
+        )
+        .unwrap();
+        let processes = HashMap::from([
+            (
+                101,
+                ProcessInfo {
+                    parent: 100,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+            (
+                201,
+                ProcessInfo {
+                    parent: 200,
+                    command: vec!["herdr".into()],
+                    environment: vec![],
+                },
+            ),
+        ]);
+
+        assert!(
+            select_herdr_candidate(
+                &clients,
+                &processes,
+                "default",
+                Path::new("/tmp/default.sock"),
+                "herdr",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn desktop_apps_are_fixed_allowlisted_targets() {
         assert_eq!(
             desktop_app_spec(DesktopApp::ChatGpt),
             DesktopAppSpec {
-                desktop_id: "chatgpt-linux-poc.desktop",
-                class: "chatgpt-linux-poc",
+                desktop_id: "chatgpt.desktop",
+                class: "chatgpt",
+                main_title: "ChatGPT",
             }
         );
         assert_eq!(
@@ -500,8 +959,52 @@ mod tests {
             DesktopAppSpec {
                 desktop_id: "com.anthropic.Claude.desktop",
                 class: "com.anthropic.Claude",
+                main_title: "Claude",
             }
         );
+    }
+
+    #[test]
+    fn desktop_candidate_prefers_main_window_then_recent_focus() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"chatgpt","initialClass":"chatgpt","title":"Quick Chat","initialTitle":"Quick Chat","pid":1,"monitor":0,"floating":true,"focusHistoryID":0},
+                {"address":"0x2","class":"chatgpt","initialClass":"chatgpt","title":"Thread A","initialTitle":"ChatGPT","pid":2,"monitor":0,"floating":false,"focusHistoryID":4},
+                {"address":"0x3","class":"chatgpt","initialClass":"chatgpt","title":"Thread B","initialTitle":"ChatGPT","pid":3,"monitor":0,"floating":false,"focusHistoryID":1}
+            ]"#,
+        )
+        .unwrap();
+
+        let selected = select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::ChatGpt))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.address, "0x3");
+    }
+
+    #[test]
+    fn desktop_candidate_fails_closed_when_narrowing_is_still_ambiguous() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"chatgpt","initialClass":"chatgpt","title":"Thread A","initialTitle":"ChatGPT","pid":1,"monitor":0,"floating":false},
+                {"address":"0x2","class":"chatgpt","initialClass":"chatgpt","title":"Thread B","initialTitle":"ChatGPT","pid":2,"monitor":0,"floating":false}
+            ]"#,
+        )
+        .unwrap();
+
+        assert!(select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::ChatGpt)).is_err());
+    }
+
+    #[test]
+    fn desktop_candidate_fails_closed_on_partial_focus_history() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"chatgpt","initialClass":"chatgpt","title":"Thread A","initialTitle":"ChatGPT","pid":1,"monitor":0,"floating":false},
+                {"address":"0x2","class":"chatgpt","initialClass":"chatgpt","title":"Thread B","initialTitle":"ChatGPT","pid":2,"monitor":0,"floating":false,"focusHistoryID":0}
+            ]"#,
+        )
+        .unwrap();
+
+        assert!(select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::ChatGpt)).is_err());
     }
 
     #[test]
@@ -519,7 +1022,7 @@ mod tests {
         assert!(is_portal_preview_class(
             "org.xeneon-edge.agent-portal-preview.123"
         ));
-        assert!(!is_portal_preview_class("chatgpt-linux-poc"));
+        assert!(!is_portal_preview_class("chatgpt"));
     }
 
     #[tokio::test]
@@ -529,14 +1032,14 @@ mod tests {
         let launch_log = temp.path().join("launch.log");
         let focus_log = temp.path().join("focus.log");
         let hyprctl = temp.path().join("hyprctl");
-        let uwsm_app = temp.path().join("uwsm-app");
+        let uwsm = temp.path().join("uwsm");
         write_executable(
             &hyprctl,
             &format!(
                 r#"#!/bin/sh
 if [ "$1" = "clients" ]; then
   if [ -e "{marker}" ]; then
-    printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}},{{"address":"0xabc","class":"chatgpt-linux-poc","initialClass":"chatgpt-linux-poc","title":"ChatGPT","pid":42,"monitor":0}}]'
+    printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}},{{"address":"0xabc","class":"chatgpt","initialClass":"chatgpt","title":"ChatGPT","pid":42,"monitor":0}}]'
   else
     printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}}]'
   fi
@@ -552,7 +1055,7 @@ fi
             ),
         );
         write_executable(
-            &uwsm_app,
+            &uwsm,
             &format!(
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> "{launch_log}"
@@ -566,7 +1069,7 @@ sleep 1
 
         let mut controller = DesktopController::new(DesktopConfig::default());
         controller.hyprctl_bin = hyprctl;
-        controller.uwsm_app_bin = uwsm_app;
+        controller.uwsm_bin = uwsm;
         controller.launch_poll_interval = Duration::from_millis(10);
         controller.launch_observation_timeout = Duration::from_secs(2);
         controller.launch_coalesce_for = Duration::from_secs(3);
@@ -607,8 +1110,60 @@ sleep 1
             second.await.unwrap().unwrap(),
             DesktopAppOutcome::LaunchedAndFocused
         );
-        assert_eq!(fs::read_to_string(launch_log).unwrap().lines().count(), 1);
+        assert_eq!(fs::read_to_string(&launch_log).unwrap().lines().count(), 1);
+        assert_eq!(
+            fs::read_to_string(launch_log).unwrap().trim(),
+            "app -t service -- chatgpt.desktop"
+        );
         assert_eq!(fs::read_to_string(focus_log).unwrap().lines().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_mapping_clears_launch_coalescing_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let launch_log = temp.path().join("launch.log");
+        let hyprctl = temp.path().join("hyprctl");
+        let uwsm = temp.path().join("uwsm");
+        write_executable(
+            &hyprctl,
+            r#"#!/bin/sh
+if [ "$1" = "clients" ]; then
+  printf '%s\n' '[]'
+else
+  printf '%s\n' '{}'
+fi
+"#,
+        );
+        write_executable(
+            &uwsm,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "{launch_log}"
+"#,
+                launch_log = launch_log.display()
+            ),
+        );
+
+        let mut controller = DesktopController::new(DesktopConfig::default());
+        controller.hyprctl_bin = hyprctl;
+        controller.uwsm_bin = uwsm;
+        controller.launch_poll_interval = Duration::from_millis(2);
+        controller.launch_observation_timeout = Duration::from_millis(15);
+        controller.launch_coalesce_for = Duration::from_secs(10);
+
+        assert!(
+            controller
+                .focus_or_launch(DesktopApp::ChatGpt)
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .focus_or_launch(DesktopApp::ChatGpt)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(launch_log).unwrap().lines().count(), 2);
     }
 
     fn write_executable(path: &Path, contents: &str) {

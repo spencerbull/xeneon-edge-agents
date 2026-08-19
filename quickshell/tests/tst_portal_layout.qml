@@ -44,13 +44,21 @@ TestCase {
         property bool ready: true
         property int orderRequests: 0
         property string lastOrder: ""
+        property int chatGptRequests: 0
+        property int claudeRequests: 0
 
         function restoreFocus() { return "restore" }
         function openAgent(agentId) { return agentId }
         function approveAgent() { return "approve" }
         function interruptAgent() { return "interrupt" }
-        function openChatGptDesktop() { return "chatgpt" }
-        function openClaudeDesktop() { return "claude" }
+        function openChatGptDesktop() {
+            chatGptRequests += 1
+            return "chatgpt-" + chatGptRequests
+        }
+        function openClaudeDesktop() {
+            claudeRequests += 1
+            return "claude-" + claudeRequests
+        }
         function startVoice() { return "voice-start" }
         function stopVoice() { return "voice-stop" }
         function cancelVoice() { return "voice-cancel" }
@@ -138,6 +146,9 @@ TestCase {
         mockStore.testSurfaceState = ""
         mockBridge.orderRequests = 0
         mockBridge.lastOrder = ""
+        mockBridge.chatGptRequests = 0
+        mockBridge.claudeRequests = 0
+        portal.pendingDesktopActions = ({})
         portal.pendingAgentOrderRequest = ""
         portal.paletteSettingsOpen = false
         mockPreferences.readyColorRole = "muted"
@@ -236,6 +247,55 @@ TestCase {
         verify(toggle.activate())
         compare(mockBridge.orderRequests, 2)
         compare(mockBridge.lastOrder, "grouped")
+    }
+
+    function test_desktopLaunchersSitImmediatelyAfterOrderWithoutOverlap() {
+        var actions = findChild(portal, "headerActions")
+        var order = findChild(portal, "agentOrderToggle")
+        var chatGpt = findChild(portal, "chatGptDesktopButton")
+        var claude = findChild(portal, "claudeDesktopButton")
+        var dots = findChild(portal, "pageDots")
+        verify(actions !== null)
+        verify(order !== null)
+        verify(chatGpt !== null)
+        verify(claude !== null)
+        verify(dots !== null)
+
+        compare(chatGpt.x, order.x + order.width + actions.spacing)
+        compare(claude.x, chatGpt.x + chatGpt.width + actions.spacing)
+        verify(actions.x + actions.width < dots.x)
+        compare(chatGpt.Accessible.name, "CHATGPT")
+        compare(claude.Accessible.name, "CLAUDE")
+        verify(chatGpt.enabled)
+        verify(claude.enabled)
+
+        verify(chatGpt.activate())
+        compare(mockBridge.chatGptRequests, 1)
+        compare(mockBridge.claudeRequests, 0)
+        verify(chatGpt.pending)
+        verify(!chatGpt.activate())
+        compare(mockBridge.chatGptRequests, 1)
+        mockStore.actionResultReceived({
+            "request_id": "chatgpt-1",
+            "action": "chatgpt_desktop",
+            "ok": true,
+            "code": "desktop_ready",
+            "message": "desktop_ready"
+        })
+        verify(!chatGpt.pending)
+
+        verify(claude.activate())
+        compare(mockBridge.chatGptRequests, 1)
+        compare(mockBridge.claudeRequests, 1)
+        verify(claude.pending)
+        mockStore.actionResultReceived({
+            "request_id": "claude-1",
+            "action": "claude_desktop",
+            "ok": false,
+            "code": "desktop_launch_failed",
+            "message": "desktop_launch_failed"
+        })
+        verify(!claude.pending)
     }
 
     function test_lowerCountsAndShrinkClampSafely() {
