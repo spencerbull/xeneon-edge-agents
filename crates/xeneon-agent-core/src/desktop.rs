@@ -33,6 +33,7 @@ pub enum DesktopAppOutcome {
 struct DesktopAppSpec {
     desktop_id: &'static str,
     class: &'static str,
+    main_title: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ pub struct DesktopController {
     remembered_window: Arc<Mutex<Option<String>>>,
     launching_since: Arc<Mutex<HashMap<DesktopApp, Instant>>>,
     hyprctl_bin: PathBuf,
-    uwsm_app_bin: PathBuf,
+    uwsm_bin: PathBuf,
     launch_poll_interval: Duration,
     launch_observation_timeout: Duration,
     launch_coalesce_for: Duration,
@@ -56,8 +57,14 @@ struct HyprClient {
     initial_class: String,
     #[serde(default)]
     title: String,
+    #[serde(default, rename = "initialTitle")]
+    initial_title: String,
     pid: i32,
     monitor: i64,
+    #[serde(default)]
+    floating: bool,
+    #[serde(default, rename = "focusHistoryID")]
+    focus_history_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,7 +82,7 @@ impl DesktopController {
             remembered_window: Arc::new(Mutex::new(None)),
             launching_since: Arc::new(Mutex::new(HashMap::new())),
             hyprctl_bin: PathBuf::from("hyprctl"),
-            uwsm_app_bin: PathBuf::from("uwsm-app"),
+            uwsm_bin: PathBuf::from("uwsm"),
             launch_poll_interval: Duration::from_millis(100),
             launch_observation_timeout: Duration::from_secs(12),
             launch_coalesce_for: Duration::from_secs(20),
@@ -133,14 +140,13 @@ impl DesktopController {
     pub async fn focus_or_launch(&self, app: DesktopApp) -> Result<DesktopAppOutcome> {
         let spec = desktop_app_spec(app);
         let clients = hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await?;
-        let candidates = desktop_candidates(&clients, spec);
-        match candidates.as_slice() {
-            [client] => {
+        match select_desktop_candidate(&clients, spec)? {
+            Some(client) => {
                 self.launching_since.lock().await.remove(&app);
                 dispatch_focus(&self.hyprctl_bin, &client.address).await?;
                 Ok(DesktopAppOutcome::Focused)
             }
-            [] => {
+            None => {
                 let now = Instant::now();
                 let mut launches = self.launching_since.lock().await;
                 let launch_in_flight = launches
@@ -150,19 +156,13 @@ impl DesktopController {
                     launches.insert(app, now);
                 }
                 drop(launches);
-                if !launch_in_flight
-                    && let Err(error) = launch_desktop(&self.uwsm_app_bin, spec).await
+                if !launch_in_flight && let Err(error) = launch_desktop(&self.uwsm_bin, spec).await
                 {
                     self.launching_since.lock().await.remove(&app);
                     return Err(error);
                 }
                 self.wait_for_launched_client(app, spec).await
             }
-            _ => bail!(
-                "expected at most one {} window, found {}",
-                spec.class,
-                candidates.len()
-            ),
         }
     }
 
@@ -174,23 +174,30 @@ impl DesktopController {
         let deadline = Instant::now() + self.launch_observation_timeout;
         loop {
             let clients =
-                hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await?;
-            let candidates = desktop_candidates(&clients, spec);
-            match candidates.as_slice() {
-                [client] => {
+                match hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await {
+                    Ok(clients) => clients,
+                    Err(error) => {
+                        self.launching_since.lock().await.remove(&app);
+                        return Err(error);
+                    }
+                };
+            let candidate = match select_desktop_candidate(&clients, spec) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.launching_since.lock().await.remove(&app);
+                    return Err(error);
+                }
+            };
+            match candidate {
+                Some(client) => {
                     self.launching_since.lock().await.remove(&app);
                     dispatch_focus(&self.hyprctl_bin, &client.address).await?;
                     return Ok(DesktopAppOutcome::LaunchedAndFocused);
                 }
-                [] if Instant::now() < deadline => sleep(self.launch_poll_interval).await,
-                [] => bail!("desktop client did not map before the launch deadline"),
-                _ => {
+                None if Instant::now() < deadline => sleep(self.launch_poll_interval).await,
+                None => {
                     self.launching_since.lock().await.remove(&app);
-                    bail!(
-                        "expected one {} window after launch, found {}",
-                        spec.class,
-                        candidates.len()
-                    );
+                    bail!("desktop client did not map before the launch deadline");
                 }
             }
         }
@@ -227,22 +234,82 @@ fn desktop_candidates(clients: &[HyprClient], spec: DesktopAppSpec) -> Vec<&Hypr
         .collect()
 }
 
+fn select_desktop_candidate(
+    clients: &[HyprClient],
+    spec: DesktopAppSpec,
+) -> Result<Option<&HyprClient>> {
+    let candidates = desktop_candidates(clients, spec);
+    if candidates.len() <= 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let titled: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|client| client.initial_title.eq_ignore_ascii_case(spec.main_title))
+        .collect();
+    let candidates = if titled.is_empty() {
+        candidates
+    } else {
+        titled
+    };
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let tiled: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|client| !client.floating)
+        .collect();
+    let candidates = if tiled.is_empty() { candidates } else { tiled };
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    let best_history = candidates
+        .iter()
+        .filter_map(|client| client.focus_history_id)
+        .min();
+    if let Some(best_history) = best_history {
+        let recent: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|client| client.focus_history_id == Some(best_history))
+            .collect();
+        if recent.len() == 1 {
+            return Ok(recent.into_iter().next());
+        }
+    }
+
+    bail!(
+        "ambiguous {} desktop clients after title, tiling, and focus-history checks",
+        spec.class
+    )
+}
+
 fn desktop_app_spec(app: DesktopApp) -> DesktopAppSpec {
     match app {
         DesktopApp::ChatGpt => DesktopAppSpec {
-            desktop_id: "chatgpt-linux-poc.desktop",
-            class: "chatgpt-linux-poc",
+            desktop_id: "chatgpt.desktop",
+            class: "chatgpt",
+            main_title: "ChatGPT",
         },
         DesktopApp::Claude => DesktopAppSpec {
             desktop_id: "com.anthropic.Claude.desktop",
             class: "com.anthropic.Claude",
+            main_title: "Claude",
         },
     }
 }
 
-async fn launch_desktop(uwsm_app_bin: &Path, spec: DesktopAppSpec) -> Result<()> {
-    let mut child = Command::new(uwsm_app_bin)
-        .args(["--", "gtk-launch", spec.desktop_id])
+async fn launch_desktop(uwsm_bin: &Path, spec: DesktopAppSpec) -> Result<()> {
+    let mut child = Command::new(uwsm_bin)
+        // Bypass uwsm-app's runtime-directory lock/FIFO wrapper: the daemon's
+        // sandbox can read the UWSM pipes but may only write its owned runtime
+        // directory. A graphical service also avoids moving this already
+        // service-owned caller into a scope.
+        .args(["app", "-t", "service", "--", spec.desktop_id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -491,8 +558,9 @@ mod tests {
         assert_eq!(
             desktop_app_spec(DesktopApp::ChatGpt),
             DesktopAppSpec {
-                desktop_id: "chatgpt-linux-poc.desktop",
-                class: "chatgpt-linux-poc",
+                desktop_id: "chatgpt.desktop",
+                class: "chatgpt",
+                main_title: "ChatGPT",
             }
         );
         assert_eq!(
@@ -500,8 +568,39 @@ mod tests {
             DesktopAppSpec {
                 desktop_id: "com.anthropic.Claude.desktop",
                 class: "com.anthropic.Claude",
+                main_title: "Claude",
             }
         );
+    }
+
+    #[test]
+    fn desktop_candidate_prefers_main_window_then_recent_focus() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"chatgpt","initialClass":"chatgpt","title":"Quick Chat","initialTitle":"Quick Chat","pid":1,"monitor":0,"floating":true,"focusHistoryID":0},
+                {"address":"0x2","class":"chatgpt","initialClass":"chatgpt","title":"Thread A","initialTitle":"ChatGPT","pid":2,"monitor":0,"floating":false,"focusHistoryID":4},
+                {"address":"0x3","class":"chatgpt","initialClass":"chatgpt","title":"Thread B","initialTitle":"ChatGPT","pid":3,"monitor":0,"floating":false,"focusHistoryID":1}
+            ]"#,
+        )
+        .unwrap();
+
+        let selected = select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::ChatGpt))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.address, "0x3");
+    }
+
+    #[test]
+    fn desktop_candidate_fails_closed_when_narrowing_is_still_ambiguous() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"chatgpt","initialClass":"chatgpt","title":"Thread A","initialTitle":"ChatGPT","pid":1,"monitor":0,"floating":false},
+                {"address":"0x2","class":"chatgpt","initialClass":"chatgpt","title":"Thread B","initialTitle":"ChatGPT","pid":2,"monitor":0,"floating":false}
+            ]"#,
+        )
+        .unwrap();
+
+        assert!(select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::ChatGpt)).is_err());
     }
 
     #[test]
@@ -519,7 +618,7 @@ mod tests {
         assert!(is_portal_preview_class(
             "org.xeneon-edge.agent-portal-preview.123"
         ));
-        assert!(!is_portal_preview_class("chatgpt-linux-poc"));
+        assert!(!is_portal_preview_class("chatgpt"));
     }
 
     #[tokio::test]
@@ -529,14 +628,14 @@ mod tests {
         let launch_log = temp.path().join("launch.log");
         let focus_log = temp.path().join("focus.log");
         let hyprctl = temp.path().join("hyprctl");
-        let uwsm_app = temp.path().join("uwsm-app");
+        let uwsm = temp.path().join("uwsm");
         write_executable(
             &hyprctl,
             &format!(
                 r#"#!/bin/sh
 if [ "$1" = "clients" ]; then
   if [ -e "{marker}" ]; then
-    printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}},{{"address":"0xabc","class":"chatgpt-linux-poc","initialClass":"chatgpt-linux-poc","title":"ChatGPT","pid":42,"monitor":0}}]'
+    printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}},{{"address":"0xabc","class":"chatgpt","initialClass":"chatgpt","title":"ChatGPT","pid":42,"monitor":0}}]'
   else
     printf '%s\n' '[{{"address":"0xdef","class":"com.anthropic.Claude","initialClass":"com.anthropic.Claude","title":"Claude","pid":43,"monitor":0}}]'
   fi
@@ -552,7 +651,7 @@ fi
             ),
         );
         write_executable(
-            &uwsm_app,
+            &uwsm,
             &format!(
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> "{launch_log}"
@@ -566,7 +665,7 @@ sleep 1
 
         let mut controller = DesktopController::new(DesktopConfig::default());
         controller.hyprctl_bin = hyprctl;
-        controller.uwsm_app_bin = uwsm_app;
+        controller.uwsm_bin = uwsm;
         controller.launch_poll_interval = Duration::from_millis(10);
         controller.launch_observation_timeout = Duration::from_secs(2);
         controller.launch_coalesce_for = Duration::from_secs(3);
@@ -607,8 +706,60 @@ sleep 1
             second.await.unwrap().unwrap(),
             DesktopAppOutcome::LaunchedAndFocused
         );
-        assert_eq!(fs::read_to_string(launch_log).unwrap().lines().count(), 1);
+        assert_eq!(fs::read_to_string(&launch_log).unwrap().lines().count(), 1);
+        assert_eq!(
+            fs::read_to_string(launch_log).unwrap().trim(),
+            "app -t service -- chatgpt.desktop"
+        );
         assert_eq!(fs::read_to_string(focus_log).unwrap().lines().count(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_mapping_clears_launch_coalescing_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let launch_log = temp.path().join("launch.log");
+        let hyprctl = temp.path().join("hyprctl");
+        let uwsm = temp.path().join("uwsm");
+        write_executable(
+            &hyprctl,
+            r#"#!/bin/sh
+if [ "$1" = "clients" ]; then
+  printf '%s\n' '[]'
+else
+  printf '%s\n' '{}'
+fi
+"#,
+        );
+        write_executable(
+            &uwsm,
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "{launch_log}"
+"#,
+                launch_log = launch_log.display()
+            ),
+        );
+
+        let mut controller = DesktopController::new(DesktopConfig::default());
+        controller.hyprctl_bin = hyprctl;
+        controller.uwsm_bin = uwsm;
+        controller.launch_poll_interval = Duration::from_millis(2);
+        controller.launch_observation_timeout = Duration::from_millis(15);
+        controller.launch_coalesce_for = Duration::from_secs(10);
+
+        assert!(
+            controller
+                .focus_or_launch(DesktopApp::ChatGpt)
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .focus_or_launch(DesktopApp::ChatGpt)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(launch_log).unwrap().lines().count(), 2);
     }
 
     fn write_executable(path: &Path, contents: &str) {

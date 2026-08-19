@@ -404,88 +404,123 @@ Item {
             }
         }
 
-        Rectangle {
-            id: agentOrderToggle
-            objectName: "agentOrderToggle"
-
+        Row {
+            id: headerActions
+            objectName: "headerActions"
             anchors {
                 left: headerIdentity.right
                 leftMargin: 44
                 verticalCenter: parent.verticalCenter
             }
-            width: 184
-            height: 48
-            radius: 12
-            color: orderTap.pressed
-                ? root.theme.surfacePressed
-                : root.theme.surfaceRaised
-            border.width: 1
-            border.color: root.agentOrderAvailable
-                ? root.theme.accent
-                : root.theme.border
-            enabled: root.controlCenterInteractive
-                && root.agentOrderAvailable
-                && root.pendingAgentOrderRequest === ""
+            spacing: 12
 
-            function activate() {
-                if (!enabled)
-                    return false
-                root.activity.noteUserActivity()
-                return root.requestAgentOrder(
-                    root.agentOrderMode === "grouped"
-                        ? "priority"
-                        : "grouped"
-                )
-            }
+            Rectangle {
+                id: agentOrderToggle
+                objectName: "agentOrderToggle"
 
-            Accessible.role: Accessible.Button
-            // Disabled status is still meaningful: expose why synchronization
-            // is unavailable or currently in progress to assistive technology.
-            Accessible.ignored: false
-            Accessible.name: root.pendingAgentOrderRequest !== ""
-                ? "Agent ordering syncing"
-                : root.agentOrderAvailable
-                    ? "Agent ordering " + root.agentOrderMode
-                    : "Agent ordering unavailable"
-            Accessible.description: root.pendingAgentOrderRequest !== ""
-                ? "Synchronizing agent ordering with Herdr"
-                : root.agentOrderAvailable
-                    ? "Switch Herdr and the command center to "
-                    + (root.agentOrderMode === "grouped"
-                        ? "priority"
-                        : "grouped") + " ordering"
-                    : "Requires a Herdr version with agent ordering API support"
-            Accessible.onPressAction: activate()
+                width: 184
+                height: 48
+                radius: 12
+                color: orderTap.pressed
+                    ? root.theme.surfacePressed
+                    : root.theme.surfaceRaised
+                border.width: 1
+                border.color: root.agentOrderAvailable
+                    ? root.theme.accent
+                    : root.theme.border
+                enabled: root.controlCenterInteractive
+                    && root.agentOrderAvailable
+                    && root.pendingAgentOrderRequest === ""
 
-            Text {
-                objectName: "agentOrderLabel"
-                anchors.centerIn: parent
-                text: root.pendingAgentOrderRequest !== ""
-                    ? "ORDER // SYNCING"
+                function activate() {
+                    if (!enabled)
+                        return false
+                    root.activity.noteUserActivity()
+                    return root.requestAgentOrder(
+                        root.agentOrderMode === "grouped"
+                            ? "priority"
+                            : "grouped"
+                    )
+                }
+
+                Accessible.role: Accessible.Button
+                // Disabled status is still meaningful: expose why synchronization
+                // is unavailable or currently in progress to assistive technology.
+                Accessible.ignored: false
+                Accessible.name: root.pendingAgentOrderRequest !== ""
+                    ? "Agent ordering syncing"
                     : root.agentOrderAvailable
-                        ? "ORDER // " + root.agentOrderMode.toUpperCase()
-                        : "ORDER // UNAVAILABLE"
-                textFormat: Text.PlainText
-                color: root.agentOrderAvailable
-                    ? root.theme.textPrimary
-                    : root.theme.textMuted
-                font {
-                    family: "monospace"
-                    pixelSize: 11
-                    weight: Font.DemiBold
-                    letterSpacing: 0.5
+                        ? "Agent ordering " + root.agentOrderMode
+                        : "Agent ordering unavailable"
+                Accessible.description: root.pendingAgentOrderRequest !== ""
+                    ? "Synchronizing agent ordering with Herdr"
+                    : root.agentOrderAvailable
+                        ? "Switch Herdr and the command center to "
+                        + (root.agentOrderMode === "grouped"
+                            ? "priority"
+                            : "grouped") + " ordering"
+                        : "Requires a Herdr version with agent ordering API support"
+                Accessible.onPressAction: activate()
+
+                Text {
+                    objectName: "agentOrderLabel"
+                    anchors.centerIn: parent
+                    text: root.pendingAgentOrderRequest !== ""
+                        ? "ORDER // SYNCING"
+                        : root.agentOrderAvailable
+                            ? "ORDER // " + root.agentOrderMode.toUpperCase()
+                            : "ORDER // UNAVAILABLE"
+                    textFormat: Text.PlainText
+                    color: root.agentOrderAvailable
+                        ? root.theme.textPrimary
+                        : root.theme.textMuted
+                    font {
+                        family: "monospace"
+                        pixelSize: 11
+                        weight: Font.DemiBold
+                        letterSpacing: 0.5
+                    }
+                }
+
+                TapHandler {
+                    id: orderTap
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: agentOrderToggle.activate()
                 }
             }
 
-            TapHandler {
-                id: orderTap
-                gesturePolicy: TapHandler.ReleaseWithinBounds
-                onTapped: agentOrderToggle.activate()
+            DesktopAppButton {
+                objectName: "chatGptDesktopButton"
+                width: 132
+                height: 48
+                label: "CHATGPT"
+                accent: root.theme.green
+                theme: root.theme
+                pending: root.desktopActionPending("chatgpt_desktop")
+                enabled: root.controlCenterInteractive
+                    && !root.store.freshSnapshotRequired
+                onInteracted: root.activity.noteUserActivity()
+                onTriggered: root.requestDesktop("chatgpt_desktop")
+            }
+
+            DesktopAppButton {
+                objectName: "claudeDesktopButton"
+                width: 132
+                height: 48
+                label: "CLAUDE"
+                accent: root.theme.orange
+                theme: root.theme
+                pending: root.desktopActionPending("claude_desktop")
+                enabled: root.controlCenterInteractive
+                    && !root.store.freshSnapshotRequired
+                onInteracted: root.activity.noteUserActivity()
+                onTriggered: root.requestDesktop("claude_desktop")
             }
         }
 
         Row {
             id: pageDots
+            objectName: "pageDots"
 
             anchors.centerIn: parent
             spacing: 12
@@ -547,34 +582,6 @@ Item {
                 rightMargin: displaySettings.width + 16
             }
             spacing: 12
-
-            DesktopAppButton {
-                width: 188
-                height: 58
-                anchors.verticalCenter: parent.verticalCenter
-                label: "CHATGPT"
-                accent: root.theme.green
-                theme: root.theme
-                pending: root.desktopActionPending("chatgpt_desktop")
-                enabled: root.controlCenterInteractive
-                    && !root.store.freshSnapshotRequired
-                onInteracted: root.activity.noteUserActivity()
-                onTriggered: root.requestDesktop("chatgpt_desktop")
-            }
-
-            DesktopAppButton {
-                width: 188
-                height: 58
-                anchors.verticalCenter: parent.verticalCenter
-                label: "CLAUDE"
-                accent: root.theme.orange
-                theme: root.theme
-                pending: root.desktopActionPending("claude_desktop")
-                enabled: root.controlCenterInteractive
-                    && !root.store.freshSnapshotRequired
-                onInteracted: root.activity.noteUserActivity()
-                onTriggered: root.requestDesktop("claude_desktop")
-            }
 
             VoiceControl {
                 width: 320

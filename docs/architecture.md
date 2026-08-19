@@ -130,9 +130,12 @@ ambiguous matches fail instead of focusing a generic window title.
 
 ChatGPT Desktop and Claude Desktop use separate fixed action kinds. The daemon
 matches exact known compositor classes: one match is focused, no match launches
-the corresponding fixed desktop entry through `uwsm-app`, and multiple matches
-fail closed. Launches are coalesced per app while the daemon waits a bounded
-time for exactly one mapped client, then focuses it before reporting success.
+the corresponding fixed desktop entry through an `uwsm app` graphical service,
+and multiple matches are narrowed by the known initial main title, tiled state,
+and unique most-recent focus-history entry before failing closed. Launches are
+coalesced per app while the daemon waits a bounded time for a mapped client,
+then focuses it before reporting success; every observation failure clears the
+coalescing state.
 QML cannot choose an executable, desktop entry, class, title, or arguments.
 
 Passive EDGE gestures may request restoration of the last observed non-EDGE

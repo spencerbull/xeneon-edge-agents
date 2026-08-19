@@ -106,7 +106,8 @@ state; the daemon and portal run only while that exact hardware is present.
 | --- | --- | --- | --- |
 | Foundation and Rust adapter | `main` | Rust workspace, schemas, fixtures | Complete through `c32b5cd` |
 | Herdr safe actions | `agent/xeneon-safe-actions` in the Herdr repository | Public Herdr API, PTY guard, tests, next docs | Installed from reviewed v0.8.0 head `fd53378d`; not pushed |
-| Shared agent ordering | `xeneon-order-mode-sync` in `herdr-worktrees/xeneon-order-mode-sync` plus `omarchy-theme-sync` here | Herdr `agent.order.get/set`, adapter snapshot/action, QML toggle, ordering and motion tests | XENEON follow-up installed and independently reviewed; Herdr live handoff is blocked by the running server's 64-pane limit (67 panes present), so ordering remains unavailable |
+| Shared agent ordering | `xeneon-order-mode-sync` in `herdr-worktrees/xeneon-order-mode-sync` plus `header-launch-order-fix` here | Herdr `agent.order.get/set`, adapter snapshot/action, QML toggle, ordering and motion tests | Reviewed fork `51af53be` installed to `~/.local/bin/herdr` and activated through a 52-pane live handoff; portal ordering is available and grouped/priority round trips synchronize through Herdr's public API |
+| Header launcher repair | `header-launch-order-fix` | move the fixed ChatGPT/Claude actions beside ordering, update the allowlisted ChatGPT desktop ID, verify both launch/focus paths, and reactivate authoritative ordering | Source-reviewed, installed, and live-verified: fixed ChatGPT/Claude actions sit after Order, direct sandbox-safe `uwsm app` launches both exact desktop classes, and existing windows focus without arbitrary input |
 | Quickshell portal | `main` | `quickshell/`, QML tests | Complete through `34e6037` |
 | Live naming, voice, and ambient ring UX | `agent/portal-voice-ring` in `portal-voice-ring` worktree | normalized public protocol fields, `quickshell/`, fixtures, UX docs/tests | Live on the physical EDGE; remaining power/privacy checks are open |
 | Concept motion parity | `agent/portal-voice-ring` in `portal-voice-ring` worktree | ambient presentation, preview timing, visual QA | Live on the physical EDGE; remaining power/privacy checks are open |
@@ -119,6 +120,12 @@ state; the daemon and portal run only while that exact hardware is present.
 | Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
+
+Header/order review workers `header_order_review` (Claude, pane `wW:pP`) and
+`header_launch_service_review` (Claude, pane `wW:pQ`, tab `wW:tG`) completed
+read-only review/fix/re-review loops with no remaining P0-P2 findings. Both
+loop-created resources were closed; the orchestrator owned all fixes,
+verification, installation, and the live handoff.
 
 ## Allowed actions
 
@@ -300,62 +307,43 @@ state; the daemon and portal run only while that exact hardware is present.
       tests, independent reviews, a
       reviewed Herdr live handoff, physical toggle verification from both UIs,
       and physical ambient visual QA.
+- [x] Header/order software and live API gate: the reviewed Herdr `51af53be`
+      package replaced the stock server through a state-preserving 52-pane
+      handoff; ordering round-tripped priority to grouped and back through the
+      XENEON typed action plus Herdr public socket. The reviewed XENEON build
+      was installed, and no-window launch plus existing-window focus passed for
+      the exact ChatGPT and Claude desktop identities.
 
 ## Current local state
 
-- Active goal (2026-08-13): replace the stock Omarchy Herdr protocol-20
-  installation with the reviewed custom fork rebased onto exact packaged commit
-  `0766aa57ee0ceb4410ae064e94c0f0557853eee7`, update XENEON for protocol 20,
-  and restore guarded actions plus grouped/priority synchronization. Done
-  requires focused and broad gates in both repositories, independent review,
-  a state-preserving Herdr live handoff, reviewed XENEON reinstall, live API
-  and physical EDGE verification, and cleanup of only loop-created resources.
-  Visible implementation worker `herdr_p20_impl` (Codex) runs in Herdr pane
-  `wW:pF`, tab `wW:t1`, workspace `wW`, cwd/worktree
-  `/home/sbull/src/github.com/spencerbull/herdr-worktrees/xeneon-order-mode-sync`,
-  branch `xeneon-order-mode-sync`; the orchestrator owns verification and pane
-  cleanup. A second visible Codex worker, `herdr_handoff_cap`, owns only the
-  bounded 79-pane live-handoff prerequisite in pane `wW:pG`, tab `wW:t1`,
-  workspace `wW`, cwd/worktree
-  `/home/sbull/src/github.com/spencerbull/herdr-worktrees/xeneon-handoff-capacity`,
-  branch `xeneon-handoff-capacity`; the orchestrator owns integration, review,
-  and cleanup. The XENEON independent pre-install review found three P2
-  acceptance/handoff gaps (explicit protocol-19 rejection, rendered degraded
-  reason coverage, and stale ledger evidence); all were remediated and the
-  final re-review is GO with no P0-P2 findings. XENEON is installed and live;
-  the Herdr branch is pushed and its reviewed package is built, but privileged
-  package installation remains at the visible sudo prompt. No PR is planned
-  against upstream under its external-contributor policy.
+- Active goal (2026-08-13): the software and live-API portion of replacing the
+  stock Omarchy Herdr protocol-20 server is complete. The reviewed fork is
+  user-installed from package commit `51af53be`, the state-preserving handoff
+  succeeded, guarded actions remain available, and grouped/priority ordering
+  synchronizes through Herdr and XENEON. The reviewed XENEON release is also
+  installed. Remaining goal gates are the physical EDGE touchscreen toggle,
+  a matching Herdr-UI toggle, and final ambient visual QA. No PR is planned
+  against Herdr upstream under its external-contributor policy.
 
 - The 14-agent layout source and cleanup gates are complete: QML tests prove
   14+6 pagination, a temporary 20-agent Herdr population physically verified
   the first 14-card page plus the fourteen-node ambient view, and all 11
   disposable tabs were closed. A physical second-page screenshot remains open.
-- The grouped/priority follow-up is source-complete in isolated Herdr branch
-  `xeneon-order-mode-sync`, now rebased onto exact Omarchy protocol-20 commit
-  `0766aa57` with a reviewed 128-descriptor handoff prerequisite for the current
-  79-pane session, plus the current XENEON branch. The integrated Herdr gate
-  passes 3,465 Rust tests, strict Clippy including Windows, UI/integration/
-  marketplace suites, and 98 maintenance/schema/docs/vendor tests. The current
-  XENEON gate passes 78 Rust core tests, 104 Qt tests, 27 Python contracts, and
-  all 31 installer scenarios. The final XENEON re-review is GO; the reviewed
-  release binaries and full Quickshell tree are installed. Live validation
-  reports one connected protocol-20 session with 18 agents, zero service
-  restarts, 0-1% sampled daemon CPU after replacing the stale release artifact,
-  clean `scripts/check.sh`/`hyprctl configerrors`, and a visually inspected
-  2560x720 EDGE frame with 14 cards on page one. The prior reviewed Herdr
-  handoff made no state change because the
-  then-running server had 67 panes and v0.8.0 refused more than 64. The retained
-  backup remains available. The custom Herdr branch is pushed to the fork at
-  `51af53be`; its epoch-1 Arch package is built and reviewed, but awaits the
-  user's sudo password. The running stock server remains intentionally intact,
-  so ordering is unavailable in the portal until a future controlled cold
-  restart activates the installed fork; the stock 64-descriptor exporter cannot
-  preserve the current 79-plus-pane session through a live handoff.
-  The previously reviewed XENEON side is installed: physical EDGE frames
-  with 14 agents confirm the bounded independent lanes change relative order,
-  cross, and overlap instead of moving as a rigid revolving formation. Both
-  application services remained active with zero restarts during that check.
+- The grouped/priority follow-up is live on the isolated Herdr branch
+  `xeneon-order-mode-sync` at `51af53be` and current XENEON branch
+  `header-launch-order-fix`. After the pane population fell to 52, the reviewed
+  epoch-1 Herdr package was installed user-locally and a state-preserving live
+  handoff replaced `/usr/bin/herdr` with `~/.local/bin/herdr` without closing
+  this session. XENEON reports one connected protocol-20 session, 18 agents,
+  and authoritative priority ordering; a typed priority-to-grouped-to-priority
+  round trip matched `agent.order.get` after every step. The current XENEON
+  gate passes 81 Rust core tests plus the CLI test, strict Clippy/rustfmt, 27
+  Python and 113 Qt QML tests, all 31 installer scenarios, `qmllint`, and
+  `git diff --check`. Independent Claude reviews are GO. The release daemon and
+  Quickshell tree are installed; both services are active. Live typed actions
+  launched exact ChatGPT and Claude desktop classes from no-window state and
+  focused an existing Claude window. Physical touchscreen presses and a Herdr
+  UI-side toggle remain human gates.
 
 - `omarchy-theme-sync` is based on current `origin/main` and contains the
   pushed theme integration, semantic state-role follow-up, dense layout,

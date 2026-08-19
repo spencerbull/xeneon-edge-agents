@@ -146,7 +146,10 @@ The only actions are:
 
 There is no method, key, text, shell-command, prompt, close, or server-control
 passthrough. Desktop actions do not accept a desktop ID, executable, title,
-class, or argument from QML, and ambiguous compositor matches fail closed.
+class, or argument from QML. When an exact class has multiple windows, the
+daemon narrows to the known initial main title, a tiled window, and then the uniquely
+most-recent focus-history entry; a match still ambiguous after those checks
+fails closed.
 Voice actions are single-attempt operations and return only
 bounded static result messages. Host commands have a ten-second ceiling; a
 failed or timed-out start may issue one distinct cancel cleanup attempt but is
