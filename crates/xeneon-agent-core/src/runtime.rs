@@ -677,6 +677,13 @@ impl DaemonRuntime {
             .await
         {
             Ok(()) => {
+                if command.action == ActionKind::Open {
+                    self.acknowledge_review_ready(&agent.id).await;
+                }
+                // Herdr already committed the focus/zoom operation. Refresh
+                // authoritative state even if compositor activation then
+                // fails, so the portal never retains a stale review badge.
+                let _ = self.invalidations.try_send(target.session.clone());
                 if matches!(command.action, ActionKind::Open | ActionKind::Zoom)
                     && let Err(error) = self
                         .desktop
@@ -690,10 +697,6 @@ impl DaemonRuntime {
                         "agent focused, but its Herdr window was not activated",
                     );
                 }
-                if command.action == ActionKind::Open {
-                    self.acknowledge_review_ready(&agent.id).await;
-                }
-                let _ = self.invalidations.try_send(target.session);
                 action_ok(&command.request_id, "action_completed")
             }
             Err(error) => {

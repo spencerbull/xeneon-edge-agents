@@ -433,6 +433,21 @@ verification, installation, and the live handoff.
 
 ## Open checkpoints
 
+- Repair the installed Herdr focus handoff on branch
+  `header-launch-order-fix`. Done requires an exact process/session-owned
+  compositor selection regression, focused and broad Rust gates, independent
+  review, a pushed PR, an exact reviewed local install, and a live typed open
+  action that both focuses the Herdr agent and activates its hosting window.
+  Do not weaken selection to a generic terminal class/title or focus an
+  unrelated terminal when the session identity is absent or ambiguous.
+  Independent Claude reviewer `xeneon_focus_review` ran in Herdr pane `wW:pR`,
+  found and re-reviewed the CLI/session/environment/focus-history boundaries,
+  and returned GO with no P0-P2 after 15 focused desktop tests and strict
+  Clippy. The reviewer pane was then closed by this loop. Final source gates
+  pass 87 Rust core tests plus the CLI test, strict workspace Clippy/rustfmt,
+  27 Python and 113 Qt QML tests, all 31 installer scenarios, ShellCheck,
+  `luac -p`, and `git diff --check`; publication, installation, and live
+  typed-open verification remain.
 - Complete the Claude Fable 5 ACP review/fix/re-review loop on
   `claude-fable-review`; do not include or modify the pre-existing untracked
   `packaging/` artifacts.

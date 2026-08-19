@@ -150,6 +150,12 @@ class, or argument from QML. When an exact class has multiple windows, the
 daemon narrows to the known initial main title, a tiled window, and then the uniquely
 most-recent focus-history entry; a match still ambiguous after those checks
 fails closed.
+Herdr activation separately requires an interactive Herdr process with the
+exact requested session identity in the compositor client's process tree;
+transient Herdr CLI commands cannot claim a terminal. A configured native
+class/title is preferred when present, otherwise multiple owning terminal
+views narrow to the unique most-recent focus-history entry and fail closed on
+missing or tied history.
 Voice actions are single-attempt operations and return only
 bounded static result messages. Host commands have a ten-second ceiling; a
 failed or timed-out start may issue one distinct cancel cleanup attempt but is

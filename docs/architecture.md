@@ -124,9 +124,12 @@ window the transcription target.
 The production QML process creates no window unless one configured output
 identity matches. It does not use a primary-screen fallback.
 
-Hyprland activation is session-specific. The daemon considers only compositor
-clients whose process trees contain the exact Herdr session or socket identity;
-ambiguous matches fail instead of focusing a generic window title.
+Hyprland activation is session-specific. Exact interactive Herdr
+process/session ownership is authoritative; transient Herdr CLI commands and
+unrelated terminals are excluded. A configured native class/title is only a
+preference among owning clients. When multiple terminal-hosted views remain,
+the unique most-recent Hyprland focus-history entry is selected; missing or
+tied history fails closed.
 
 ChatGPT Desktop and Claude Desktop use separate fixed action kinds. The daemon
 matches exact known compositor classes: one match is focused, no match launches
