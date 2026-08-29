@@ -23,7 +23,13 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const SUPPORTED_HERDR_PROTOCOL: u32 = 20;
+const MIN_SUPPORTED_HERDR_PROTOCOL: u32 = 20;
+const MAX_SUPPORTED_HERDR_PROTOCOL: u32 = 21;
+const FORK_MARKER_PROTOCOL: u32 = 21;
+
+fn supports_herdr_protocol(protocol: u32) -> bool {
+    (MIN_SUPPORTED_HERDR_PROTOCOL..=MAX_SUPPORTED_HERDR_PROTOCOL).contains(&protocol)
+}
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -54,6 +60,29 @@ pub struct SessionObservation {
     pub targets: HashMap<String, AgentTarget>,
     pub pane_ids: Vec<String>,
     pub agent_order: Option<AgentOrderMode>,
+}
+
+fn incompatible_observation(
+    descriptor: &SessionDescriptor,
+    version: String,
+    protocol: u32,
+    now_ms: u64,
+    message: String,
+) -> SessionObservation {
+    SessionObservation {
+        session: SessionView {
+            name: descriptor.name.clone(),
+            state: SessionState::Incompatible,
+            version: Some(version),
+            protocol: Some(protocol),
+            last_sync_ms: Some(now_ms),
+            message: Some(message),
+        },
+        agents: Vec::new(),
+        targets: HashMap::new(),
+        pane_ids: Vec::new(),
+        agent_order: None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,36 +215,65 @@ impl HerdrClient {
             json!({"id": request_id(), "method": "ping", "params": {}}),
         )
         .await?;
-        if ping.result.protocol != SUPPORTED_HERDR_PROTOCOL {
-            return Ok(SessionObservation {
-                session: SessionView {
-                    name: descriptor.name.clone(),
-                    state: SessionState::Incompatible,
-                    version: Some(ping.result.version),
-                    protocol: Some(ping.result.protocol),
-                    last_sync_ms: Some(now_ms),
-                    message: Some(format!(
-                        "Herdr protocol {} is unsupported; expected {}",
-                        ping.result.protocol, SUPPORTED_HERDR_PROTOCOL
-                    )),
-                },
-                agents: Vec::new(),
-                targets: HashMap::new(),
-                pane_ids: Vec::new(),
-                agent_order: None,
-            });
+        if !supports_herdr_protocol(ping.result.protocol) {
+            return Ok(incompatible_observation(
+                descriptor,
+                ping.result.version,
+                ping.result.protocol,
+                now_ms,
+                format!(
+                    "Herdr protocol {} is unsupported; expected {} or {}",
+                    ping.result.protocol,
+                    MIN_SUPPORTED_HERDR_PROTOCOL,
+                    MAX_SUPPORTED_HERDR_PROTOCOL
+                ),
+            ));
         }
+
+        // Upstream and the XENEON fork both currently report protocol 21. The
+        // fork-specific ordering method is the stable marker that this server
+        // also carries the dashboard API series; do not silently treat stock
+        // upstream as a fully compatible XENEON authority.
+        let required_agent_order = if ping.result.protocol == FORK_MARKER_PROTOCOL {
+            // Keep transport and response-shape failures distinct. A dropped
+            // request during a live handoff is transient and must take the
+            // caller's stale-session path; only a completed response that does
+            // not expose the fork method proves an incompatible server.
+            let response: Value = request(&descriptor.socket_path, agent_order_request()).await?;
+            match parse_agent_order(response) {
+                Ok(mode) => Some(mode),
+                Err(error) => {
+                    tracing::debug!(session = %descriptor.name, %error, "required XENEON fork API unavailable");
+                    return Ok(incompatible_observation(
+                        descriptor,
+                        ping.result.version,
+                        ping.result.protocol,
+                        now_ms,
+                        format!(
+                            "Herdr protocol {} is missing required XENEON fork APIs",
+                            ping.result.protocol
+                        ),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
         let response: SnapshotResponse = request(
             &descriptor.socket_path,
             json!({"id": request_id(), "method": "session.snapshot", "params": {}}),
         )
         .await?;
-        let agent_order = match self.get_agent_order(descriptor).await {
-            Ok(mode) => Some(mode),
-            Err(error) => {
-                tracing::debug!(session = %descriptor.name, %error, "Herdr agent ordering API unavailable");
-                None
-            }
+        let agent_order = match required_agent_order {
+            Some(mode) => Some(mode),
+            None => match self.get_agent_order(descriptor).await {
+                Ok(mode) => Some(mode),
+                Err(error) => {
+                    tracing::debug!(session = %descriptor.name, %error, "Herdr agent ordering API unavailable");
+                    None
+                }
+            },
         };
 
         let workspaces: HashMap<_, _> = response
@@ -398,11 +456,15 @@ impl HerdrClient {
 }
 
 async fn read_agent_order(socket_path: &Path) -> Result<AgentOrderMode> {
-    let response: Value = request(
-        socket_path,
-        json!({"id": request_id(), "method": "agent.order.get", "params": {}}),
-    )
-    .await?;
+    let response: Value = request(socket_path, agent_order_request()).await?;
+    parse_agent_order(response)
+}
+
+fn agent_order_request() -> Value {
+    json!({"id": request_id(), "method": "agent.order.get", "params": {}})
+}
+
+fn parse_agent_order(response: Value) -> Result<AgentOrderMode> {
     if let Some(error) = response.get("error") {
         bail!("Herdr agent ordering failed: {error}");
     }
@@ -776,6 +838,150 @@ mod tests {
             assert!(observation.pane_ids.is_empty());
             assert_eq!(observation.agent_order, None);
         }
+    }
+
+    #[test]
+    fn supports_stable_and_latest_fork_protocols() {
+        assert!(!supports_herdr_protocol(19));
+        assert!(supports_herdr_protocol(20));
+        assert!(supports_herdr_protocol(21));
+        assert!(!supports_herdr_protocol(22));
+    }
+
+    #[tokio::test]
+    async fn protocol_21_requires_the_xeneon_fork_api_marker() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            for (method, response) in [
+                (
+                    "ping",
+                    "{\"result\":{\"version\":\"0.8.2\",\"protocol\":21}}\n",
+                ),
+                (
+                    "agent.order.get",
+                    "{\"error\":{\"code\":\"unknown_method\",\"message\":\"unsupported\"}}\n",
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], method);
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let descriptor = SessionDescriptor {
+            name: "stock-upstream".into(),
+            running: true,
+            socket_path: socket,
+        };
+
+        let observation = HerdrClient::new("herdr")
+            .observe_session(&descriptor, "epoch", 0, 1234)
+            .await
+            .unwrap();
+
+        assert_eq!(observation.session.state, SessionState::Incompatible);
+        assert_eq!(observation.session.protocol, Some(21));
+        assert_eq!(
+            observation.session.message.as_deref(),
+            Some("Herdr protocol 21 is missing required XENEON fork APIs")
+        );
+        assert!(observation.agents.is_empty());
+        assert!(observation.targets.is_empty());
+        assert!(observation.pane_ids.is_empty());
+        assert_eq!(observation.agent_order, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_21_marker_transport_failure_remains_transient() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "ping");
+            write
+                .write_all(b"{\"result\":{\"version\":\"0.8.2\",\"protocol\":21}}\n")
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, _) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "agent.order.get");
+            // Closing without a response models the socket interruption that
+            // can occur while Herdr performs a live binary handoff.
+        });
+        let descriptor = SessionDescriptor {
+            name: "xeneon-fork".into(),
+            running: true,
+            socket_path: socket,
+        };
+
+        let error = HerdrClient::new("herdr")
+            .observe_session(&descriptor, "epoch", 0, 1234)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("closed without a response"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_21_fork_marker_precedes_snapshot_collection() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            for (method, response) in [
+                (
+                    "ping",
+                    "{\"result\":{\"version\":\"0.8.2\",\"protocol\":21}}\n",
+                ),
+                (
+                    "agent.order.get",
+                    "{\"result\":{\"type\":\"agent_order\",\"order\":\"priority\"}}\n",
+                ),
+                (
+                    "session.snapshot",
+                    "{\"result\":{\"snapshot\":{\"workspaces\":[],\"tabs\":[],\"agents\":[]}}}\n",
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], method);
+                write.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let descriptor = SessionDescriptor {
+            name: "xeneon-fork".into(),
+            running: true,
+            socket_path: socket,
+        };
+
+        let observation = HerdrClient::new("herdr")
+            .observe_session(&descriptor, "epoch", 0, 1234)
+            .await
+            .unwrap();
+
+        assert_eq!(observation.session.state, SessionState::Connected);
+        assert_eq!(observation.session.protocol, Some(21));
+        assert_eq!(observation.agent_order, Some(AgentOrderMode::Priority));
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -83,6 +83,9 @@ Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
 
 The Herdr adapter accepts protocol 20 from the Omarchy Herdr v0.8.0.r13 base.
+Protocol 21 is accepted only when `agent.order.get` succeeds as the marker for
+the latest `xeneon-order-mode-sync` fork API series; stock upstream protocol-21
+servers remain incompatible instead of silently losing XENEON controls.
 A different value from `ping` produces
 an `incompatible` session with no agents, targets, actions, snapshot request,
 or event subscription; the daemon does not guess compatibility across a Herdr

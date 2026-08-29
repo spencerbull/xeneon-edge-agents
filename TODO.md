@@ -47,6 +47,9 @@ event-driven lifecycle. The commissioned EDID, serial/model, and USB touch
 identity remain authoritative while the current connector becomes runtime
 state; the daemon and portal run only while that exact hardware is present.
 
+The active Herdr protocol checkpoint keeps stable protocol 20 support while
+admitting the latest fork protocol 21 before its reviewed live-handoff install.
+
 ## Done criteria
 
 - [x] Rust daemon and QML bridge expose versioned normalized snapshots.
@@ -117,6 +120,7 @@ state; the daemon and portal run only while that exact hardware is present.
 | Desktop launcher | `desktop-launcher` | managed XDG desktop entry, helper, icon, installer lifecycle, tests | Complete, installed, and launched through Omarchy |
 | Omarchy runtime theme sync | `omarchy-theme-sync` | project-owned QML palette reader, semantic chrome and state tokens, theme reload/fallback tests | Theme sync and semantic state roles installed, reviewed, and physically verified |
 | Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
+| Herdr protocol 21 compatibility | `herdr-protocol-21` in `herdr-protocol-21` worktree | adapter protocol gate, protocol docs, QML incompatibility fixture | Software complete: full gate and independent closure review pass; protocol-21 transport failures retain stale state while stock upstream fails closed |
 | Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
