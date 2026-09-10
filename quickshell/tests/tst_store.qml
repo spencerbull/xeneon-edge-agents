@@ -145,15 +145,15 @@ TestCase {
         incompatible.sessions[0].state = "incompatible"
         incompatible.sessions[0].protocol = 21
         incompatible.sessions[0].message =
-            "Herdr protocol 21 is unsupported; expected 20"
+            "Herdr protocol 21 is unsupported; expected 22"
 
         verify(store.ingestEnvelope(incompatible))
         compare(store.sessions[0].state, "incompatible")
         compare(store.sessions[0].message,
-                "Herdr protocol 21 is unsupported; expected 20")
+                "Herdr protocol 21 is unsupported; expected 22")
         compare(store.connection.state, "reconnecting")
         compare(store.connection.detail,
-                "Herdr protocol 21 is unsupported; expected 20")
+                "Herdr protocol 21 is unsupported; expected 22")
     }
 
     function test_agentOrderSwitchesBetweenHerdrGroupedAndPriorityOrder() {
