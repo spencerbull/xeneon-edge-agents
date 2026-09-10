@@ -23,7 +23,7 @@ use crate::model::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const SUPPORTED_HERDR_PROTOCOL: u32 = 20;
+const SUPPORTED_HERDR_PROTOCOL: u32 = 22;
 
 #[derive(Debug, Clone)]
 pub struct HerdrClient {
@@ -767,10 +767,17 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_protocols_never_request_or_surface_session_data() {
-        for protocol in [19, 999] {
+        for protocol in [20, 21, 999] {
             let observation = observe_unsupported_protocol(protocol).await;
             assert_eq!(observation.session.state, SessionState::Incompatible);
             assert_eq!(observation.session.protocol, Some(protocol));
+            let expected = format!(
+                "Herdr protocol {protocol} is unsupported; expected {SUPPORTED_HERDR_PROTOCOL}"
+            );
+            assert_eq!(
+                observation.session.message.as_deref(),
+                Some(expected.as_str())
+            );
             assert!(observation.agents.is_empty());
             assert!(observation.targets.is_empty());
             assert!(observation.pane_ids.is_empty());
@@ -779,7 +786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn herdr_v0_8_protocol_20_requests_and_parses_the_snapshot() {
+    async fn herdr_v0_9_protocol_22_requests_and_parses_the_snapshot() {
         let temp = tempdir().unwrap();
         let socket = temp.path().join("herdr.sock");
         let listener = UnixListener::bind(&socket).unwrap();
@@ -792,7 +799,7 @@ mod tests {
             assert_eq!(request["method"], "ping");
             write
                 .write_all(
-                    b"{\"id\":\"ping\",\"result\":{\"version\":\"0.8.0\",\"protocol\":20}}\n",
+                    b"{\"id\":\"ping\",\"result\":{\"type\":\"pong\",\"version\":\"0.9.0\",\"protocol\":22,\"capabilities\":{\"live_handoff\":true,\"endpoint_protocol_generation\":1}}}\n",
                 )
                 .await
                 .unwrap();
@@ -805,7 +812,7 @@ mod tests {
             assert_eq!(request["method"], "session.snapshot");
             write
                 .write_all(
-                    b"{\"id\":\"snapshot\",\"result\":{\"snapshot\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"number\":1,\"label\":\"xeneon\"}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"review\"}],\"agents\":[{\"terminal_id\":\"term-1\",\"agent\":\"codex\",\"agent_status\":\"blocked\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"pane_id\":\"w1:p1\",\"revision\":4,\"state_change_seq\":9,\"actions\":[{\"capability_id\":\"interrupt-1\",\"action\":\"interrupt\",\"expires_at_unix_ms\":999,\"revision\":4}]}]}}}\n",
+                    b"{\"id\":\"snapshot\",\"result\":{\"type\":\"snapshot\",\"snapshot\":{\"version\":\"0.9.0\",\"protocol\":22,\"workspaces\":[{\"workspace_id\":\"w1\",\"number\":1,\"label\":\"xeneon\",\"focused\":true,\"pane_count\":1,\"tab_count\":1}],\"tabs\":[{\"tab_id\":\"w1:t1\",\"label\":\"review\",\"workspace_id\":\"w1\"}],\"panes\":[],\"layouts\":[],\"agents\":[{\"terminal_id\":\"term-1\",\"agent\":\"codex\",\"agent_status\":\"blocked\",\"agent_session\":{\"source\":\"herdr:codex\",\"kind\":\"id\",\"value\":\"sess-1\"},\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"pane_id\":\"w1:p1\",\"revision\":4,\"state_change_seq\":9,\"actions\":[{\"capability_id\":\"interrupt-1\",\"action\":\"interrupt\",\"expires_at_unix_ms\":999,\"revision\":4}]}]}}}\n",
                 )
                 .await
                 .unwrap();
@@ -835,8 +842,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(observation.session.state, SessionState::Connected);
-        assert_eq!(observation.session.version.as_deref(), Some("0.8.0"));
-        assert_eq!(observation.session.protocol, Some(20));
+        assert_eq!(observation.session.version.as_deref(), Some("0.9.0"));
+        assert_eq!(observation.session.protocol, Some(22));
         assert_eq!(observation.agent_order, Some(AgentOrderMode::Grouped));
         assert_eq!(observation.agents.len(), 1);
         assert_eq!(observation.agents[0].display_name, "review");
@@ -861,7 +868,7 @@ mod tests {
             for (method, response) in [
                 (
                     "ping",
-                    "{\"result\":{\"version\":\"0.8.0\",\"protocol\":20}}\n",
+                    "{\"result\":{\"type\":\"pong\",\"version\":\"0.9.0\",\"protocol\":22}}\n",
                 ),
                 (
                     "session.snapshot",
