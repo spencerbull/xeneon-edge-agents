@@ -15,7 +15,9 @@ QtObject {
         "voice_stop",
         "voice_cancel",
         "order_grouped",
-        "order_priority"
+        "order_priority",
+        "backend_herdr",
+        "backend_t3code"
     ]
 
     property int requestCounter: 0
@@ -51,6 +53,8 @@ QtObject {
             || action === "voice_cancel"
             || action === "order_grouped"
             || action === "order_priority"
+            || action === "backend_herdr"
+            || action === "backend_t3code"
 
         if (systemAction) {
             if (normalizedAgentId !== ""

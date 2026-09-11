@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -21,19 +22,96 @@ use crate::{
     Config,
     desktop::{DesktopApp, DesktopAppOutcome, DesktopController},
     health::HealthCollector,
-    herdr::{AgentTarget, HerdrClient, SessionDescriptor},
+    herdr::{HerdrClient, HerdrTarget, SessionDescriptor},
     micro::MicroCollector,
     model::{
-        ActionKind, ActionResult, AgentActions, AgentOrderMode, AgentOrderSnapshot, AgentStatus,
-        ConnectionState, PortalCommand, PortalSnapshot, SCHEMA_VERSION, ServerMessage,
-        SessionState, SessionView, VoiceState, sort_agents,
+        ActionKind, ActionResult, AgentActions, AgentBackend, AgentBackendSnapshot, AgentOrderMode,
+        AgentOrderSnapshot, AgentStatus, ConnectionState, PortalCommand, PortalSnapshot,
+        SCHEMA_VERSION, ServerMessage, SessionState, SessionView, VoiceState, sort_agents,
     },
     protocol::{command_capability_matches, validate_command},
+    t3code::{self, T3codeClient, T3codeTarget},
     usage::UsageCollector,
     voice::{VoiceActionError, VoiceController},
 };
 
 const INVALIDATION_COALESCE: Duration = Duration::from_millis(200);
+const BACKEND_STATE_FILE_NAME: &str = "xeneon-edge-agents/agent-backend.toml";
+/// Invalidation key used when the portal switches agent managers.
+const BACKEND_SWITCH_INVALIDATION: &str = "\0backend";
+
+/// Private action-routing state for one portal card, owned by whichever agent
+/// manager produced it.
+#[derive(Debug, Clone)]
+pub enum AgentTarget {
+    Herdr(HerdrTarget),
+    T3code(T3codeTarget),
+}
+
+impl AgentTarget {
+    fn session(&self) -> &str {
+        match self {
+            Self::Herdr(target) => &target.session,
+            Self::T3code(_) => t3code::SESSION_NAME,
+        }
+    }
+
+    fn state_change_seq(&self) -> u64 {
+        match self {
+            Self::Herdr(target) => target.state_change_seq,
+            Self::T3code(target) => target.state_change_seq,
+        }
+    }
+
+    /// Whether the agent manager itself recorded a human acknowledgement of
+    /// the current state. Herdr acknowledges through focus transitions only.
+    fn acknowledged(&self) -> bool {
+        match self {
+            Self::Herdr(_) => false,
+            Self::T3code(target) => target.acknowledged,
+        }
+    }
+}
+
+/// Portal-owned agent-manager selection persisted across daemon restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedBackend {
+    backend: AgentBackend,
+    t3code_order: AgentOrderMode,
+}
+
+fn load_persisted_backend(path: &Path) -> Option<PersistedBackend> {
+    let contents = fs::read_to_string(path).ok()?;
+    match toml::from_str(&contents) {
+        Ok(persisted) => Some(persisted),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignoring invalid agent backend state");
+            None
+        }
+    }
+}
+
+fn save_persisted_backend(path: &Path, persisted: &PersistedBackend) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("agent backend state path has no parent"))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating state directory {}", parent.display()))?;
+    let encoded = toml::to_string(persisted).context("encoding agent backend state")?;
+    let temporary = parent.join(".agent-backend.toml.tmp");
+    fs::write(&temporary, encoded).with_context(|| format!("writing {}", temporary.display()))?;
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+pub fn default_backend_state_path() -> Option<PathBuf> {
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .map(|state_home| state_home.join(BACKEND_STATE_FILE_NAME))
+}
 
 fn apply_agent_order(agents: &mut [crate::model::AgentView], order: &AgentOrderSnapshot) {
     if order.available && order.mode == AgentOrderMode::Grouped {
@@ -50,6 +128,9 @@ fn apply_agent_order(agents: &mut [crate::model::AgentView], order: &AgentOrderS
 #[derive(Debug)]
 struct RuntimeState {
     snapshot: PortalSnapshot,
+    backend: AgentBackend,
+    t3code_order: AgentOrderMode,
+    t3code_sequence: Option<u64>,
     targets: HashMap<String, AgentTarget>,
     observed: HashMap<String, ObservedAgent>,
     focused_agents: HashMap<String, Option<String>>,
@@ -75,6 +156,8 @@ struct Subscription {
 pub struct DaemonRuntime {
     config: Config,
     herdr: HerdrClient,
+    t3code: T3codeClient,
+    backend_state_path: Option<PathBuf>,
     state: Arc<RwLock<RuntimeState>>,
     desktop: Arc<DesktopController>,
     voice: Arc<Mutex<VoiceController>>,
@@ -84,21 +167,49 @@ pub struct DaemonRuntime {
 }
 
 impl DaemonRuntime {
+    /// Builds a runtime that starts on the configured agent manager and does
+    /// not persist portal backend switches.
     pub fn new(config: Config) -> Result<(Self, mpsc::Receiver<String>)> {
+        Self::new_with_state_path(config, None)
+    }
+
+    /// Builds a runtime whose portal-selected agent manager is restored from
+    /// and persisted to `backend_state_path` when it is provided.
+    pub fn new_with_state_path(
+        config: Config,
+        backend_state_path: Option<PathBuf>,
+    ) -> Result<(Self, mpsc::Receiver<String>)> {
         config.validate()?;
         let epoch = Uuid::new_v4().to_string();
-        let snapshot = PortalSnapshot::empty(epoch);
+        let mut snapshot = PortalSnapshot::empty(epoch);
+        let persisted = backend_state_path
+            .as_deref()
+            .and_then(load_persisted_backend)
+            .unwrap_or(PersistedBackend {
+                backend: config.agent_backend,
+                t3code_order: AgentOrderMode::default(),
+            });
+        snapshot.backend = AgentBackendSnapshot {
+            mode: persisted.backend,
+            switchable: true,
+        };
         let encoded = encode_snapshot(&snapshot)?;
         let (updates, _) = watch::channel(encoded);
         let (invalidations, invalidation_rx) = mpsc::channel(64);
         let desktop = DesktopController::new(config.desktop.clone());
         let voice = VoiceController::from_config(&config, snapshot.daemon_epoch.clone())?;
+        let t3code = T3codeClient::from_config(config.t3code.home.as_deref())?;
         Ok((
             Self {
                 herdr: HerdrClient::new(config.herdr_bin.clone()),
+                t3code,
+                backend_state_path,
                 config,
                 state: Arc::new(RwLock::new(RuntimeState {
                     snapshot,
+                    backend: persisted.backend,
+                    t3code_order: persisted.t3code_order,
+                    t3code_sequence: None,
                     targets: HashMap::new(),
                     observed: HashMap::new(),
                     focused_agents: HashMap::new(),
@@ -127,9 +238,9 @@ impl DaemonRuntime {
         let mut usage_collector = tokio::spawn(async move {
             usage_runtime.collect_usage_loop().await;
         });
-        let herdr_runtime = self.clone();
-        let mut herdr_collector = tokio::spawn(async move {
-            herdr_runtime.collect_herdr_loop(invalidation_rx).await;
+        let agent_runtime = self.clone();
+        let mut agent_collector = tokio::spawn(async move {
+            agent_runtime.collect_agent_loop(invalidation_rx).await;
         });
 
         loop {
@@ -138,9 +249,9 @@ impl DaemonRuntime {
                     result.context("joining auxiliary state collector")?;
                     bail!("auxiliary state collector stopped unexpectedly");
                 }
-                result = &mut herdr_collector => {
-                    result.context("joining Herdr state collector")?;
-                    bail!("Herdr state collector stopped unexpectedly");
+                result = &mut agent_collector => {
+                    result.context("joining agent state collector")?;
+                    bail!("agent state collector stopped unexpectedly");
                 }
                 result = &mut usage_collector => {
                     result.context("joining usage state collector")?;
@@ -223,19 +334,30 @@ impl DaemonRuntime {
         }
     }
 
-    async fn collect_herdr_loop(&self, mut invalidation_rx: mpsc::Receiver<String>) {
-        let mut herdr_tick = interval(self.config.herdr_refresh_interval());
-        herdr_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    async fn collect_agent_loop(&self, mut invalidation_rx: mpsc::Receiver<String>) {
+        let mut repair_tick = interval(self.config.herdr_refresh_interval());
+        let mut t3code_tick = interval(self.config.t3code_refresh_interval());
+        repair_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        t3code_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut subscriptions: HashMap<String, Subscription> = HashMap::new();
 
         loop {
             tokio::select! {
-                _ = herdr_tick.tick() => {
-                    self.refresh_herdr(&mut subscriptions).await;
+                _ = repair_tick.tick() => {
+                    self.refresh_agents(&mut subscriptions).await;
+                }
+                _ = t3code_tick.tick() => {
+                    // T3 Code has no public event socket; its projection
+                    // sequence is a cheap change signal between repairs.
+                    if self.state.read().await.backend == AgentBackend::T3code
+                        && self.t3code_sequence_changed().await
+                    {
+                        self.refresh_agents(&mut subscriptions).await;
+                    }
                 }
                 invalidation = invalidation_rx.recv() => {
                     if invalidation.is_none() {
-                        tracing::error!("Herdr invalidation channel closed");
+                        tracing::error!("agent invalidation channel closed");
                         return;
                     }
                     // A single terminal operation can emit several related
@@ -244,10 +366,104 @@ impl DaemonRuntime {
                     // full Herdr API once per event.
                     sleep(INVALIDATION_COALESCE).await;
                     while invalidation_rx.try_recv().is_ok() {}
-                    self.refresh_herdr(&mut subscriptions).await;
+                    self.refresh_agents(&mut subscriptions).await;
                 }
             }
         }
+    }
+
+    async fn refresh_agents(&self, subscriptions: &mut HashMap<String, Subscription>) {
+        // Copy the mode out before dispatching: a `match` scrutinee guard would
+        // stay alive across the refresh and deadlock its own write lock.
+        let backend = self.state.read().await.backend;
+        match backend {
+            AgentBackend::Herdr => self.refresh_herdr(subscriptions).await,
+            AgentBackend::T3code => {
+                for (_, subscription) in subscriptions.drain() {
+                    subscription.handle.abort();
+                }
+                self.refresh_t3code().await;
+            }
+        }
+    }
+
+    async fn t3code_sequence_changed(&self) -> bool {
+        let client = self.t3code.clone();
+        let current = match spawn_blocking(move || client.projection_sequence()).await {
+            Ok(Ok(sequence)) => sequence,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "T3 Code projection sequence unavailable");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(%error, "T3 Code sequence poll task failed");
+                return false;
+            }
+        };
+        self.state.read().await.t3code_sequence != current
+    }
+
+    async fn refresh_t3code(&self) {
+        let _order_guard = self.order_operation.lock().await;
+        let observation_time_ms = now_ms();
+        let epoch = self.state.read().await.snapshot.daemon_epoch.clone();
+        let client = self.t3code.clone();
+        let observation =
+            match spawn_blocking(move || client.observe(&epoch, observation_time_ms)).await {
+                Ok(observation) => observation,
+                Err(error) => {
+                    tracing::warn!(%error, "T3 Code observation task failed");
+                    return;
+                }
+            };
+
+        let mut state = self.state.write().await;
+        if state.backend != AgentBackend::T3code {
+            return;
+        }
+        let session_state = observation.session.state;
+        let mut agents = observation.agents;
+        let mut targets: HashMap<String, AgentTarget> = observation
+            .targets
+            .into_iter()
+            .map(|(id, target)| (id, AgentTarget::T3code(target)))
+            .collect();
+        if session_state == SessionState::Stale {
+            // Keep the last roster visible without action targets while the
+            // state file is transiently unreadable, mirroring a stale Herdr
+            // session.
+            agents = state.snapshot.agents.clone();
+            for agent in &mut agents {
+                agent.actions = AgentActions::default();
+            }
+            targets.clear();
+        }
+        let now = Instant::now();
+        let RuntimeState {
+            observed,
+            focused_agents,
+            ..
+        } = &mut *state;
+        apply_agent_observations(&mut agents, &targets, observed, focused_agents, now);
+        let agent_order = AgentOrderSnapshot {
+            available: session_state == SessionState::Connected,
+            mode: state.t3code_order,
+        };
+        apply_agent_order(&mut agents, &agent_order);
+        state.snapshot.connection = match session_state {
+            SessionState::Connected => ConnectionState::Connected,
+            SessionState::Offline => ConnectionState::Offline,
+            SessionState::Stale | SessionState::Incompatible => ConnectionState::Reconnecting,
+        };
+        state.snapshot.sessions = vec![observation.session];
+        state.snapshot.agents = agents;
+        state.snapshot.agent_order = agent_order;
+        state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
+        state.snapshot.generated_at_ms = now_ms();
+        state.targets = targets;
+        state.t3code_sequence = observation.projection_sequence;
+        drop(state);
+        self.publish().await;
     }
 
     async fn refresh_voice(&self) {
@@ -269,12 +485,20 @@ impl DaemonRuntime {
         // Keep a collected ordering snapshot from publishing after a completed
         // ordering mutation, and serialize collection with compensating writes.
         let _order_guard = self.order_operation.lock().await;
+        // A switch may have completed between the dispatch decision and this
+        // guard; Herdr state must never be committed over another manager.
+        if self.state.read().await.backend != AgentBackend::Herdr {
+            return;
+        }
         let observation_time_ms = now_ms();
         let descriptors = match self.herdr.discover().await {
             Ok(descriptors) => descriptors,
             Err(error) => {
                 tracing::warn!(%error, "Herdr discovery failed");
                 let mut state = self.state.write().await;
+                if state.backend != AgentBackend::Herdr {
+                    return;
+                }
                 state.snapshot.connection = ConnectionState::Offline;
                 for session in &mut state.snapshot.sessions {
                     session.state = SessionState::Stale;
@@ -412,7 +636,12 @@ impl DaemonRuntime {
                     }
                     source_offset += observation.agents.len();
                     sessions.push(observation.session);
-                    targets.extend(observation.targets);
+                    targets.extend(
+                        observation
+                            .targets
+                            .into_iter()
+                            .map(|(id, target)| (id, AgentTarget::Herdr(target))),
+                    );
                     agents.extend(observation.agents);
                 }
                 Err(error) => {
@@ -451,6 +680,9 @@ impl DaemonRuntime {
             keep
         });
         let mut state = self.state.write().await;
+        if state.backend != AgentBackend::Herdr {
+            return;
+        }
         let now = Instant::now();
         let RuntimeState {
             observed,
@@ -605,6 +837,13 @@ impl DaemonRuntime {
             return self.process_agent_order_command(&command).await;
         }
 
+        if matches!(
+            command.action,
+            ActionKind::BackendHerdr | ActionKind::BackendT3code
+        ) {
+            return self.process_backend_command(&command).await;
+        }
+
         let (snapshot_sequence, agent, target) = {
             let state = self.state.read().await;
             (
@@ -654,7 +893,9 @@ impl DaemonRuntime {
             | ActionKind::VoiceStop
             | ActionKind::VoiceCancel
             | ActionKind::OrderGrouped
-            | ActionKind::OrderPriority => true,
+            | ActionKind::OrderPriority
+            | ActionKind::BackendHerdr
+            | ActionKind::BackendT3code => true,
         };
         if !enabled {
             return action_error(
@@ -671,9 +912,42 @@ impl DaemonRuntime {
             );
         }
 
+        let herdr_target = match target {
+            AgentTarget::Herdr(target) => target,
+            AgentTarget::T3code(_) => {
+                // T3 Code exposes no public thread-focus API on Linux; the
+                // only agent action is activating its exact desktop window.
+                if command.action != ActionKind::Open {
+                    return action_error(
+                        &command.request_id,
+                        "target_unavailable",
+                        "action is not available for T3 Code threads",
+                    );
+                }
+                return match self.desktop.focus_existing(DesktopApp::T3code).await {
+                    Ok(()) => {
+                        self.acknowledge_review_ready(&agent.id).await;
+                        let _ = self.invalidations.try_send(t3code::SESSION_NAME.to_owned());
+                        action_ok(&command.request_id, "action_completed")
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "T3 Code window activation failed");
+                        action_error(
+                            &command.request_id,
+                            "target_unavailable",
+                            "T3 Code window is not available",
+                        )
+                    }
+                };
+            }
+        };
         match self
             .herdr
-            .perform(&target, command.action, command.capability_id.as_deref())
+            .perform(
+                &herdr_target,
+                command.action,
+                command.capability_id.as_deref(),
+            )
             .await
         {
             Ok(()) => {
@@ -683,11 +957,11 @@ impl DaemonRuntime {
                 // Herdr already committed the focus/zoom operation. Refresh
                 // authoritative state even if compositor activation then
                 // fails, so the portal never retains a stale review badge.
-                let _ = self.invalidations.try_send(target.session.clone());
+                let _ = self.invalidations.try_send(herdr_target.session.clone());
                 if matches!(command.action, ActionKind::Open | ActionKind::Zoom)
                     && let Err(error) = self
                         .desktop
-                        .activate_herdr(&target.session, &target.socket_path)
+                        .activate_herdr(&herdr_target.session, &herdr_target.socket_path)
                         .await
                 {
                     tracing::warn!(%error, "Herdr window activation failed after agent focus");
@@ -727,7 +1001,7 @@ impl DaemonRuntime {
             return action_error(
                 &command.request_id,
                 "stale_snapshot",
-                "the authoritative Herdr ordering changed before the action",
+                "the authoritative agent ordering changed before the action",
             );
         }
         let mode = match command.action {
@@ -735,6 +1009,28 @@ impl DaemonRuntime {
             ActionKind::OrderPriority => AgentOrderMode::Priority,
             _ => unreachable!("ordering command filtered before dispatch"),
         };
+        if self.state.read().await.backend == AgentBackend::T3code {
+            // T3 Code has no ordering preference of its own, so the daemon
+            // owns this typed setting for T3 Code rosters.
+            let mut state = self.state.write().await;
+            state.t3code_order = mode;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode,
+            };
+            let ordering = state.snapshot.agent_order.clone();
+            apply_agent_order(&mut state.snapshot.agents, &ordering);
+            state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
+            state.snapshot.generated_at_ms = now_ms();
+            let persisted = PersistedBackend {
+                backend: state.backend,
+                t3code_order: state.t3code_order,
+            };
+            drop(state);
+            self.persist_backend(persisted).await;
+            self.publish().await;
+            return action_ok(&command.request_id, "agent_order_updated");
+        }
         let descriptors = match self.herdr.discover().await {
             Ok(descriptors) if !descriptors.is_empty() => descriptors,
             Ok(_) => {
@@ -865,6 +1161,74 @@ impl DaemonRuntime {
         action_ok(&command.request_id, "agent_order_updated")
     }
 
+    async fn process_backend_command(&self, command: &PortalCommand) -> ActionResult {
+        let _order_guard = self.order_operation.lock().await;
+        let mode = match command.action {
+            ActionKind::BackendHerdr => AgentBackend::Herdr,
+            ActionKind::BackendT3code => AgentBackend::T3code,
+            _ => unreachable!("backend command filtered before dispatch"),
+        };
+        let mut state = self.state.write().await;
+        if command.sequence != state.snapshot.sequence {
+            return action_error(
+                &command.request_id,
+                "stale_snapshot",
+                "the portal snapshot changed before the action",
+            );
+        }
+        if state.backend == mode {
+            return action_ok(&command.request_id, "agent_backend_unchanged");
+        }
+        // The previous manager's cards, private targets, latches, and focus
+        // history must never survive into the next manager's roster.
+        state.backend = mode;
+        state.targets.clear();
+        state.observed.clear();
+        state.focused_agents.clear();
+        state.t3code_sequence = None;
+        state.snapshot.sessions.clear();
+        state.snapshot.agents.clear();
+        state.snapshot.agent_order = AgentOrderSnapshot::default();
+        state.snapshot.connection = ConnectionState::Reconnecting;
+        state.snapshot.backend = AgentBackendSnapshot {
+            mode,
+            switchable: true,
+        };
+        state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
+        state.snapshot.generated_at_ms = now_ms();
+        let persisted = PersistedBackend {
+            backend: state.backend,
+            t3code_order: state.t3code_order,
+        };
+        drop(state);
+        self.persist_backend(persisted).await;
+        self.publish().await;
+        let _ = self
+            .invalidations
+            .try_send(BACKEND_SWITCH_INVALIDATION.to_owned());
+        action_ok(&command.request_id, "agent_backend_updated")
+    }
+
+    async fn persist_backend(&self, persisted: PersistedBackend) {
+        let Some(path) = self.backend_state_path.clone() else {
+            return;
+        };
+        let result = spawn_blocking({
+            let path = path.clone();
+            move || save_persisted_backend(&path, &persisted)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(path = %path.display(), %error, "agent backend state was not persisted");
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "agent backend persistence task failed");
+            }
+        }
+    }
+
     async fn process_voice_command(
         &self,
         command: &PortalCommand,
@@ -976,7 +1340,7 @@ fn apply_agent_observations(
 ) {
     let connected_sessions: HashSet<String> = targets
         .values()
-        .map(|target| target.session.clone())
+        .map(|target| target.session().to_owned())
         .collect();
     let mut current_focus: HashMap<String, Option<String>> = connected_sessions
         .iter()
@@ -987,7 +1351,7 @@ fn apply_agent_observations(
             continue;
         };
         if agent.focused {
-            current_focus.insert(target.session.clone(), Some(agent.id.clone()));
+            current_focus.insert(target.session().to_owned(), Some(agent.id.clone()));
         }
     }
 
@@ -1012,8 +1376,9 @@ fn apply_agent_observations(
             continue;
         };
         let previous = observed.get(&agent.id);
+        let state_change_seq = target.state_change_seq();
         let state_unchanged = previous.is_some_and(|value| {
-            value.status == agent.status && value.state_change_seq == target.state_change_seq
+            value.status == agent.status && value.state_change_seq == state_change_seq
         });
         let mut review_ready = if state_unchanged {
             previous.is_some_and(|value| value.review_ready)
@@ -1024,12 +1389,12 @@ fn apply_agent_observations(
                 agent.status,
             )
         };
-        if focus_acknowledgements.contains(&agent.id) {
+        if focus_acknowledgements.contains(&agent.id) || target.acknowledged() {
             review_ready = false;
         }
         let since = previous
             .filter(|value| {
-                value.status == agent.status && value.state_change_seq == target.state_change_seq
+                value.status == agent.status && value.state_change_seq == state_change_seq
             })
             .map_or(now, |value| value.since);
         agent.review_ready = review_ready;
@@ -1038,7 +1403,7 @@ fn apply_agent_observations(
             agent.id.clone(),
             ObservedAgent {
                 status: agent.status,
-                state_change_seq: target.state_change_seq,
+                state_change_seq,
                 since,
                 review_ready,
             },
@@ -1654,7 +2019,7 @@ mod tests {
         apply_agent_observations(&mut agents, &targets, &mut observed, &mut focused, now);
         assert!(!agents[0].review_ready);
 
-        targets.get_mut("agent").unwrap().state_change_seq = 2;
+        targets.insert("agent".into(), test_target("pane", 2));
         apply_agent_observations(&mut agents, &targets, &mut observed, &mut focused, now);
         assert!(agents[0].review_ready);
     }
@@ -1793,13 +2158,350 @@ mod tests {
     }
 
     fn test_target(pane_id: &str, state_change_seq: u64) -> AgentTarget {
-        AgentTarget {
+        AgentTarget::Herdr(HerdrTarget {
             session: "default".into(),
             socket_path: PathBuf::from("/tmp/herdr.sock"),
             pane_id: pane_id.into(),
             terminal_id: "terminal".into(),
             state_change_seq,
             revision: 1,
+        })
+    }
+
+    fn t3code_target(state_change_seq: u64, acknowledged: bool) -> AgentTarget {
+        AgentTarget::T3code(T3codeTarget {
+            thread_id: "thread".into(),
+            state_change_seq,
+            acknowledged,
+        })
+    }
+
+    fn backend_command(action: ActionKind, sequence: u64) -> PortalCommand {
+        PortalCommand {
+            schema_version: SCHEMA_VERSION,
+            request_id: "backend".into(),
+            sequence,
+            agent_id: None,
+            action,
+            capability_id: None,
         }
+    }
+
+    #[test]
+    fn t3code_settle_acknowledges_review_ready_like_a_focus_transition() {
+        let now = Instant::now();
+        let mut agents = vec![test_agent("agent", AgentStatus::Done, false)];
+        let mut targets = HashMap::from([("agent".to_owned(), t3code_target(1, false))]);
+        let mut observed = HashMap::new();
+        let mut focused = HashMap::new();
+        apply_agent_observations(&mut agents, &targets, &mut observed, &mut focused, now);
+        assert!(agents[0].review_ready);
+
+        agents[0].status = AgentStatus::Idle;
+        targets.insert("agent".into(), t3code_target(2, true));
+        apply_agent_observations(&mut agents, &targets, &mut observed, &mut focused, now);
+        assert!(!agents[0].review_ready, "T3 Code settle must acknowledge");
+
+        agents[0].status = AgentStatus::Done;
+        targets.insert("agent".into(), t3code_target(3, false));
+        apply_agent_observations(&mut agents, &targets, &mut observed, &mut focused, now);
+        assert!(
+            agents[0].review_ready,
+            "a new completed turn re-arms review"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_switch_clears_the_previous_roster_and_persists_the_choice() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp
+            .path()
+            .join("state/xeneon-edge-agents/agent-backend.toml");
+        let (runtime, mut invalidations) =
+            DaemonRuntime::new_with_state_path(Config::default(), Some(state_path.clone()))
+                .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 4;
+            state.snapshot.agents = vec![test_agent("herdr-agent", AgentStatus::Working, true)];
+            state
+                .targets
+                .insert("herdr-agent".into(), test_target("pane", 1));
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+        }
+        assert_eq!(
+            runtime.state.read().await.snapshot.backend.mode,
+            AgentBackend::Herdr
+        );
+
+        let stale = runtime
+            .process_backend_command(&backend_command(ActionKind::BackendT3code, 3))
+            .await;
+        assert!(!stale.ok);
+        assert_eq!(stale.code, "stale_snapshot");
+
+        let result = runtime
+            .process_backend_command(&backend_command(ActionKind::BackendT3code, 4))
+            .await;
+        assert!(result.ok);
+        assert_eq!(result.message, "agent_backend_updated");
+        {
+            let state = runtime.state.read().await;
+            assert_eq!(state.backend, AgentBackend::T3code);
+            assert_eq!(state.snapshot.backend.mode, AgentBackend::T3code);
+            assert!(state.snapshot.backend.switchable);
+            assert!(state.snapshot.agents.is_empty());
+            assert!(state.targets.is_empty());
+            assert!(!state.snapshot.agent_order.available);
+            assert_eq!(state.snapshot.connection, ConnectionState::Reconnecting);
+            assert_eq!(state.snapshot.sequence, 5);
+        }
+        assert_eq!(
+            invalidations.recv().await.as_deref(),
+            Some(BACKEND_SWITCH_INVALIDATION)
+        );
+        let persisted = fs::read_to_string(&state_path).unwrap();
+        assert!(persisted.contains("backend = \"t3code\""));
+        let mode = fs::metadata(&state_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let repeated = runtime
+            .process_backend_command(&backend_command(ActionKind::BackendT3code, 5))
+            .await;
+        assert!(repeated.ok);
+        assert_eq!(repeated.message, "agent_backend_unchanged");
+        assert_eq!(runtime.state.read().await.snapshot.sequence, 5);
+
+        let (restored, _) =
+            DaemonRuntime::new_with_state_path(Config::default(), Some(state_path)).unwrap();
+        assert_eq!(restored.state.read().await.backend, AgentBackend::T3code);
+        assert_eq!(
+            restored.state.read().await.snapshot.backend.mode,
+            AgentBackend::T3code
+        );
+    }
+
+    #[tokio::test]
+    async fn t3code_ordering_is_daemon_owned_and_never_calls_herdr() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("herdr");
+        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            agent_backend: AgentBackend::T3code,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 7;
+            state.snapshot.agent_order = AgentOrderSnapshot {
+                available: true,
+                mode: AgentOrderMode::Grouped,
+            };
+            state.snapshot.agents = vec![
+                AgentView {
+                    source_order: 0,
+                    ..test_agent("workspace-first", AgentStatus::Idle, false)
+                },
+                AgentView {
+                    source_order: 1,
+                    ..test_agent("attention-first", AgentStatus::Blocked, false)
+                },
+            ];
+        }
+
+        let result = runtime
+            .process_agent_order_command(&PortalCommand {
+                schema_version: SCHEMA_VERSION,
+                request_id: "order".into(),
+                sequence: 7,
+                agent_id: None,
+                action: ActionKind::OrderPriority,
+                capability_id: None,
+            })
+            .await;
+
+        assert!(result.ok);
+        let state = runtime.state.read().await;
+        assert_eq!(state.t3code_order, AgentOrderMode::Priority);
+        assert!(state.snapshot.agent_order.available);
+        assert_eq!(state.snapshot.agent_order.mode, AgentOrderMode::Priority);
+        assert_eq!(state.snapshot.agents[0].id, "attention-first");
+        assert_eq!(state.snapshot.sequence, 8);
+    }
+
+    #[tokio::test]
+    async fn t3code_agent_actions_never_reach_herdr_or_launch_applications() {
+        let (runtime, _) = DaemonRuntime::new(Config {
+            agent_backend: AgentBackend::T3code,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 3;
+            let mut agent = test_agent("thread", AgentStatus::Idle, false);
+            agent.actions = AgentActions {
+                open: true,
+                zoom: false,
+                approve: None,
+                interrupt: None,
+            };
+            state.snapshot.agents = vec![agent];
+            state
+                .targets
+                .insert("thread".into(), t3code_target(1, false));
+        }
+        let command = |action: ActionKind, capability: Option<&str>| {
+            serde_json::to_string(&PortalCommand {
+                schema_version: SCHEMA_VERSION,
+                request_id: "thread-action".into(),
+                sequence: 3,
+                agent_id: Some("thread".into()),
+                action,
+                capability_id: capability.map(str::to_owned),
+            })
+            .unwrap()
+        };
+        let client = Uuid::new_v4();
+
+        let zoom = runtime
+            .process_command(&command(ActionKind::Zoom, None), client)
+            .await;
+        assert!(!zoom.ok);
+        assert_eq!(zoom.code, "target_unavailable");
+
+        let approve = runtime
+            .process_command(&command(ActionKind::Approve, Some("forged")), client)
+            .await;
+        assert!(!approve.ok);
+        assert_eq!(approve.code, "capability_expired");
+    }
+
+    #[tokio::test]
+    async fn refresh_agents_releases_state_locks_before_dispatching() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("herdr");
+        fs::write(&binary, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            t3code: crate::config::T3codeConfig {
+                home: Some(temp.path().join("t3")),
+                ..crate::config::T3codeConfig::default()
+            },
+            ..Config::default()
+        })
+        .unwrap();
+
+        let mut subscriptions = HashMap::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime.refresh_agents(&mut subscriptions),
+        )
+        .await
+        .expect("Herdr refresh must not deadlock on the runtime state lock");
+        assert_eq!(
+            runtime.state.read().await.snapshot.connection,
+            ConnectionState::Offline
+        );
+
+        runtime.state.write().await.backend = AgentBackend::T3code;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            runtime.refresh_agents(&mut subscriptions),
+        )
+        .await
+        .expect("T3 Code refresh must not deadlock on the runtime state lock");
+        let state = runtime.state.read().await;
+        assert_eq!(state.snapshot.connection, ConnectionState::Offline);
+        assert_eq!(state.snapshot.sessions.len(), 1);
+        assert_eq!(state.snapshot.sessions[0].name, "t3code");
+        assert_eq!(state.snapshot.sessions[0].state, SessionState::Offline);
+    }
+
+    #[tokio::test]
+    async fn late_herdr_refresh_never_commits_over_a_t3code_roster() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("herdr.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            // Any Herdr request after the switch is a contract violation.
+            tokio::time::timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_ok()
+        });
+        let binary = temp.path().join("herdr");
+        let session_list = serde_json::json!({
+            "sessions": [{"name": "default", "running": true, "socket_path": socket}]
+        });
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", session_list),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            herdr_bin: binary,
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.backend = AgentBackend::T3code;
+            state.snapshot.backend.mode = AgentBackend::T3code;
+            state.snapshot.sequence = 9;
+            state.snapshot.connection = ConnectionState::Connected;
+            state.snapshot.sessions = vec![SessionView {
+                name: t3code::SESSION_NAME.into(),
+                state: SessionState::Connected,
+                version: None,
+                protocol: Some(1),
+                last_sync_ms: Some(1),
+                message: None,
+            }];
+            state.snapshot.agents = vec![test_agent("thread", AgentStatus::Working, false)];
+            state
+                .targets
+                .insert("thread".into(), t3code_target(1, false));
+        }
+
+        // Simulates a refresh dispatched for Herdr just before the switch.
+        runtime.refresh_herdr(&mut HashMap::new()).await;
+
+        let state = runtime.state.read().await;
+        assert_eq!(state.backend, AgentBackend::T3code);
+        assert_eq!(state.snapshot.sequence, 9);
+        assert_eq!(state.snapshot.sessions[0].name, t3code::SESSION_NAME);
+        assert_eq!(state.snapshot.agents[0].id, "thread");
+        assert!(matches!(state.targets["thread"], AgentTarget::T3code(_)));
+        drop(state);
+        assert!(
+            !server.await.unwrap(),
+            "Herdr sockets must not be contacted"
+        );
+    }
+
+    #[test]
+    fn persisted_backend_round_trips_and_rejects_garbage() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("nested/agent-backend.toml");
+        let persisted = PersistedBackend {
+            backend: AgentBackend::T3code,
+            t3code_order: AgentOrderMode::Priority,
+        };
+        save_persisted_backend(&path, &persisted).unwrap();
+        assert_eq!(load_persisted_backend(&path), Some(persisted));
+        fs::write(&path, "backend = \"tmux\"\n").unwrap();
+        assert_eq!(load_persisted_backend(&path), None);
+        assert_eq!(
+            load_persisted_backend(&temp.path().join("missing.toml")),
+            None
+        );
     }
 }

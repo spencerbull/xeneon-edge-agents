@@ -106,6 +106,9 @@ cleanup_runtime() {
         --cleanup-dictation; then
       printf 'warning: live preview voice cleanup failed\n' >&2
     fi
+    # The preview daemon persists portal-selected agent manager state here.
+    rm -f -- "$preview_state_home/xeneon-edge-agents/agent-backend.toml" \
+      "$preview_state_home/xeneon-edge-agents/.agent-backend.toml.tmp"
     rmdir -- "$preview_state_home/xeneon-edge-agents" 2>/dev/null || true
     rmdir -- "$preview_state_home" 2>/dev/null || true
   fi

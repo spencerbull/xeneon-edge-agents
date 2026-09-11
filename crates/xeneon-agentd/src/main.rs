@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use xeneon_agent_core::{Config, DaemonRuntime, cleanup_owned_dictation, socket_path};
+use xeneon_agent_core::{
+    Config, DaemonRuntime, cleanup_owned_dictation, default_backend_state_path, socket_path,
+};
 
 #[derive(Debug, Parser)]
-#[command(version, about = "XENEON EDGE Herdr state and action daemon")]
+#[command(version, about = "XENEON EDGE agent state and action daemon")]
 struct Args {
     /// Override the XDG configuration file.
     #[arg(long, env = "XENEON_AGENT_CONFIG")]
@@ -35,6 +37,7 @@ async fn main() -> Result<()> {
         return cleanup_owned_dictation(&config).await;
     }
     let path = socket_path(args.socket.as_deref())?;
-    let (runtime, invalidations) = DaemonRuntime::new(config)?;
+    let (runtime, invalidations) =
+        DaemonRuntime::new_with_state_path(config, default_backend_state_path())?;
     runtime.run(&path, invalidations).await
 }
