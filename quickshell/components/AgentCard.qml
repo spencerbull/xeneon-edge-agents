@@ -11,6 +11,7 @@ Item {
     property bool reducedMotion: false
     property double snapshotSequence: -1
     property bool actionsEnabled: true
+    property string managerName: "Herdr"
 
     signal focusRequested(string agentId)
     signal approveRequested(
@@ -157,11 +158,12 @@ Item {
     Accessible.ignored: !root.enabled || root.agent === null
     Accessible.name: agent === null
         ? ""
-        : "Focus " + String(agent.display_name || "Agent") + " in Herdr"
+        : "Focus " + String(agent.display_name || "Agent") + " in "
+            + root.managerName
     Accessible.description: agent === null
         ? ""
         : processLine() + ". " + spaceLine() + ". " + contextLine()
-            + ". Tap to focus in Herdr."
+            + ". Tap to focus in " + root.managerName + "."
     Accessible.onPressAction: root.requestFocus()
 
     MouseArea {

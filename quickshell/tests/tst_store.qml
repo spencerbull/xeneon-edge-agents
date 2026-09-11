@@ -156,6 +156,48 @@ TestCase {
                 "Herdr protocol 21 is unsupported; expected 20")
     }
 
+    function test_backendIsNormalizedAndDrivesManagerCopy() {
+        var legacy = snapshot(12, "epoch-backend", [agent("one", 0, "idle")])
+        verify(store.ingestEnvelope(legacy))
+        compare(store.backend.mode, "herdr")
+        compare(store.backend.switchable, false)
+        compare(store.managerName(), "Herdr")
+        compare(store.managerLabel(), "HERDR")
+        compare(store.connection.detail, "Herdr state synchronized")
+        semanticActivitySpy.clear()
+
+        var t3 = snapshot(13, "epoch-backend", [agent("one", 0, "idle")])
+        t3.backend = {"mode": "t3code", "switchable": true}
+        verify(store.ingestEnvelope(t3))
+        compare(store.backend.mode, "t3code")
+        compare(store.backend.switchable, true)
+        compare(store.managerName(), "T3 Code")
+        compare(store.managerLabel(), "T3 CODE")
+        compare(store.connection.detail, "T3 Code state synchronized")
+        compare(semanticActivitySpy.count, 1,
+                "a manager switch wakes the surface even with equal agents")
+
+        var offline = snapshot(14, "epoch-backend", [], "offline")
+        offline.backend = {"mode": "t3code", "switchable": true}
+        verify(store.ingestEnvelope(offline))
+        compare(store.connection.detail, "T3 Code is offline")
+
+        var hostile = snapshot(15, "epoch-backend", [])
+        hostile.backend = {
+            "mode": "tmux<img src=x>",
+            "switchable": "yes"
+        }
+        verify(store.ingestEnvelope(hostile))
+        compare(store.backend.mode, "herdr")
+        compare(store.backend.switchable, false)
+        compare(store.managerName("t3code"), "T3 Code")
+        compare(store.managerName("anything"), "Herdr")
+
+        store.reset()
+        compare(store.backend.mode, "herdr")
+        compare(store.backend.switchable, false)
+    }
+
     function test_agentOrderSwitchesBetweenHerdrGroupedAndPriorityOrder() {
         var grouped = snapshot(
             1,

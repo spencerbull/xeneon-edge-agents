@@ -17,7 +17,14 @@ REQUIRED_SNAPSHOT_KEYS = {
     "agents",
     "health",
 }
-SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {"voice", "usage", "micro"}
+SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {
+    "voice",
+    "usage",
+    "micro",
+    "agent_order",
+    "backend",
+}
+AGENT_BACKENDS = {"herdr", "t3code"}
 REQUIRED_AGENT_KEYS = {
     "id",
     "display_name",
@@ -35,6 +42,7 @@ AGENT_KEYS = REQUIRED_AGENT_KEYS | {
     "launch_pending",
     "repository",
     "worktree",
+    "state_change_seq",
 }
 HEALTH_KEYS = {
     "cpu",
@@ -171,6 +179,16 @@ class FixtureContractTests(unittest.TestCase):
                         if "battery" in micro:
                             self.assertGreaterEqual(micro["battery"], 0)
                             self.assertLessEqual(micro["battery"], 100)
+                    if "backend" in envelope:
+                        backend = envelope["backend"]
+                        self.assertEqual(set(backend), {"mode", "switchable"})
+                        self.assertIn(backend["mode"], AGENT_BACKENDS)
+                        self.assertIsInstance(backend["switchable"], bool)
+                    if "agent_order" in envelope:
+                        order = envelope["agent_order"]
+                        self.assertEqual(set(order), {"available", "mode"})
+                        self.assertIsInstance(order["available"], bool)
+                        self.assertIn(order["mode"], {"grouped", "priority"})
 
                     for session in envelope["sessions"]:
                         self.assertTrue(session["name"])
@@ -256,6 +274,7 @@ class FixtureContractTests(unittest.TestCase):
         action_envelopes = envelopes(FIXTURES / "action_result.ndjson")
         voice = envelopes(FIXTURES / "voice.ndjson")[0]
         home = envelopes(FIXTURES / "home.ndjson")[0]
+        t3code = envelopes(FIXTURES / "t3code.ndjson")[0]
 
         self.assertEqual(snapshot["type"], "snapshot")
         self.assertEqual(len(snapshot["agents"]), 6)
@@ -272,6 +291,23 @@ class FixtureContractTests(unittest.TestCase):
             ["claude", "codex", "opencode"],
         )
         self.assertTrue(home["micro"]["connected"])
+        self.assertEqual(home["backend"], {"mode": "herdr", "switchable": True})
+        self.assertEqual(t3code["backend"], {"mode": "t3code", "switchable": True})
+        self.assertEqual([s["name"] for s in t3code["sessions"]], ["t3code"])
+        self.assertTrue(t3code["agents"])
+        for agent in t3code["agents"]:
+            # T3 Code threads expose only window focus: no zoom, and no
+            # approval or interrupt capabilities until a grounded API exists.
+            self.assertEqual(agent["session"], "t3code")
+            self.assertTrue(agent["actions"]["open"])
+            self.assertFalse(agent["actions"]["zoom"])
+            self.assertIsNone(agent["actions"]["approve"])
+            self.assertIsNone(agent["actions"]["interrupt"])
+            self.assertFalse(agent["focused"])
+        self.assertEqual(
+            {agent["status"] for agent in t3code["agents"]},
+            {"blocked", "done", "working", "idle"},
+        )
         self.assertTrue(voice["agents"][0]["review_ready"])
         self.assertEqual(
             [

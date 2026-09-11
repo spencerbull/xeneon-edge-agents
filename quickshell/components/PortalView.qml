@@ -71,6 +71,7 @@ Item {
     property var pendingVoiceFocus: ({})
     property var pendingDesktopActions: ({})
     property string pendingAgentOrderRequest: ""
+    property string pendingAgentBackendRequest: ""
     property bool microDrawerOpen: false
     property bool paletteSettingsOpen: false
     readonly property bool agentOrderAvailable:
@@ -79,6 +80,21 @@ Item {
     readonly property string agentOrderMode: agentOrderAvailable
         ? String(store.agentOrder.mode)
         : "grouped"
+    // The active agent manager is daemon state. QML only renders its name and
+    // requests one of two typed switches.
+    readonly property string managerMode:
+        store.backend !== undefined && store.backend !== null
+            && String(store.backend.mode) === "t3code"
+            ? "t3code"
+            : "herdr"
+    readonly property bool managerSwitchable:
+        store.backend !== undefined && store.backend !== null
+        && store.backend.switchable === true
+    readonly property string managerName:
+        managerMode === "t3code" ? "T3 Code" : "Herdr"
+    readonly property string managerLabel: managerName.toUpperCase()
+    readonly property string alternateManagerName:
+        managerMode === "t3code" ? "Herdr" : "T3 Code"
 
     clip: true
 
@@ -193,6 +209,16 @@ Item {
         if (requestId === "")
             return false
         pendingAgentOrderRequest = requestId
+        return true
+    }
+
+    function requestAgentBackend(mode) {
+        if (!managerSwitchable || pendingAgentBackendRequest !== "")
+            return false
+        var requestId = bridge.setAgentBackend(mode)
+        if (requestId === "")
+            return false
+        pendingAgentBackendRequest = requestId
         return true
     }
 
@@ -415,6 +441,75 @@ Item {
             spacing: 12
 
             Rectangle {
+                id: agentBackendToggle
+                objectName: "agentBackendToggle"
+
+                width: 184
+                height: 48
+                radius: 12
+                color: backendTap.pressed
+                    ? root.theme.surfacePressed
+                    : root.theme.surfaceRaised
+                border.width: 1
+                border.color: root.managerSwitchable
+                    ? root.theme.accent
+                    : root.theme.border
+                enabled: root.controlCenterInteractive
+                    && root.managerSwitchable
+                    && root.pendingAgentBackendRequest === ""
+                    && !root.store.freshSnapshotRequired
+
+                function activate() {
+                    if (!enabled)
+                        return false
+                    root.activity.noteUserActivity()
+                    return root.requestAgentBackend(
+                        root.managerMode === "herdr" ? "t3code" : "herdr"
+                    )
+                }
+
+                Accessible.role: Accessible.Button
+                Accessible.ignored: false
+                Accessible.name: root.pendingAgentBackendRequest !== ""
+                    ? "Agent manager switching"
+                    : root.managerSwitchable
+                        ? "Agent manager " + root.managerName
+                        : "Agent manager fixed"
+                Accessible.description: root.pendingAgentBackendRequest !== ""
+                    ? "Switching the command center to "
+                        + root.alternateManagerName
+                    : root.managerSwitchable
+                        ? "Switch the command center from " + root.managerName
+                            + " to " + root.alternateManagerName
+                        : "This daemon cannot switch agent managers"
+                Accessible.onPressAction: activate()
+
+                Text {
+                    objectName: "agentBackendLabel"
+                    anchors.centerIn: parent
+                    text: root.pendingAgentBackendRequest !== ""
+                        ? "MANAGER // SWITCHING"
+                        : "MANAGER // " + root.managerLabel
+                    textFormat: Text.PlainText
+                    color: root.managerSwitchable
+                        ? root.theme.textPrimary
+                        : root.theme.textMuted
+                    font {
+                        family: "monospace"
+                        pixelSize: 11
+                        weight: Font.DemiBold
+                        letterSpacing: 0.5
+                    }
+                }
+
+                TapHandler {
+                    id: backendTap
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: agentBackendToggle.activate()
+                }
+            }
+
+            Rectangle {
                 id: agentOrderToggle
                 objectName: "agentOrderToggle"
 
@@ -453,13 +548,15 @@ Item {
                         ? "Agent ordering " + root.agentOrderMode
                         : "Agent ordering unavailable"
                 Accessible.description: root.pendingAgentOrderRequest !== ""
-                    ? "Synchronizing agent ordering with Herdr"
+                    ? "Synchronizing agent ordering with " + root.managerName
                     : root.agentOrderAvailable
-                        ? "Switch Herdr and the command center to "
+                        ? "Switch " + root.managerName
+                        + " and the command center to "
                         + (root.agentOrderMode === "grouped"
                             ? "priority"
                             : "grouped") + " ordering"
-                        : "Requires a Herdr version with agent ordering API support"
+                        : "Requires a " + root.managerName
+                        + " version with agent ordering API support"
                 Accessible.onPressAction: activate()
 
                 Text {
@@ -832,11 +929,13 @@ Item {
                         reducedMotion: root.effectiveReducedMotion
                         snapshotSequence: root.store.sequence
                         actionsEnabled: !root.store.freshSnapshotRequired
+                        managerName: root.managerName
 
                         onInteracted: root.activity.noteUserActivity()
 
                         onFocusRequested: function(agentId) {
-                            // Card activation intentionally focuses Herdr.
+                            // Card activation intentionally focuses the
+                            // active agent manager's window.
                             root.bridge.openAgent(agentId)
                         }
 
@@ -904,7 +1003,7 @@ Item {
                 text: root.surfaceState === "loading"
                     ? "SYNCHRONIZING"
                     : root.surfaceState === "disconnected"
-                        ? "HERDR DISCONNECTED"
+                        ? root.managerLabel + " DISCONNECTED"
                         : "NO ACTIVE AGENTS"
                 textFormat: Text.PlainText
                 color: root.readableSurfaceMessageColor
@@ -926,7 +1025,8 @@ Item {
                                 || root.store.connection.detail
                                 || "The bridge will reconnect automatically"
                         )
-                        : "Herdr is connected and has no running local agents"
+                        : root.managerName
+                            + " is connected and has no active agents"
                 textFormat: Text.PlainText
                 color: root.theme.textMuted
                 font {
@@ -953,6 +1053,7 @@ Item {
         theme: root.theme
         agents: root.store.agents
         sessions: root.store.sessions
+        managerLabel: root.managerLabel
         reducedMotion: root.effectiveReducedMotion
         enabled: root.controlCenterInteractive
         opacity: ambientView.controlCenterProgress
@@ -1062,6 +1163,18 @@ Item {
         target: root.store
 
         function onActionResultReceived(result) {
+            if (result.action === "backend_herdr"
+                    || result.action === "backend_t3code") {
+                root.pendingAgentBackendRequest = ""
+                root.showToast(
+                    result.ok
+                        ? "MANAGER // SWITCHED"
+                        : "MANAGER // " + String(result.code).toUpperCase(),
+                    result.message || result.request_id,
+                    result.ok
+                )
+                return
+            }
             if (result.action === "order_grouped"
                     || result.action === "order_priority") {
                 root.pendingAgentOrderRequest = ""
@@ -1141,6 +1254,7 @@ Item {
                 root.pendingVoiceFocus = {}
                 root.pendingDesktopActions = {}
                 root.pendingAgentOrderRequest = ""
+                root.pendingAgentBackendRequest = ""
             }
         }
     }

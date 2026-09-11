@@ -115,6 +115,23 @@ TestCase {
         }
     }
 
+    function test_backendActionsAreTypedAndCannotTargetAgents() {
+        for (var index = 0; index < 2; index += 1) {
+            var action = ["backend_herdr", "backend_t3code"][index]
+            var command = builder.build(action, "", "", 47)
+            verify(command !== null)
+            compare(command.action, action)
+            compare(command.sequence, 47)
+            compare(command.agent_id, undefined)
+            compare(command.capability_id, undefined)
+            compare(command.backend, undefined)
+            compare(builder.build(action, "agent-1", "", 47), null)
+            compare(builder.build(action, "", "capability", 47), null)
+        }
+        compare(builder.build("backend_tmux", "", "", 47), null)
+        compare(builder.build("backend", "", "", 47), null)
+    }
+
     function test_rejectsRawOrUnknownActions() {
         compare(builder.build("send_keys", "agent-1", "", 42), null)
         compare(builder.build("shell", "agent-1", "", 42), null)

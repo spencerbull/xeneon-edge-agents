@@ -19,6 +19,7 @@ versions must be rejected.
   "sessions": [],
   "agents": [],
   "agent_order": {"available": true, "mode": "grouped"},
+  "backend": {"mode": "herdr", "switchable": true},
   "voice": {"state": "unavailable", "owned": false},
   "usage": {
     "providers": [
@@ -73,11 +74,23 @@ bodies. `micro` is a
 read-only normalized view of the local Codex Micro connection and optional
 device status. It never exposes the Micro socket protocol to QML.
 
+`backend` names the active agent manager, exactly `herdr` or `t3code`, and
+`switchable` says whether this daemon accepts the manager commands below. A
+T3 Code roster uses one session named `t3code` whose `protocol` is T3 Code's
+server runtime descriptor version (currently 1) and whose `version` is
+omitted. T3 Code cards always have `zoom: false`, no capabilities, and
+`focused: false`; `display_name` is the T3 Code thread title, `workspace` is
+the project title plus branch, `repository` and `worktree` are checkout leaf
+names, and `state_change_seq` is the millisecond timestamp of the classifying
+turn or settle event.
+
 These additive v1 fields are optional for compatibility with older recorded
 fixtures. Clients default voice to unavailable, review-ready and launch-pending
 to false (except a legacy raw `done` agent), usage to an empty provider list,
-Micro to disconnected, and ordering to unavailable. When ordering is available,
-`grouped` preserves Herdr Space order and `priority` promotes attention states.
+Micro to disconnected, ordering to unavailable, and the backend to a
+non-switchable `herdr`. When ordering is available, `grouped` preserves Herdr
+Space order (or T3 Code project and thread recency) and `priority` promotes
+attention states.
 Connection and action failures are separate fields, not invented agent states.
 Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
@@ -142,7 +155,18 @@ The only actions are:
 - `order_grouped` and `order_priority`: take no agent or capability and apply
   one typed, idempotent ordering value through Herdr's public API. The daemon
   polls the same authoritative Herdr setting, so changes made in either UI
-  converge without a portal-owned preference.
+  converge without a portal-owned preference. In T3 Code mode the same
+  commands set a daemon-owned preference because T3 Code has no ordering API.
+- `backend_herdr` and `backend_t3code`: take no agent or capability, are gated
+  on the current snapshot `sequence`, and switch the active agent manager.
+  Repeating the current manager succeeds without changing state. A switch
+  clears every card, private target, latch, and subscription, publishes a
+  reconnecting snapshot with the new `backend.mode`, and persists the choice.
+
+In T3 Code mode `open` activates the exact `t3code` desktop window and
+acknowledges the card's review badge; it never launches T3 Code or navigates
+threads, because T3 Code has no public thread-focus API. `zoom`, `approve`,
+and `interrupt` fail with `target_unavailable` or `capability_expired`.
 
 There is no method, key, text, shell-command, prompt, close, or server-control
 passthrough. Desktop actions do not accept a desktop ID, executable, title,

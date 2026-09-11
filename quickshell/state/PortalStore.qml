@@ -26,6 +26,10 @@ QtObject {
         "available": false,
         "mode": "grouped"
     })
+    property var backend: ({
+        "mode": "herdr",
+        "switchable": false
+    })
     property var health: ({})
     property var voice: ({
         "available": false,
@@ -86,6 +90,8 @@ QtObject {
         "error"
     ]
 
+    readonly property var allowedBackends: ["herdr", "t3code"]
+
     function reset() {
         sequence = -1
         daemonEpoch = ""
@@ -102,6 +108,7 @@ QtObject {
         sessions = []
         agents = []
         agentOrder = {"available": false, "mode": "grouped"}
+        backend = {"mode": "herdr", "switchable": false}
         health = {}
         voice = {
             "available": false,
@@ -283,6 +290,36 @@ QtObject {
         }
     }
 
+    function normalizeBackend(value) {
+        var source = value !== null
+                && value !== undefined
+                && typeof value === "object"
+            ? value
+            : {}
+        var mode = safeString(source.mode, "herdr", 16).toLowerCase()
+        if (allowedBackends.indexOf(mode) === -1)
+            mode = "herdr"
+        return {
+            "mode": mode,
+            "switchable": source.switchable === true
+        }
+    }
+
+    // Human names for the active agent manager. The wire value is the only
+    // input; copy never derives from session or agent content.
+    function managerName(mode) {
+        var normalized = safeString(
+            mode === undefined ? backend.mode : mode,
+            "herdr",
+            16
+        ).toLowerCase()
+        return normalized === "t3code" ? "T3 Code" : "Herdr"
+    }
+
+    function managerLabel(mode) {
+        return managerName(mode).toUpperCase()
+    }
+
     function normalizeSessions(values) {
         var normalized = []
         for (var index = 0; index < values.length; index += 1) {
@@ -317,16 +354,19 @@ QtObject {
         return normalized
     }
 
-    function normalizeConnection(value, sessionViews) {
+    function normalizeConnection(value, sessionViews, backendView) {
         var state = safeString(value, "degraded", 24).toLowerCase()
         if (allowedConnectionStates.indexOf(state) === -1)
             state = "degraded"
 
+        var manager = managerName(
+            backendView === undefined ? backend.mode : backendView.mode
+        )
         var details = {
-            "connected": "Herdr event stream synchronized",
-            "degraded": "Herdr is reporting partial availability",
-            "reconnecting": "Reconnecting to Herdr",
-            "offline": "Herdr is offline"
+            "connected": manager + " state synchronized",
+            "degraded": manager + " is reporting partial availability",
+            "reconnecting": "Reconnecting to " + manager,
+            "offline": manager + " is offline"
         }
         var detail = details[state]
         if (state === "degraded" || state === "reconnecting") {
@@ -529,6 +569,7 @@ QtObject {
 
     function semanticSignature(connectionView, agentViews, voiceView) {
         var fields = [
+            backend.mode,
             connectionView.state,
             voiceView.state,
             voiceView.owned === true
@@ -668,10 +709,12 @@ QtObject {
 
         var hadSnapshot = hasSnapshot
         var previousSignature = activitySignature
+        var nextBackend = normalizeBackend(snapshot.backend)
         var nextSessions = normalizeSessions(snapshot.sessions)
         var nextConnection = normalizeConnection(
             snapshot.connection,
-            nextSessions
+            nextSessions,
+            nextBackend
         )
         var nextAgentOrder = normalizeAgentOrder(snapshot.agent_order)
         var nextAgents = normalizeAgents(
@@ -681,6 +724,7 @@ QtObject {
         var nextVoice = normalizeVoice(snapshot.voice)
         var nextUsage = normalizeUsage(snapshot.usage)
         var nextMicro = normalizeMicro(snapshot.micro)
+        backend = nextBackend
         var nextSignature = semanticSignature(
             nextConnection,
             nextAgents,

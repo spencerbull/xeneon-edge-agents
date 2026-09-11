@@ -80,6 +80,33 @@ pub enum ActionKind {
     VoiceCancel,
     OrderGrouped,
     OrderPriority,
+    BackendHerdr,
+    BackendT3code,
+}
+
+/// Which agent manager the daemon observes and routes agent actions to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentBackend {
+    #[default]
+    Herdr,
+    T3code,
+}
+
+impl AgentBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Herdr => "herdr",
+            Self::T3code => "t3code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentBackendSnapshot {
+    pub mode: AgentBackend,
+    #[serde(default)]
+    pub switchable: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +328,8 @@ pub struct PortalSnapshot {
     pub agents: Vec<AgentView>,
     #[serde(default)]
     pub agent_order: AgentOrderSnapshot,
+    #[serde(default)]
+    pub backend: AgentBackendSnapshot,
     pub voice: VoiceSnapshot,
     pub usage: AiUsageSnapshot,
     pub micro: MicroSnapshot,
@@ -318,6 +347,7 @@ impl PortalSnapshot {
             sessions: Vec::new(),
             agents: Vec::new(),
             agent_order: AgentOrderSnapshot::default(),
+            backend: AgentBackendSnapshot::default(),
             voice: VoiceSnapshot::default(),
             usage: AiUsageSnapshot::default(),
             micro: MicroSnapshot::default(),
@@ -493,5 +523,35 @@ mod tests {
         assert_eq!(value["type"], "snapshot");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
         assert_eq!(value["daemon_epoch"], "epoch");
+        assert_eq!(value["backend"]["mode"], "herdr");
+        assert_eq!(value["backend"]["switchable"], false);
+    }
+
+    #[test]
+    fn backend_names_are_stable_wire_values() {
+        assert_eq!(
+            serde_json::to_value(AgentBackend::T3code).unwrap(),
+            serde_json::json!("t3code")
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentBackend>("\"herdr\"").unwrap(),
+            AgentBackend::Herdr
+        );
+        assert_eq!(AgentBackend::T3code.as_str(), "t3code");
+        let legacy: PortalSnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "sequence": 1,
+            "daemon_epoch": "epoch",
+            "generated_at_ms": 0,
+            "connection": "offline",
+            "sessions": [],
+            "agents": [],
+            "voice": {"state": "unavailable"},
+            "usage": {"providers": []},
+            "micro": {"connected": false},
+            "health": HealthSnapshot::default()
+        }))
+        .unwrap();
+        assert_eq!(legacy.backend, AgentBackendSnapshot::default());
     }
 }

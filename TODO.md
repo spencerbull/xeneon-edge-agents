@@ -47,6 +47,15 @@ event-driven lifecycle. The commissioned EDID, serial/model, and USB touch
 identity remain authoritative while the current connector becomes runtime
 state; the daemon and portal run only while that exact hardware is present.
 
+The active agent-manager checkpoint adds T3 Code as a second agent manager with
+the same card semantics as Herdr, switched from a new header Manager control.
+The daemon owns the selection, persists it under the state directory, reads
+only T3 Code's bounded read-only projections gated on its live server process,
+maps threads onto the existing attention vocabulary, and lets T3 Code's own
+settle acknowledge review badges. T3 Code has no public thread-focus API on
+Linux, so a card tap only activates its exact desktop window; zoom, approve,
+and interrupt stay unavailable in that mode.
+
 ## Done criteria
 
 - [x] Rust daemon and QML bridge expose versioned normalized snapshots.
@@ -99,6 +108,15 @@ state; the daemon and portal run only while that exact hardware is present.
       exact touch mapping, Ambient wake, and card focus are now confirmed).
 - [x] Exact XENEON hotplug starts and maps the stack on its current connector;
       unplug stops both application services without touching other displays.
+- [x] The header Manager control switches the daemon between Herdr and T3 Code
+      with typed, sequence-gated commands; switching clears the previous
+      roster, targets, latches, focus history, and subscriptions, and the
+      choice persists across daemon restarts.
+- [x] T3 Code mode reads only bounded thread, session, turn, and project
+      projections, fails closed on a missing server or schema drift, and never
+      writes T3 Code state or reads messages.
+- [ ] Physical EDGE touch validation of the Manager toggle and T3 Code card
+      focus (software gates and a live laptop preview are complete).
 
 ## Streams
 
@@ -118,6 +136,7 @@ state; the daemon and portal run only while that exact hardware is present.
 | Omarchy runtime theme sync | `omarchy-theme-sync` | project-owned QML palette reader, semantic chrome and state tokens, theme reload/fallback tests | Theme sync and semantic state roles installed, reviewed, and physically verified |
 | Herdr v0.8 compatibility | `herdr-v0.8-compat` in `herdr-v0.8-compat` worktree | Herdr protocol gate, adapter fixture, protocol docs | Installed from `6edfcd3`; live handoff, protocol 19 connection, services, and production checker passed |
 | Hotplug lifecycle | `hotplug-lifecycle` in `hotplug-lifecycle` worktree | lifecycle reconciler, user units, Hyprland event hook, runtime connector override, installer/tests | Installed and independently reviewed; exact `DP-2` unplug stopped both services and replug restored the stack and touch mapping; burst and mid-settle races are covered by regression tests |
+| T3 Code agent manager | `t3code-backend` | `t3code.rs` adapter, backend dispatch and persistence in `runtime.rs`, `backend` protocol field and `backend_*` commands, header Manager toggle, manager-aware copy, `t3code.ndjson` fixture, docs/config/schema | Software complete on 2026-09-11: Rust (107 tests, clippy, fmt), QML (116 Qt tests, 28 contract tests) green; live source preview switched to T3 Code and back over the daemon socket, showed 13 real threads, focused the `t3code` window on card open, applied daemon-owned ordering, and persisted `agent-backend.toml`; a refresh-dispatch deadlock found in that live run is fixed with a regression test; independent review complete (one confirmed race, a late Herdr refresh committing over a T3 Code roster, fixed with a regression test, plus two minor findings fixed; 108 Rust tests); physical EDGE touch validation is the remaining gate; not installed |
 | Global display controls | `agent/portal-voice-ring` in `portal-voice-ring` worktree | persistent presentation settings, reduced-motion composition, dim veil | Live on the physical EDGE; default full-motion/normal-screen state restored |
 | Omarchy integration | `agent/portal-voice-ring` in `portal-voice-ring` worktree | `config/`, `scripts/`, services, install tests | Production user integration installed and active on the physical EDGE |
 
