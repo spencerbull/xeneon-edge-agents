@@ -318,16 +318,19 @@ print(sum(
           # shares one kernel name between its touchscreen and mouse
           # interfaces, so the touchscreen may carry the suffix or not
           # depending on enumeration order. Exactly one touch device may
-          # belong to the verified kernel name family; that member is the
+          # belong to the verified kernel name family and be one of the
+          # candidate names the Hyprland module disables; that member is the
           # touchscreen the reconciler maps.
           if ((devices_inventory_available)); then
-            mapfile -t touch_family < <(
+            mapfile -t touch_candidates < <(touch_device_candidates "$touch_device")
+            touch_family_output=$(
               python3 -c '
 import json
 import re
 import sys
 
 base = sys.argv[1]
+candidates = set(sys.argv[2:])
 try:
     payload = json.load(sys.stdin)
     touch = payload.get("touch") if isinstance(payload, dict) else None
@@ -340,13 +343,16 @@ family = re.compile(rf"^{re.escape(base)}(?:-[0-9]+)?$")
 names = [
     device["name"]
     for device in touch
-    if isinstance(device.get("name"), str) and family.fullmatch(device["name"])
+    if isinstance(device.get("name"), str)
+    and family.fullmatch(device["name"])
+    and device["name"] in candidates
 ]
 print(len(names))
 if len(names) == 1:
     print(names[0])
-' "$matched_kernel_base" <<<"$devices_payload"
+' "$matched_kernel_base" "${touch_candidates[@]}" <<<"$devices_payload"
             )
+            mapfile -t touch_family <<<"$touch_family_output"
             touch_family_count=${touch_family[0]:--1}
             case "$touch_family_count" in
               1)

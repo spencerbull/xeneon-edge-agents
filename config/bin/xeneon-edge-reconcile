@@ -81,15 +81,17 @@ record_status() {
 # that name is already taken. The EDGE touch controller exposes a touchscreen
 # and a mouse interface under one kernel name, so the touchscreen holds the
 # bare name when it enumerates first and the "-1" suffix when the mouse
-# interface does. Every name the touchscreen can hold stays disabled until the
-# identity gate resolves the current one.
+# interface does. The candidate set is every name the touchscreen can hold;
+# the gate only ever enables a member of that set, so this disables whatever
+# it may have enabled. Every candidate is attempted even if one fails, and a
+# failure is still reported to the caller.
 disable_touch() {
-  local name
-  for name in "${touch_device_candidates[@]}" "$resolved_touch_device"; do
-    [[ "$name" =~ ^[A-Za-z0-9_.:-]+$ ]] || continue
+  local name status=0
+  for name in "${touch_device_candidates[@]}"; do
     "$hyprctl_bin" eval \
-      "hl.device({ name = \"$name\", enabled = false })" >/dev/null
+      "hl.device({ name = \"$name\", enabled = false })" >/dev/null || status=1
   done
+  return "$status"
 }
 
 enable_touch() {
@@ -137,19 +139,27 @@ touch_product=$(toml_value touch product)
 touch_uniq=$(toml_value touch uniq)
 touch_phys=$(toml_value touch phys)
 
+# Derive the candidate names before the combined identity check so that an
+# early block still disables every name the touchscreen can hold. The set is
+# the commissioned name, its suffix-free base, and the base with the first
+# collision suffix; scripts/lib.sh renders the same set into the Hyprland
+# module, and the gate below accepts only a member of it.
+if [[ "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
+  touch_device_base=$touch_device
+  if [[ "$touch_device" =~ ^(.+)-[0-9]+$ ]]; then
+    touch_device_base=${BASH_REMATCH[1]}
+  fi
+  for candidate in "$touch_device" "$touch_device_base" "$touch_device_base-1"; do
+    [[ " ${touch_device_candidates[*]} " == *" $candidate "* ]] && continue
+    touch_device_candidates+=("$candidate")
+  done
+fi
+
 [[ "$edid_sha" =~ ^[0-9a-fA-F]{64}$ &&
   "$output_serial" =~ ^[A-Za-z0-9_.:-]+$ &&
   "$output_model" =~ ^[A-Za-z0-9_.:\ -]+$ &&
   "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
   block_stack "commissioning identity is incomplete"
-touch_device_base=$touch_device
-if [[ "$touch_device" =~ ^(.+)-[0-9]+$ ]]; then
-  touch_device_base=${BASH_REMATCH[1]}
-fi
-for candidate in "$touch_device" "$touch_device_base" "$touch_device_base-1"; do
-  [[ " ${touch_device_candidates[*]} " == *" $candidate "* ]] && continue
-  touch_device_candidates+=("$candidate")
-done
 disable_touch
 
 matches=()
@@ -249,8 +259,10 @@ done < <(
 # kernel identity already failed above without delay.
 #
 # The verified kernel name is the authority for the Hyprland name: the touch
-# inventory must contain exactly one device named after it, with or without
-# Hyprland's "-N" collision suffix. That single member is the touchscreen to map.
+# inventory must contain exactly one device that is named after it, with or
+# without Hyprland's collision suffix, and that is also one of the candidate
+# names disabled above. The accepted set therefore never exceeds the set the
+# Hyprland module and this script can disable again.
 hypr_touch_matches=0
 hypr_touch_family=()
 for attempt in 0 1 2 3 4; do
@@ -261,9 +273,10 @@ for attempt in 0 1 2 3 4; do
     devices_payload=$("$hyprctl_bin" -j devices 2>/dev/null) ||
       block_stack "Hyprland touch inventory is unavailable"
   fi
-  mapfile -t hypr_touch_family < <(python3 -c '
+  hypr_touch_output=$(python3 -c '
 import json, re, sys
 base = sys.argv[1]
+candidates = set(sys.argv[2:])
 try:
     devices = json.load(sys.stdin)
     touch = devices.get("touch") if isinstance(devices, dict) else None
@@ -275,14 +288,13 @@ except (json.JSONDecodeError, TypeError):
 family = re.compile(rf"^{re.escape(base)}(?:-[0-9]+)?$")
 names = [device["name"] for device in touch
          if isinstance(device.get("name"), str)
-         and family.fullmatch(device["name"])]
-if len(names) == 1 and not re.fullmatch(r"[A-Za-z0-9_.:-]+", names[0]):
-    print(-1)
-    raise SystemExit
+         and family.fullmatch(device["name"])
+         and device["name"] in candidates]
 print(len(names))
 if len(names) == 1:
     print(names[0])
-' "$kernel_touch_base" <<<"$devices_payload")
+' "$kernel_touch_base" "${touch_device_candidates[@]}" <<<"$devices_payload")
+  mapfile -t hypr_touch_family <<<"$hypr_touch_output"
   hypr_touch_matches=${hypr_touch_family[0]:--1}
   [[ "$hypr_touch_matches" == 1 ]] && break
   ((attempt == 4)) || sleep 0.25
@@ -290,6 +302,8 @@ done
 [[ "$hypr_touch_matches" == 1 ]] ||
   block_stack "exact Hyprland touchscreen is absent or ambiguous"
 resolved_touch_device=${hypr_touch_family[1]:-}
+# Defense in depth before the name is interpolated into a hyprctl eval. Every
+# candidate already satisfies this pattern, so it cannot normally trigger.
 [[ "$resolved_touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
   block_stack "resolved Hyprland touchscreen name is unsafe"
 

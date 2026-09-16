@@ -597,6 +597,10 @@ if ((activate)); then
   systemctl --user disable xeneon-agentd.service xeneon-edge-portal.service
   systemctl --user enable xeneon-edge-reconcile.service xeneon-edge-input.path
   systemctl --user start xeneon-edge-input.path
+  # `start` succeeds for a unit that was skipped on an unmet condition, which
+  # is how a dead watcher once went unnoticed for a whole session. Prove it.
+  systemctl --user is-active --quiet xeneon-edge-input.path ||
+    die "xeneon-edge-input.path is not active; the user manager must carry WAYLAND_DISPLAY and HYPRLAND_INSTANCE_SIGNATURE before activation"
   systemctl --user stop xeneon-edge-portal.service xeneon-agentd.service
   release_activation_gate
   systemctl --user restart xeneon-edge-reconcile.service

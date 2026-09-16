@@ -5,9 +5,10 @@
 -- Hyprland derives a device name from the kernel name and appends "-N" when
 -- that name is already taken. The EDGE touch controller exposes a touchscreen
 -- and a mouse interface under one kernel name, so the touchscreen holds the
--- bare name after a cold boot and the suffixed name after a hotplug. Both
--- candidates are disabled here; the reconciler resolves the current name from
--- the verified kernel identity and re-enables only that touchscreen.
+-- bare name after a cold boot and the suffixed name after a hotplug. Every
+-- candidate name is disabled here; the reconciler resolves the current name
+-- from the verified kernel identity, accepts only a member of this same set,
+-- and re-enables only that touchscreen.
 local touchDeviceNames = { @TOUCH_DEVICE_NAMES@ }
 local startReconcileCommand =
   "/usr/bin/systemctl --user start xeneon-edge-reconcile.service"

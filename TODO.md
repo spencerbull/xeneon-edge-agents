@@ -446,9 +446,16 @@ verification, installation, and the live handoff.
   none of the later USB reconnects re-ran the reconciler. The fix resolves the
   Hyprland name from the verified kernel identity within a single-member name
   family, disables both candidate names during transitions, and orders the
-  path unit after `graphical-session.target`. Remaining: PR review and CI, a
-  reviewed local re-install, and a cold-boot verification that the stack
-  starts and touch maps without a manual reconciliation.
+  path unit after `graphical-session.target`. An independent Opus review
+  found a P1 (accepted Hyprland names exceeded the set the module can
+  disable) and a P2 (a block before name resolution no longer disabled
+  touch); both are fixed with regressions, and activation now proves the
+  watcher is active instead of trusting `start`. Remaining: hosted CI on the
+  PR, a reviewed local re-install, a cold-boot verification that the stack
+  starts and touch maps without a manual reconciliation, a USB replug proving
+  the watcher re-runs the reconciler, and a check that unrelated input
+  hotplugs, which now trigger a full reconcile, do not disrupt EDGE touch
+  unacceptably.
 - Repair the installed Herdr focus handoff on branch
   `header-launch-order-fix`. Done requires an exact process/session-owned
   compositor selection regression, focused and broad Rust gates, independent
