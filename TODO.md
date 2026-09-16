@@ -433,6 +433,22 @@ verification, installation, and the live handoff.
 
 ## Open checkpoints
 
+- Land the touch-name and path-watcher fix on branch `fix/touch-name-order`
+  (worktree `../xeneon-edge-agents-worktrees/touch-name-order`). Found
+  2026-09-16 on the commissioned host: the EDGE touch controller exposes a
+  touchscreen and a mouse interface under one kernel name, and Hyprland
+  appends `-1` to whichever enumerates second, so the touchscreen is
+  `wch.cn-touchscreen` after a cold boot and `wch.cn-touchscreen-1` after a
+  USB hotplug. The exact commissioned name therefore blocked every boot with
+  "exact Hyprland touchscreen is absent or ambiguous". Independently,
+  `xeneon-edge-input.path` was skipped at login because its environment
+  conditions were evaluated before UWSM exported the Hyprland signature, so
+  none of the later USB reconnects re-ran the reconciler. The fix resolves the
+  Hyprland name from the verified kernel identity within a single-member name
+  family, disables both candidate names during transitions, and orders the
+  path unit after `graphical-session.target`. Remaining: PR review and CI, a
+  reviewed local re-install, and a cold-boot verification that the stack
+  starts and touch maps without a manual reconciliation.
 - Repair the installed Herdr focus handoff on branch
   `header-launch-order-fix`. Done requires an exact process/session-owned
   compositor selection regression, focused and broad Rust gates, independent

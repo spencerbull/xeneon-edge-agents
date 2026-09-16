@@ -13,6 +13,8 @@ readonly runtime_status=$runtime_root/lifecycle.status
 readonly systemctl_bin=${XENEON_SYSTEMCTL:-systemctl}
 readonly hyprctl_bin=${XENEON_HYPRCTL:-hyprctl}
 touch_device=
+touch_device_candidates=()
+resolved_touch_device=
 
 toml_value() {
   local section=$1
@@ -75,15 +77,24 @@ record_status() {
   printf 'xeneon-edge-reconcile: %s: %s\n' "$state" "$detail"
 }
 
+# Hyprland derives a device name from the kernel name and appends "-N" when
+# that name is already taken. The EDGE touch controller exposes a touchscreen
+# and a mouse interface under one kernel name, so the touchscreen holds the
+# bare name when it enumerates first and the "-1" suffix when the mouse
+# interface does. Every name the touchscreen can hold stays disabled until the
+# identity gate resolves the current one.
 disable_touch() {
-  [[ "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 0
-  "$hyprctl_bin" eval \
-    "hl.device({ name = \"$touch_device\", enabled = false })" >/dev/null
+  local name
+  for name in "${touch_device_candidates[@]}" "$resolved_touch_device"; do
+    [[ "$name" =~ ^[A-Za-z0-9_.:-]+$ ]] || continue
+    "$hyprctl_bin" eval \
+      "hl.device({ name = \"$name\", enabled = false })" >/dev/null
+  done
 }
 
 enable_touch() {
   "$hyprctl_bin" eval \
-    "hl.device({ name = \"$touch_device\", output = \"$connector\", enabled = true })" \
+    "hl.device({ name = \"$resolved_touch_device\", output = \"$connector\", enabled = true })" \
     >/dev/null
 }
 
@@ -131,6 +142,14 @@ touch_phys=$(toml_value touch phys)
   "$output_model" =~ ^[A-Za-z0-9_.:\ -]+$ &&
   "$touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
   block_stack "commissioning identity is incomplete"
+touch_device_base=$touch_device
+if [[ "$touch_device" =~ ^(.+)-[0-9]+$ ]]; then
+  touch_device_base=${BASH_REMATCH[1]}
+fi
+for candidate in "$touch_device" "$touch_device_base" "$touch_device_base-1"; do
+  [[ " ${touch_device_candidates[*]} " == *" $candidate "* ]] && continue
+  touch_device_candidates+=("$candidate")
+done
 disable_touch
 
 matches=()
@@ -186,6 +205,7 @@ print(sum(1 for monitor in monitors
   block_stack "resolved output failed exact Hyprland serial/model verification"
 
 kernel_touch_matches=0
+kernel_touch_base=
 while IFS= read -r -d '' event_path; do
   properties=
   if [[ "$sys_root" == /sys ]] && command -v udevadm >/dev/null 2>&1; then
@@ -215,6 +235,7 @@ while IFS= read -r -d '' event_path; do
   else
     [[ -n "$touch_phys" && "$(<"$event_path/device/phys")" == "$touch_phys" ]] || continue
   fi
+  kernel_touch_base=$normalized_name
   kernel_touch_matches=$((kernel_touch_matches + 1))
 done < <(
   find -L "$sys_root/class/input" -mindepth 1 -maxdepth 1 \
@@ -226,7 +247,12 @@ done < <(
 # The kernel event node appears before Hyprland/libinput necessarily publishes
 # the touch device. Retry only this proven settling case; a missing or ambiguous
 # kernel identity already failed above without delay.
+#
+# The verified kernel name is the authority for the Hyprland name: the touch
+# inventory must contain exactly one device named after it, with or without
+# Hyprland's "-N" collision suffix. That single member is the touchscreen to map.
 hypr_touch_matches=0
+hypr_touch_family=()
 for attempt in 0 1 2 3 4; do
   if [[ -n "${XENEON_HYPR_DEVICES_JSON:-}" ]]; then
     devices_payload=$(cat -- "$XENEON_HYPR_DEVICES_JSON") ||
@@ -235,9 +261,9 @@ for attempt in 0 1 2 3 4; do
     devices_payload=$("$hyprctl_bin" -j devices 2>/dev/null) ||
       block_stack "Hyprland touch inventory is unavailable"
   fi
-  hypr_touch_matches=$(python3 -c '
-import json, sys
-wanted = sys.argv[1]
+  mapfile -t hypr_touch_family < <(python3 -c '
+import json, re, sys
+base = sys.argv[1]
 try:
     devices = json.load(sys.stdin)
     touch = devices.get("touch") if isinstance(devices, dict) else None
@@ -246,14 +272,26 @@ try:
 except (json.JSONDecodeError, TypeError):
     print(-1)
     raise SystemExit
-print(sum(1 for device in touch
-          if device.get("name") == wanted))
-' "$touch_device" <<<"$devices_payload")
+family = re.compile(rf"^{re.escape(base)}(?:-[0-9]+)?$")
+names = [device["name"] for device in touch
+         if isinstance(device.get("name"), str)
+         and family.fullmatch(device["name"])]
+if len(names) == 1 and not re.fullmatch(r"[A-Za-z0-9_.:-]+", names[0]):
+    print(-1)
+    raise SystemExit
+print(len(names))
+if len(names) == 1:
+    print(names[0])
+' "$kernel_touch_base" <<<"$devices_payload")
+  hypr_touch_matches=${hypr_touch_family[0]:--1}
   [[ "$hypr_touch_matches" == 1 ]] && break
   ((attempt == 4)) || sleep 0.25
 done
 [[ "$hypr_touch_matches" == 1 ]] ||
   block_stack "exact Hyprland touchscreen is absent or ambiguous"
+resolved_touch_device=${hypr_touch_family[1]:-}
+[[ "$resolved_touch_device" =~ ^[A-Za-z0-9_.:-]+$ ]] ||
+  block_stack "resolved Hyprland touchscreen name is unsafe"
 
 # A monitor can disappear while libinput is settling the touchscreen. The Lua
 # callback queues a durable service restart for that edge, while this final
@@ -313,4 +351,5 @@ if ! "$systemctl_bin" --user start "$daemon_unit" "$portal_unit"; then
   record_status failed "application services did not start cleanly"
   exit 1
 fi
-record_status running "verified $connector and started the XENEON EDGE stack"
+record_status running \
+  "verified $connector with touchscreen $resolved_touch_device and started the XENEON EDGE stack"

@@ -351,8 +351,8 @@ if ((apply_production)); then
     "$repo_root/config/xeneon-edge-agents/commissioning.toml.example" >"$production_commissioning"
   render_template \
     "$repo_root/config/hypr/xeneon_edge_agents.lua.in" "$temp_dir/xeneon_edge_agents.lua" \
-    TOUCH_DEVICE "$touch_device" OUTPUT_SERIAL "$output_serial" \
-    OUTPUT_MODEL "$output_model"
+    TOUCH_DEVICE_NAMES "$(lua_touch_device_list "$touch_device")" \
+    OUTPUT_SERIAL "$output_serial" OUTPUT_MODEL "$output_model"
   production_module=$temp_dir/xeneon_edge_agents.lua
 
   if [[ -e "$config_target" || -L "$config_target" ]]; then

@@ -246,7 +246,6 @@ print(sum(
     else
       devices_payload=
       devices_inventory_available=0
-      touch_inventory_valid=0
       if [[ -n "$hypr_devices_json" ]]; then
         if [[ -r "$hypr_devices_json" ]]; then
           devices_payload=$(<"$hypr_devices_json")
@@ -265,43 +264,6 @@ print(sum(
       else
         printf 'blocked: hyprctl is required to prove the touch-device identity\n'
         failures=$((failures + 1))
-      fi
-
-      if ((devices_inventory_available)); then
-        touch_match_count=$(
-          python3 -c '
-import json
-import sys
-
-wanted = sys.argv[1]
-try:
-    payload = json.load(sys.stdin)
-except (json.JSONDecodeError, TypeError):
-    print(-1)
-    raise SystemExit
-touch = payload.get("touch", [])
-print(sum(1 for device in touch if device.get("name") == wanted))
-' "$touch_device" <<<"$devices_payload"
-        )
-        case "$touch_match_count" in
-          1)
-            printf 'ok: exact Hyprland touch device: %s\n' "$touch_device"
-            touch_inventory_valid=1
-            ;;
-          -1)
-            printf 'blocked: Hyprland touch-device inventory is invalid JSON\n'
-            failures=$((failures + 1))
-            ;;
-          0)
-            printf 'blocked: configured Hyprland touch device is absent\n'
-            failures=$((failures + 1))
-            ;;
-          *)
-            printf 'blocked: configured Hyprland touch device is ambiguous (%d matches)\n' \
-              "$touch_match_count"
-            failures=$((failures + 1))
-            ;;
-        esac
       fi
 
       kernel_touch_match_count=0
@@ -351,31 +313,59 @@ print(sum(1 for device in touch if device.get("name") == wanted))
       case "$kernel_touch_match_count" in
         1)
           printf 'ok: exact USB touchscreen kernel identity\n'
-          if ((touch_inventory_valid)); then
-            touch_family_count=$(
+          # Hyprland derives its device name from the kernel name and appends
+          # "-N" when that name is already taken. The EDGE touch controller
+          # shares one kernel name between its touchscreen and mouse
+          # interfaces, so the touchscreen may carry the suffix or not
+          # depending on enumeration order. Exactly one touch device may
+          # belong to the verified kernel name family; that member is the
+          # touchscreen the reconciler maps.
+          if ((devices_inventory_available)); then
+            mapfile -t touch_family < <(
               python3 -c '
 import json
 import re
 import sys
 
 base = sys.argv[1]
-payload = json.load(sys.stdin)
+try:
+    payload = json.load(sys.stdin)
+    touch = payload.get("touch") if isinstance(payload, dict) else None
+    if not isinstance(touch, list) or not all(isinstance(d, dict) for d in touch):
+        raise TypeError
+except (json.JSONDecodeError, TypeError):
+    print(-1)
+    raise SystemExit
 family = re.compile(rf"^{re.escape(base)}(?:-[0-9]+)?$")
-print(sum(
-    1
-    for device in payload.get("touch", [])
-    if isinstance(device.get("name"), str)
-    and family.fullmatch(device["name"])
-))
+names = [
+    device["name"]
+    for device in touch
+    if isinstance(device.get("name"), str) and family.fullmatch(device["name"])
+]
+print(len(names))
+if len(names) == 1:
+    print(names[0])
 ' "$matched_kernel_base" <<<"$devices_payload"
             )
-            if [[ "$touch_family_count" == 1 ]]; then
-              printf 'ok: unique Hyprland touchscreen name family\n'
-            else
-              printf 'blocked: Hyprland touchscreen name family is ambiguous (%d matches)\n' \
-                "$touch_family_count"
-              failures=$((failures + 1))
-            fi
+            touch_family_count=${touch_family[0]:--1}
+            case "$touch_family_count" in
+              1)
+                printf 'ok: exact Hyprland touch device: %s\n' "${touch_family[1]}"
+                ;;
+              -1)
+                printf 'blocked: Hyprland touch-device inventory is invalid JSON\n'
+                failures=$((failures + 1))
+                ;;
+              0)
+                printf 'blocked: configured Hyprland touch device is absent\n'
+                failures=$((failures + 1))
+                ;;
+              *)
+                printf 'blocked: Hyprland touchscreen name family is ambiguous (%d matches)\n' \
+                  "$touch_family_count"
+                failures=$((failures + 1))
+                ;;
+            esac
           fi
           ;;
         0)
@@ -423,7 +413,9 @@ print(sum(
     check_file "Hyprland module" "$module_target"
     check_file "Hyprland entrypoint" "$hyprland_target"
     if [[ -f "$module_target" ]]; then
-      if ! grep -Fqx "local touchDevice = \"$touch_device\"" "$module_target" ||
+      if ! grep -Fqx \
+        "local touchDeviceNames = { $(lua_touch_device_list "$touch_device") }" \
+        "$module_target" ||
         ! grep -Fq 'enabled = false' "$module_target" ||
         ! grep -Fq 'hl.on("monitor.added", restartReconcile)' "$module_target" ||
         ! grep -Fq 'hl.on("monitor.removed", restartReconcile)' "$module_target"; then
