@@ -450,12 +450,23 @@ verification, installation, and the live handoff.
   found a P1 (accepted Hyprland names exceeded the set the module can
   disable) and a P2 (a block before name resolution no longer disabled
   touch); both are fixed with regressions, and activation now proves the
-  watcher is active instead of trusting `start`. Remaining: hosted CI on the
-  PR, a reviewed local re-install, a cold-boot verification that the stack
-  starts and touch maps without a manual reconciliation, a USB replug proving
-  the watcher re-runs the reconciler, and a check that unrelated input
-  hotplugs, which now trigger a full reconcile, do not disrupt EDGE touch
-  unacceptably.
+  watcher is active instead of trusting `start`. Hosted CI passed on PR #12.
+  A cold boot on 2026-09-16 reproduced the fault exactly with the old
+  install: the touchscreen came up as `wch.cn-touchscreen`, the reconciler
+  blocked, and the watcher was skipped. The reviewed source was then
+  installed live from the local branch `install/t3code-touch-name-order`,
+  which is the two PR commits cherry-picked onto `t3code-backend`; that is
+  what this host runs, and installing from `main` would have removed the T3
+  Code manager. Activation passed the exact output and touch preflight,
+  resolved the bare name, started both services with the portal on DP-1,
+  and left the input watcher active. The user's `hyprland.lua` had gained a
+  `hypr.cua` require between `hypr.input` and the XENEON require, which the
+  installer refuses, so the XENEON require was moved back directly after
+  `hypr.input` with a backup kept beside the file. Remaining: a cold-boot
+  verification that the stack starts and touch maps without a manual
+  reconciliation, a USB replug proving the watcher re-runs the reconciler,
+  and a check that unrelated input hotplugs, which now trigger a full
+  reconcile, do not disrupt EDGE touch unacceptably.
 - Repair the installed Herdr focus handoff on branch
   `header-launch-order-fix`. Done requires an exact process/session-owned
   compositor selection regression, focused and broad Rust gates, independent
