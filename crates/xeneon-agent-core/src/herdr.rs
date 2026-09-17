@@ -38,7 +38,7 @@ pub struct SessionDescriptor {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentTarget {
+pub struct HerdrTarget {
     pub session: String,
     pub socket_path: PathBuf,
     pub pane_id: String,
@@ -51,7 +51,7 @@ pub struct AgentTarget {
 pub struct SessionObservation {
     pub session: SessionView,
     pub agents: Vec<AgentView>,
-    pub targets: HashMap<String, AgentTarget>,
+    pub targets: HashMap<String, HerdrTarget>,
     pub pane_ids: Vec<String>,
     pub agent_order: Option<AgentOrderMode>,
 }
@@ -262,7 +262,7 @@ impl HerdrClient {
 
             targets.insert(
                 id.clone(),
-                AgentTarget {
+                HerdrTarget {
                     session: descriptor.name.clone(),
                     socket_path: descriptor.socket_path.clone(),
                     pane_id: raw.pane_id.clone(),
@@ -344,7 +344,7 @@ impl HerdrClient {
 
     pub async fn perform(
         &self,
-        target: &AgentTarget,
+        target: &HerdrTarget,
         action: ActionKind,
         capability_id: Option<&str>,
     ) -> Result<()> {
@@ -367,6 +367,9 @@ impl HerdrClient {
             }
             ActionKind::OrderGrouped | ActionKind::OrderPriority => {
                 bail!("agent ordering is not an agent-target action")
+            }
+            ActionKind::BackendHerdr | ActionKind::BackendT3code => {
+                bail!("agent manager selection is not an agent-target action")
             }
         };
         let response: Value = request(&target.socket_path, payload).await?;

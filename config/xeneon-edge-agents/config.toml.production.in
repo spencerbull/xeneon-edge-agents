@@ -1,3 +1,7 @@
+# Agent manager observed at startup: "herdr" or "t3code". The portal's
+# Manager control switches between them at runtime and persists the choice
+# under $XDG_STATE_HOME/xeneon-edge-agents/agent-backend.toml.
+agent_backend = "herdr"
 herdr_bin = "herdr"
 voxtype_bin = "voxtype"
 herdr_refresh_ms = 5000
@@ -11,6 +15,12 @@ connector = "@OUTPUT_CONNECTOR@"
 serial = "@OUTPUT_SERIAL@"
 model = "@OUTPUT_MODEL@"
 touch_device = "@TOUCH_DEVICE@"
+
+[t3code]
+# T3 Code data directory. Defaults to $T3CODE_HOME, then ~/.t3. Only the
+# read-only state projection and server runtime descriptor are read.
+# home = "/home/user/.t3"
+refresh_ms = 1000
 
 [desktop]
 edge_output = "@OUTPUT_CONNECTOR@"

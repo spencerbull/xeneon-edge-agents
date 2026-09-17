@@ -97,6 +97,8 @@ class QmlSafetyContractTests(unittest.TestCase):
             "voice_cancel",
             "order_grouped",
             "order_priority",
+            "backend_herdr",
+            "backend_t3code",
         ):
             self.assertIn(f'"{action}"', builder)
         self.assertIn('"type": "command"', builder)
@@ -393,7 +395,8 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("AiUsageDock", portal)
         self.assertIn("agents: root.store.agents", portal)
         self.assertIn("sessions: root.store.sessions", portal)
-        self.assertIn("HERDR FLEET", usage)
+        self.assertIn('root.managerLabel + " FLEET"', usage)
+        self.assertNotIn("HERDR FLEET", usage)
         self.assertNotIn("AI CAPACITY", usage)
         self.assertNotIn("id: connectionLabel", portal)
         self.assertIn("XENEON_EDGE_HOSTNAME", shell)
@@ -405,6 +408,49 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertNotIn("Process {", micro)
         self.assertNotIn("terminal_text", portal)
         self.assertNotIn("prompt_text", portal)
+
+    def test_agent_manager_toggle_is_typed_and_manager_copy_is_bound(self):
+        portal = source("components/PortalView.qml")
+        store = source("state/PortalStore.qml")
+        bridge = source("state/PortalBridge.qml")
+        builder = source("state/CommandBuilder.qml")
+        card = source("components/AgentCard.qml")
+        usage = source("components/AiUsageDock.qml")
+        qml = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in ROOT.rglob("*.qml")
+            if "tests" not in path.parts
+        )
+
+        # The manager is daemon state: QML renders its wire value and sends
+        # exactly one of two typed switches. No backend-specific transport,
+        # path, socket, or binary can be chosen from QML.
+        self.assertIn('objectName: "agentBackendToggle"', portal)
+        self.assertIn('objectName: "agentBackendLabel"', portal)
+        self.assertIn("function requestAgentBackend(mode)", portal)
+        self.assertIn("pendingAgentBackendRequest", portal)
+        self.assertIn('result.action === "backend_herdr"', portal)
+        self.assertIn('sendBuilt("backend_" + mode', bridge)
+        self.assertIn('if (mode !== "herdr" && mode !== "t3code")', bridge)
+        self.assertIn('readonly property var allowedBackends: ["herdr", "t3code"]', store)
+        self.assertIn("function normalizeBackend(value)", store)
+        self.assertIn("backend = {\"mode\": \"herdr\", \"switchable\": false}", store)
+        self.assertIn('|| action === "backend_herdr"', builder)
+        self.assertIn('|| action === "backend_t3code"', builder)
+        self.assertNotIn("t3code://", qml)
+        self.assertNotIn("state.sqlite", qml)
+        self.assertNotIn("herdr_bin", qml)
+
+        # Manager names are bound from the store, never hardcoded per backend.
+        self.assertIn('property string managerName: "Herdr"', card)
+        self.assertIn('+ root.managerName', card)
+        self.assertNotIn("in Herdr", card)
+        self.assertIn('property string managerLabel: "HERDR"', usage)
+        self.assertIn("managerName: root.managerName", portal)
+        self.assertIn("managerLabel: root.managerLabel", portal)
+        self.assertIn('root.managerLabel + " DISCONNECTED"', portal)
+        self.assertNotIn("HERDR DISCONNECTED", portal)
+        self.assertNotIn('"Synchronizing agent ordering with Herdr"', portal)
 
     def test_voice_and_ring_stay_presentation_only_and_reduce_motion(self):
         voice = source("components/VoiceControl.qml")

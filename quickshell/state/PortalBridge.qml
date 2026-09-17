@@ -178,4 +178,12 @@ QtObject {
         }
         return sendBuilt("order_" + mode, "", "", store.sequence)
     }
+
+    function setAgentBackend(mode) {
+        if (mode !== "herdr" && mode !== "t3code") {
+            commandRejected("Agent manager must be herdr or t3code")
+            return ""
+        }
+        return sendBuilt("backend_" + mode, "", "", store.sequence)
+    }
 }
