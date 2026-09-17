@@ -95,11 +95,13 @@ Connection and action failures are separate fields, not invented agent states.
 Unavailable health metrics use `available: false` and omit `value`; they are
 never encoded as a false zero.
 
-The Herdr adapter accepts protocol 20 from the Omarchy Herdr v0.8.0.r13 base.
-A different value from `ping` produces
-an `incompatible` session with no agents, targets, actions, snapshot request,
-or event subscription; the daemon does not guess compatibility across a Herdr
-protocol boundary.
+The Herdr adapter accepts protocol 22 from Herdr v0.9.0. A different value
+from `ping` produces an `incompatible` session with no agents, targets,
+actions, snapshot request, or event subscription; the daemon does not guess
+compatibility across a Herdr protocol boundary. Stock v0.9.0 does not expose
+the earlier `agent.order.get`/`agent.order.set` or `agent.perform_action`
+methods; missing ordering disables only that toggle, and interrupt remains
+capability-gated so it stays hidden when Herdr omits actions.
 
 `action_result` acknowledges one command:
 
