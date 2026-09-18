@@ -181,6 +181,11 @@ test_default_idempotence_and_uninstall() {
     'ExecStartPre=/usr/bin/sleep 0.5'
   assert_contains "$root/.config/systemd/user/xeneon-edge-reconcile.service" \
     'ConditionPathExists=!%t/xeneon-edge-agents-uninstalling'
+  # The watcher's environment conditions must be evaluated after the session
+  # target is reached, or the compositor signature is still unexported and the
+  # watcher is skipped for the whole session.
+  assert_contains "$root/.config/systemd/user/xeneon-edge-input.path" \
+    'After=graphical-session.target'
   if grep -Fq 'RuntimeDirectory=' \
     "$root/.config/systemd/user/xeneon-agentd.service"; then
     fail 'agentd must not share ownership of the reconciler runtime directory'
@@ -472,7 +477,7 @@ test_production_commissioning_and_exact_check() {
     "Environment=\"PATH=$root/.local/bin:/usr/local/bin:/usr/bin\""
   assert_file "$root/.config/quickshell/xeneon-edge-agents/shell.qml"
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
-    'local touchDevice = "wch.cn-touchscreen-1"'
+    'local touchDeviceNames = { "wch.cn-touchscreen-1", "wch.cn-touchscreen" }'
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
     'enabled = false'
   assert_contains "$root/.config/hypr/xeneon_edge_agents.lua" \
@@ -689,6 +694,21 @@ EOF
   assert_contains "$log" 'Hyprland touchscreen name family is ambiguous'
 
   rm -f "$sys_root/class/input/event92"
+  # A cold boot enumerates the touchscreen interface before the controller's
+  # mouse interface, so Hyprland gives the touchscreen the bare name and the
+  # mouse the "-1" suffix. The verified kernel identity resolves that name.
+  cat >"$hypr_devices" <<'EOF'
+{"mice":[{"address":"0x2","name":"wch.cn-touchscreen-1"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen"}],"switches":[]}
+EOF
+  if ! "$check_script" --root "$root" --sys-root "$sys_root" \
+    --hypr-devices-json "$hypr_devices" \
+    --hypr-monitors-json "$hypr_monitors" >"$log" 2>&1; then
+    sed -n '1,160p' "$log" >&2
+    fail "bare Hyprland touchscreen name with a verified kernel identity was rejected"
+  fi
+  grep -Fxq 'ok: exact Hyprland touch device: wch.cn-touchscreen' "$log" ||
+    fail "check did not report the resolved bare touchscreen name"
+
   write_hypr_devices "$hypr_devices" wch.cn-touchscreen-1
   cat >"$hypr_monitors" <<'EOF'
 [{"id":1,"name":"DP-1","model":"XENEON EDGE","serial":"WRONG","width":2560,"height":720}]
@@ -961,6 +981,7 @@ case "$*" in
     [[ -d "$LIFECYCLE_GATE" ]] || exit 7
     printf 'inactive\n'
     ;;
+  *" is-active --quiet xeneon-edge-input.path") exit 0 ;;
   *" is-active "*)
     [[ -d "$LIFECYCLE_GATE" ]] || exit 7
     [[ ! -f "$DAEMON_RELOADED" ]] || exit 1
@@ -986,6 +1007,11 @@ EOF
     "$install_script" --activate >/dev/null
   assert_no_file "$root/run/xeneon-edge-agents-uninstalling"
 
+  # Activation must prove the watcher is live rather than trust `start`, which
+  # succeeds for a unit skipped on an unmet condition.
+  grep -Fxq -- '--user is-active --quiet xeneon-edge-input.path' \
+    "$systemctl_log" ||
+    fail "activation did not verify that the input watcher became active"
   grep -Fxq -- \
     '--user disable xeneon-agentd.service xeneon-edge-portal.service' \
     "$systemctl_log" || fail "activation did not disable direct autostart"
@@ -1564,6 +1590,248 @@ EOF
     '--user stop xeneon-edge-portal.service xeneon-agentd.service'
 }
 
+test_touch_name_candidates_cover_both_enumeration_orders() {
+  local actual
+  actual=$(
+    # shellcheck source=scripts/lib.sh
+    source "$repo_root/scripts/lib.sh"
+    lua_touch_device_list wch.cn-touchscreen-1
+    lua_touch_device_list wch.cn-touchscreen
+    lua_touch_device_list wch.cn-touchscreen-2
+    lua_touch_device_list cust0000:00-3558:2002
+  )
+  [[ "$actual" == '"wch.cn-touchscreen-1", "wch.cn-touchscreen"
+"wch.cn-touchscreen", "wch.cn-touchscreen-1"
+"wch.cn-touchscreen-2", "wch.cn-touchscreen", "wch.cn-touchscreen-1"
+"cust0000:00-3558:2002", "cust0000:00-3558:2002-1"' ]] ||
+    fail "touch name candidates did not cover both enumeration orders: $actual"
+}
+
+# Shared helpers for the reconciler name-resolution tests. They read the
+# caller's root, sys_root, monitors, devices, runtime, stub_bin, and log
+# variables through bash's dynamic scoping.
+write_reconciler_stubs() {
+  mkdir -p "$runtime" "$stub_bin"
+  cat >"$stub_bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+EOF
+  cat >"$stub_bin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$HYPRCTL_LOG"
+printf 'ok\n'
+EOF
+  chmod +x "$stub_bin/systemctl" "$stub_bin/hyprctl"
+}
+
+reconcile_with_devices() {
+  printf '%s\n' "$1" >"$devices"
+  : >"$systemctl_log"
+  : >"$hyprctl_log"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+}
+
+assert_touch_enabled_only() {
+  local expected=$1
+  grep -Fxq \
+    "eval hl.device({ name = \"$expected\", output = \"DP-1\", enabled = true })" \
+    "$hyprctl_log" ||
+    fail "reconciler did not map the resolved touchscreen $expected"
+  assert_count 1 'enabled = true' "$hyprctl_log"
+}
+
+assert_nothing_enabled() {
+  if grep -Fq 'enabled = true' "$hyprctl_log"; then
+    fail "$1"
+  fi
+}
+
+assert_candidates_disabled() {
+  local name
+  local -a expected=()
+  for name in "$@"; do
+    expected+=(-e "eval hl.device({ name = \"$name\", enabled = false })")
+    grep -Fxq "eval hl.device({ name = \"$name\", enabled = false })" \
+      "$hyprctl_log" ||
+      fail "reconciler did not disable candidate touchscreen name $name"
+  done
+  # Only candidate names may ever be disabled; the internal touchscreen and any
+  # other device must never appear in a hyprctl call.
+  if grep -F 'enabled = false' "$hyprctl_log" |
+    grep -Fvx "${expected[@]}" | grep -q .; then
+    fail "reconciler disabled a device outside the candidate set"
+  fi
+  if grep -Fq 'cust0000' "$hyprctl_log"; then
+    fail "reconciler touched the internal touchscreen"
+  fi
+}
+
+test_hotplug_reconciler_resolves_touch_name_order() {
+  local root fixture sha sys_root monitors devices runtime stub_bin systemctl_log
+  local hyprctl_log commissioning
+  root=$(new_temp_dir)
+  fixture=$root/edid.bin
+  sys_root=$root/sys
+  monitors=$root/monitors.json
+  devices=$root/devices.json
+  runtime=$root/runtime
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  hyprctl_log=$root/hyprctl.log
+  commissioning=$root/.config/xeneon-edge-agents/commissioning.toml
+  printf 'CORSAIR XENEON EDGE touch-name EDID fixture\n' >"$fixture"
+  sha=$(sha256sum "$fixture" | awk '{print $1}')
+  write_hyprland "$root"
+  "$install_script" --root "$root" --apply-production \
+    --connector DP-1 --edid-sha256 "$sha" \
+    --screen-serial CX123456 --screen-model "XENEON EDGE" \
+    "${production_touch_args[@]}" >/dev/null
+
+  make_sysfs_match "$sys_root" card0 DP-1 "$fixture"
+  make_touchscreen_match "$sys_root"
+  write_hypr_monitors "$monitors"
+  write_reconciler_stubs
+
+  # Cold boot: libinput publishes the touchscreen interface first, so it holds
+  # the bare name while the controller's mouse interface receives the suffix
+  # that was recorded at commissioning time. The host's internal touchscreen
+  # is present throughout and must never be selected or configured.
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen-1"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x9","name":"cust0000:00-3558:2002"},{"address":"0x1","name":"wch.cn-touchscreen"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_contains "$runtime/lifecycle.status" 'touchscreen wch.cn-touchscreen '
+  assert_contains "$runtime/screen.env" 'XENEON_EDGE_OUTPUT=DP-1'
+  assert_candidates_disabled wch.cn-touchscreen-1 wch.cn-touchscreen
+  assert_touch_enabled_only wch.cn-touchscreen
+  assert_contains "$systemctl_log" \
+    '--user start xeneon-agentd.service xeneon-edge-portal.service'
+
+  # Hotplug: the mouse interface arrives first and the touchscreen receives the
+  # commissioned suffix.
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x9","name":"cust0000:00-3558:2002"},{"address":"0x1","name":"wch.cn-touchscreen-1"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_candidates_disabled wch.cn-touchscreen-1 wch.cn-touchscreen
+  assert_touch_enabled_only wch.cn-touchscreen-1
+
+  # A suffix outside the candidate set is in the kernel name family but could
+  # never be disabled by the Hyprland module, so it is refused rather than
+  # mapped.
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen"},{"address":"0x3","name":"wch.cn-touchscreen-1"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen-2"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$runtime/lifecycle.status" \
+    'exact Hyprland touchscreen is absent or ambiguous'
+  assert_no_file "$runtime/screen.env"
+  assert_candidates_disabled wch.cn-touchscreen-1 wch.cn-touchscreen
+  assert_nothing_enabled "uncontrollable collision suffix was mapped"
+
+  # Two touch devices in the family cannot be told apart by name: fail closed.
+  reconcile_with_devices \
+    '{"mice":[],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen"},{"address":"0x2","name":"wch.cn-touchscreen-1"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$runtime/lifecycle.status" \
+    'exact Hyprland touchscreen is absent or ambiguous'
+  assert_no_file "$runtime/screen.env"
+  assert_candidates_disabled wch.cn-touchscreen-1 wch.cn-touchscreen
+  assert_nothing_enabled "ambiguous touchscreen name family enabled a touchscreen"
+  assert_contains "$systemctl_log" \
+    '--user stop xeneon-edge-portal.service xeneon-agentd.service'
+
+  # Lookalike names outside the family never satisfy the gate.
+  reconcile_with_devices \
+    '{"mice":[],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen-1x"},{"address":"0x2","name":"wch.cn-touchscreen-"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$runtime/lifecycle.status" \
+    'exact Hyprland touchscreen is absent or ambiguous'
+  assert_nothing_enabled "lookalike touchscreen name enabled a touchscreen"
+
+  # A block before the name is resolved must still disable every candidate,
+  # because a previous pass may have enabled any one of them.
+  sed -i 's/^serial = "CX123456"$/serial = ""/' "$commissioning"
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen-1"}],"switches":[]}'
+  sed -i 's/^serial = ""$/serial = "CX123456"/' "$commissioning"
+  assert_contains "$runtime/lifecycle.status" 'state=blocked'
+  assert_contains "$runtime/lifecycle.status" \
+    'commissioning identity is incomplete'
+  assert_no_file "$runtime/screen.env"
+  assert_candidates_disabled wch.cn-touchscreen-1 wch.cn-touchscreen
+  assert_nothing_enabled "incomplete commissioning enabled a touchscreen"
+}
+
+test_bare_touch_name_commissioning_resolves_both_orders() {
+  local root fixture sha sys_root monitors devices runtime stub_bin systemctl_log
+  local hyprctl_log log
+  root=$(new_temp_dir)
+  fixture=$root/edid.bin
+  sys_root=$root/sys
+  monitors=$root/monitors.json
+  devices=$root/devices.json
+  runtime=$root/runtime
+  stub_bin=$root/stub-bin
+  systemctl_log=$root/systemctl.log
+  hyprctl_log=$root/hyprctl.log
+  log=$root/check.log
+  printf 'CORSAIR XENEON EDGE bare-name EDID fixture\n' >"$fixture"
+  sha=$(sha256sum "$fixture" | awk '{print $1}')
+  write_hyprland "$root"
+  make_runtime_stubs "$root" "$root/quickshell-source"
+  make_sysfs_match "$sys_root" card0 DP-1 "$fixture"
+  make_touchscreen_match "$sys_root"
+  write_hypr_monitors "$monitors"
+  write_reconciler_stubs
+
+  # Commissioned on a cold-boot session, where the touchscreen holds the bare
+  # kernel name. The rendered module and the reconciler must still cover the
+  # suffixed name a later hotplug assigns.
+  "$install_script" --root "$root" \
+    --quickshell-source "$root/quickshell-source" \
+    --apply-production \
+    --connector DP-1 --edid-sha256 "$sha" \
+    --screen-serial CX123456 --screen-model "XENEON EDGE" \
+    --touch-device wch.cn-touchscreen \
+    --touch-bustype 0003 --touch-vendor 27c0 --touch-product 0859 \
+    --touch-uniq TEST-TOUCH-UNIQ-0001 >/dev/null
+  grep -Fxq \
+    'local touchDeviceNames = { "wch.cn-touchscreen", "wch.cn-touchscreen-1" }' \
+    "$root/.config/hypr/xeneon_edge_agents.lua" ||
+    fail "bare-name commissioning did not render both candidate names"
+  luac -p "$root/.config/hypr/xeneon_edge_agents.lua"
+
+  write_hypr_devices "$devices" wch.cn-touchscreen-1
+  if ! "$check_script" --root "$root" --sys-root "$sys_root" \
+    --hypr-devices-json "$devices" \
+    --hypr-monitors-json "$monitors" >"$log" 2>&1; then
+    sed -n '1,160p' "$log" >&2
+    fail "bare-name commissioning rejected the hotplug touchscreen name"
+  fi
+  grep -Fxq 'ok: exact Hyprland touch device: wch.cn-touchscreen-1' "$log" ||
+    fail "check did not resolve the hotplug name from a bare commissioning"
+
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen-1"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_candidates_disabled wch.cn-touchscreen wch.cn-touchscreen-1
+  assert_touch_enabled_only wch.cn-touchscreen-1
+
+  reconcile_with_devices \
+    '{"mice":[{"address":"0x2","name":"wch.cn-touchscreen-1"}],"keyboards":[],"tablets":[],"touch":[{"address":"0x1","name":"wch.cn-touchscreen"}],"switches":[]}'
+  assert_contains "$runtime/lifecycle.status" 'state=running'
+  assert_candidates_disabled wch.cn-touchscreen wch.cn-touchscreen-1
+  assert_touch_enabled_only wch.cn-touchscreen
+}
+
 printf 'TAP version 13\n'
 run_test 'default install is idempotent and uninstall is reversible' \
   test_default_idempotence_and_uninstall
@@ -1625,4 +1893,10 @@ run_test 'read-only detection reports the absent-hardware gate' \
   test_read_only_detection_reports_physical_gate
 run_test 'hotplug reconciler follows exact hardware across connector drift' \
   test_hotplug_reconciler_tracks_identity_across_connector_drift
+run_test 'touch name candidates cover both enumeration orders' \
+  test_touch_name_candidates_cover_both_enumeration_orders
+run_test 'hotplug reconciler resolves the Hyprland touch name from kernel identity' \
+  test_hotplug_reconciler_resolves_touch_name_order
+run_test 'bare-name commissioning covers the hotplug touch name' \
+  test_bare_touch_name_commissioning_resolves_both_orders
 printf '1..%d\n' "$tests_run"

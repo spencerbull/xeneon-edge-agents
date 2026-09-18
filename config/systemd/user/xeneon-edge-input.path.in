@@ -1,6 +1,11 @@
 [Unit]
 Description=Watch input devices for XENEON EDGE lifecycle changes
 Documentation=https://github.com/spencerbull/xeneon-edge-agents
+# graphical-session.target queues its wanted units before the compositor has
+# exported its environment. Without this ordering the conditions below are
+# evaluated too early, the watcher is skipped for the whole session, and USB
+# touch reconnects never trigger a reconciliation.
+After=graphical-session.target
 PartOf=graphical-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
