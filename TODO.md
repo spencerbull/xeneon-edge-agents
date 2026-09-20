@@ -452,6 +452,40 @@ verification, installation, and the live handoff.
 
 ## Open checkpoints
 
+- Land the touch-name and path-watcher fix on branch `fix/touch-name-order`
+  (worktree `../xeneon-edge-agents-worktrees/touch-name-order`). Found
+  2026-09-16 on the commissioned host: the EDGE touch controller exposes a
+  touchscreen and a mouse interface under one kernel name, and Hyprland
+  appends `-1` to whichever enumerates second, so the touchscreen is
+  `wch.cn-touchscreen` after a cold boot and `wch.cn-touchscreen-1` after a
+  USB hotplug. The exact commissioned name therefore blocked every boot with
+  "exact Hyprland touchscreen is absent or ambiguous". Independently,
+  `xeneon-edge-input.path` was skipped at login because its environment
+  conditions were evaluated before UWSM exported the Hyprland signature, so
+  none of the later USB reconnects re-ran the reconciler. The fix resolves the
+  Hyprland name from the verified kernel identity within a single-member name
+  family, disables both candidate names during transitions, and orders the
+  path unit after `graphical-session.target`. An independent Opus review
+  found a P1 (accepted Hyprland names exceeded the set the module can
+  disable) and a P2 (a block before name resolution no longer disabled
+  touch); both are fixed with regressions, and activation now proves the
+  watcher is active instead of trusting `start`. Hosted CI passed on PR #12.
+  A cold boot on 2026-09-16 reproduced the fault exactly with the old
+  install: the touchscreen came up as `wch.cn-touchscreen`, the reconciler
+  blocked, and the watcher was skipped. The reviewed source was then
+  installed live from the local branch `install/t3code-touch-name-order`,
+  which is the two PR commits cherry-picked onto `t3code-backend`; that is
+  what this host runs, and installing from `main` would have removed the T3
+  Code manager. Activation passed the exact output and touch preflight,
+  resolved the bare name, started both services with the portal on DP-1,
+  and left the input watcher active. The user's `hyprland.lua` had gained a
+  `hypr.cua` require between `hypr.input` and the XENEON require, which the
+  installer refuses, so the XENEON require was moved back directly after
+  `hypr.input` with a backup kept beside the file. Remaining: a cold-boot
+  verification that the stack starts and touch maps without a manual
+  reconciliation, a USB replug proving the watcher re-runs the reconciler,
+  and a check that unrelated input hotplugs, which now trigger a full
+  reconcile, do not disrupt EDGE touch unacceptably.
 - Repair the installed Herdr focus handoff on branch
   `header-launch-order-fix`. Done requires an exact process/session-owned
   compositor selection regression, focused and broad Rust gates, independent

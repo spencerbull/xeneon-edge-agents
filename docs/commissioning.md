@@ -31,7 +31,8 @@ Record:
 - the current DRM connector as the commissioning-time hint;
 - the SHA-256 of that connector's non-empty EDID;
 - the exact serial and model exposed to Hyprland/Qt;
-- the normalized exact touchscreen name from `hyprctl -j devices`;
+- the normalized touchscreen name currently shown by `hyprctl -j devices`,
+  with or without Hyprland's `-1` collision suffix;
 - the touchscreen's kernel bus, vendor, product, and stable `phys` or `uniq`;
 - the observed 2560x720 logical and physical touch coordinate behavior.
 
@@ -62,8 +63,23 @@ change across boots. Both may be recorded, but runtime identity prefers the
 device-provided `uniq`. The USB bus
 must be `0003`; vendor and product IDs are captured from the actual touchscreen
 and are not inferred from the display brand. The commissioned XENEON EDGE unit
-exposes its touch controller as `wch.cn-touchscreen-1`, USB `27c0:0859`, rather
-than through the separate Corsair `1b1c:1d0d` control endpoint.
+exposes its touch controller as USB `27c0:0859`, rather than through the
+separate Corsair `1b1c:1d0d` control endpoint.
+
+That controller presents a touchscreen and a mouse interface under one kernel
+name, and Hyprland appends `-1` to whichever enumerates second. The
+touchscreen therefore appears as `wch.cn-touchscreen` after a cold boot and as
+`wch.cn-touchscreen-1` after a USB hotplug. Commission whichever name
+`hyprctl devices` shows at the time; the installer, `check.sh`, and the
+reconciler resolve the current name from the verified kernel identity and
+accept it only while exactly one touch device carries that name family. The
+candidate set is the commissioned name, its bare form, and the bare form with
+the first collision suffix. Every candidate is disabled during lifecycle
+transitions, the reconciler accepts only a member of that set, and only the
+resolved touchscreen is re-enabled with its output mapping. The controller's
+mouse interface, whichever candidate name it holds at the time, is therefore
+left disabled for the session; it is a compatibility endpoint that Linux does
+not use for touch input.
 
 On a live user installation, the script first builds the candidate files in an
 isolated temporary root and checks the requested identity against real DRM,
