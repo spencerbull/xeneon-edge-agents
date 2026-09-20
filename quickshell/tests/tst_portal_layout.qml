@@ -18,6 +18,7 @@ TestCase {
 
         property var agents: []
         property var agentOrder: ({"available": true, "mode": "grouped"})
+        property var backend: ({"mode": "herdr", "switchable": true})
         property var sessions: []
         property var usage: ({"providers": []})
         property var micro: ({"connected": false, "charging": false})
@@ -46,6 +47,8 @@ TestCase {
         property string lastOrder: ""
         property int chatGptRequests: 0
         property int claudeRequests: 0
+        property int backendRequests: 0
+        property string lastBackend: ""
 
         function restoreFocus() { return "restore" }
         function openAgent(agentId) { return agentId }
@@ -66,6 +69,11 @@ TestCase {
             orderRequests += 1
             lastOrder = mode
             return "order-" + orderRequests
+        }
+        function setAgentBackend(mode) {
+            backendRequests += 1
+            lastBackend = mode
+            return "backend-" + backendRequests
         }
     }
 
@@ -142,14 +150,18 @@ TestCase {
     function init() {
         mockStore.agents = agents(20)
         mockStore.agentOrder = {"available": true, "mode": "grouped"}
+        mockStore.backend = {"mode": "herdr", "switchable": true}
         mockStore.connection = {"state": "connected", "detail": ""}
         mockStore.testSurfaceState = ""
         mockBridge.orderRequests = 0
         mockBridge.lastOrder = ""
         mockBridge.chatGptRequests = 0
         mockBridge.claudeRequests = 0
+        mockBridge.backendRequests = 0
+        mockBridge.lastBackend = ""
         portal.pendingDesktopActions = ({})
         portal.pendingAgentOrderRequest = ""
+        portal.pendingAgentBackendRequest = ""
         portal.paletteSettingsOpen = false
         mockPreferences.readyColorRole = "muted"
         mockPreferences.successColorRole = "green"
@@ -247,6 +259,80 @@ TestCase {
         verify(toggle.activate())
         compare(mockBridge.orderRequests, 2)
         compare(mockBridge.lastOrder, "grouped")
+    }
+
+    function test_agentManagerToggleLeadsTheHeaderAndSwitchesOnce() {
+        var actions = findChild(portal, "headerActions")
+        var toggle = findChild(portal, "agentBackendToggle")
+        var label = findChild(portal, "agentBackendLabel")
+        var order = findChild(portal, "agentOrderToggle")
+        var fleetTitle = findChild(portal, "fleetTitle")
+        verify(actions !== null)
+        verify(toggle !== null)
+        verify(label !== null)
+        verify(order !== null)
+        verify(fleetTitle !== null)
+
+        compare(toggle.x, 0)
+        compare(order.x, toggle.x + toggle.width + actions.spacing)
+        verify(toggle.enabled)
+        compare(label.text, "MANAGER // HERDR")
+        compare(toggle.Accessible.name, "Agent manager Herdr")
+        compare(
+            toggle.Accessible.description,
+            "Switch the command center from Herdr to T3 Code"
+        )
+        compare(fleetTitle.text, "HERDR FLEET")
+
+        verify(toggle.activate())
+        compare(mockBridge.backendRequests, 1)
+        compare(mockBridge.lastBackend, "t3code")
+        verify(!toggle.enabled)
+        compare(label.text, "MANAGER // SWITCHING")
+        compare(toggle.Accessible.name, "Agent manager switching")
+        verify(!toggle.activate())
+        compare(mockBridge.backendRequests, 1)
+
+        mockStore.actionResultReceived({
+            "request_id": "backend-1",
+            "action": "backend_t3code",
+            "ok": true,
+            "code": "ok",
+            "message": "agent_backend_updated"
+        })
+        compare(portal.pendingAgentBackendRequest, "")
+        compare(portal.toastTitle, "MANAGER // SWITCHED")
+        mockStore.backend = {"mode": "t3code", "switchable": true}
+        compare(label.text, "MANAGER // T3 CODE")
+        compare(fleetTitle.text, "T3 CODE FLEET")
+        compare(
+            order.Accessible.description,
+            "Switch T3 Code and the command center to priority ordering"
+        )
+        verify(toggle.activate())
+        compare(mockBridge.backendRequests, 2)
+        compare(mockBridge.lastBackend, "herdr")
+
+        mockStore.actionResultReceived({
+            "request_id": "backend-2",
+            "action": "backend_herdr",
+            "ok": false,
+            "code": "stale_snapshot",
+            "message": "stale"
+        })
+        compare(portal.pendingAgentBackendRequest, "")
+        compare(portal.toastTitle, "MANAGER // STALE_SNAPSHOT")
+
+        mockStore.backend = {"mode": "t3code", "switchable": false}
+        verify(!toggle.enabled)
+        compare(toggle.Accessible.name, "Agent manager fixed")
+        compare(label.text, "MANAGER // T3 CODE")
+        verify(!toggle.activate())
+        compare(mockBridge.backendRequests, 2)
+
+        mockStore.backend = undefined
+        compare(label.text, "MANAGER // HERDR")
+        verify(!toggle.enabled)
     }
 
     function test_desktopLaunchersSitImmediatelyAfterOrderWithoutOverlap() {

@@ -2,10 +2,11 @@
 
 ## Trust boundary
 
-Herdr owns terminal identity, agent detection, and agent actions.
-`xeneon-agentd` owns aggregation, reconnects, host health, normalized AI
-capacity, desktop routing, read-only Codex Micro status, and the portal's
-narrow action policy. It also owns the optional Voxtype start/stop/cancel
+One agent manager at a time is authoritative for agent identity, detection,
+and actions: Herdr through its public sockets, or T3 Code through its
+read-only local state. `xeneon-agentd` owns which manager is active,
+aggregation, reconnects, host health, normalized AI capacity, desktop routing,
+read-only Codex Micro status, and the portal's narrow action policy. It also owns the optional Voxtype start/stop/cancel
 boundary and a private per-daemon dictation marker.
 Quickshell owns rendering and touch gesture state only.
 
@@ -31,7 +32,8 @@ cannot store arbitrary colors or alter background, surface, or text roles.
 
 ```text
 Herdr public sockets     /proc, /sys, Hyprland
-AI usage records/DB        Voxtype, microd
+T3 Code read-only state    Voxtype, microd
+AI usage records/DB
           \                    /
                  xeneon-agentd
                        |
@@ -50,12 +52,66 @@ high-volume pane-content, layout, and metadata updates. Related event bursts
 are coalesced for 200 ms before one authoritative reconciliation; a five-second
 reconciliation remains as the repair path.
 
+## Agent manager selection
+
+The portal snapshot carries `backend.mode` (`herdr` or `t3code`) and the daemon
+accepts two typed, sequence-gated commands, `backend_herdr` and
+`backend_t3code`. A switch clears every card, private target, review latch,
+focus-history entry, and Herdr event subscription before the next manager is
+observed, publishes a reconnecting snapshot, and persists the choice
+atomically to `$XDG_STATE_HOME/xeneon-edge-agents/agent-backend.toml` with
+mode 0600. On startup the persisted choice wins over the configured
+`agent_backend` default. QML renders only the manager's name; it cannot choose
+a binary, socket, path, or query.
+
+## T3 Code adapter
+
+T3 Code keeps its orchestration state in a SQLite projection under its data
+directory (`$T3CODE_HOME`, then `~/.t3`). The adapter opens
+`userdata/state.sqlite` read-only and reads only `projection_threads`,
+`projection_thread_sessions`, `projection_turns`, `projection_projects`, and
+`projection_state`. It never reads messages, activities, checkpoints, secrets,
+proposed-plan text, or provider payloads, and it never writes. Rows are
+bounded (512 candidates, 64 cards), titles are control-stripped and capped,
+and a schema query failure reports the session as `incompatible` instead of
+guessing.
+
+Liveness is T3 Code's own contract: `userdata/server-runtime.json` must be
+descriptor version 1 and name a process whose `/proc/<pid>/comm` is `t3code`.
+A readable database never proves T3 Code is running; a missing descriptor or
+exited process reports the session `offline` with no cards. Between full
+reconciliations the daemon polls the projection sequence once per
+`t3code.refresh_ms` and reconciles only when it changes.
+
+The roster is every non-deleted, non-archived, non-snoozed thread that has a
+`running` or `ready` provider session, or that finished a turn the human has
+not settled. Classification, in priority order: a pending approval, pending
+user input, or actionable proposed plan is `blocked`; a running session or
+turn is `working` (a running session with no turn yet is `launch_pending`); an
+`error` session or turn is `blocked`; a completed or interrupted turn is `done`
+until T3 Code records `settled_at`, after which it is `idle`; a ready session
+with no turn is `idle`; a queued turn whose session is not running is
+`unknown` rather than a guessed activity state. `state_change_seq` is the millisecond timestamp of the
+classifying event (turn start, completion, or settle), so priority ordering
+matches T3 Code's recency and duration counters stay stable within a state.
+Settling in T3 Code is reported as an acknowledgement that clears the
+review-ready latch exactly like a new Herdr focus transition.
+
+T3 Code exposes no public thread-focus API on Linux: its `t3code://` scheme and
+`second-instance` handling only reveal the window, and the CLI control socket
+only opens a workspace. Card activation therefore focuses the single exact
+`t3code` compositor client using the same narrowing rules as the fixed desktop
+apps and never launches it. Zoom is not offered, approve and interrupt
+capabilities are never issued, and the grouped/priority Order control is a
+daemon-owned preference persisted beside the manager choice.
+
 ## Identity and stale-state handling
 
 Portal agent IDs are UUIDv5 values derived from the daemon epoch, Herdr session,
-and live terminal identity. The current pane ID remains private action-routing
-state. Restarting the daemon invalidates every ID. Herdr disconnects immediately
-remove action targets and guarded capabilities.
+and live terminal identity, or from the daemon epoch and T3 Code thread ID.
+The current pane ID or thread ID remains private action-routing state.
+Restarting the daemon or switching managers invalidates every ID. Herdr
+disconnects immediately remove action targets and guarded capabilities.
 
 The adapter reads Herdr's durable `grouped`/`priority` agent-order mode on each
 normal reconciliation. The portal can request only those two typed values;

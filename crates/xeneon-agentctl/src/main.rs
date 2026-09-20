@@ -106,7 +106,8 @@ async fn doctor(path: &Path) -> Result<()> {
     let agents = value["agents"].as_array().map_or(0, Vec::len);
     let sessions = value["sessions"].as_array().map_or(0, Vec::len);
     println!(
-        "ok: schema=1 connection={} sessions={sessions} agents={agents}",
+        "ok: schema=1 backend={} connection={} sessions={sessions} agents={agents}",
+        value["backend"]["mode"].as_str().unwrap_or("herdr"),
         value["connection"].as_str().unwrap_or("unknown")
     );
     Ok(())

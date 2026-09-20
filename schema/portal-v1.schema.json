@@ -26,8 +26,31 @@
         "claude_desktop",
         "voice_start",
         "voice_stop",
-        "voice_cancel"
+        "voice_cancel",
+        "order_grouped",
+        "order_priority",
+        "backend_herdr",
+        "backend_t3code"
       ]
+    },
+    "agentBackend": {
+      "enum": ["herdr", "t3code"]
+    },
+    "backend": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "$ref": "#/$defs/agentBackend" },
+        "switchable": { "type": "boolean" }
+      }
+    },
+    "agentOrder": {
+      "type": "object",
+      "required": ["available", "mode"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "mode": { "enum": ["grouped", "priority"] }
+      }
     },
     "capability": {
       "type": "object",
@@ -246,6 +269,8 @@
           "type": "array",
           "items": { "$ref": "#/$defs/agent" }
         },
+        "agent_order": { "$ref": "#/$defs/agentOrder" },
+        "backend": { "$ref": "#/$defs/backend" },
         "voice": { "$ref": "#/$defs/voice" },
         "usage": { "$ref": "#/$defs/usage" },
         "micro": { "$ref": "#/$defs/micro" },

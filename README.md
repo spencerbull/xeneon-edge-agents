@@ -3,10 +3,10 @@
 [![CI](https://github.com/spencerbull/xeneon-edge-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/spencerbull/xeneon-edge-agents/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A native Omarchy command center for the Corsair XENEON EDGE. It keeps Herdr as
-the session and interaction authority while providing a dedicated 2560x720
-touch surface for agent status, safe triage, provider capacity, and connected
-tool status.
+A native Omarchy command center for the Corsair XENEON EDGE. It keeps your
+agent manager, Herdr or T3 Code, as the session and interaction authority while
+providing a dedicated 2560x720 touch surface for agent status, safe triage,
+provider capacity, and connected tool status.
 
 [Watch the XENEON EDGE Agent Command Center in action on X.](https://x.com/SpencerGBull/status/2088048447525966150?s=20)
 
@@ -17,7 +17,8 @@ tool status.
 
 ## Highlights
 
-- A glanceable command center and animated Ambient view for Herdr agents.
+- A glanceable command center and animated Ambient view for Herdr agents or
+  T3 Code threads, switched with the on-screen Manager control.
 - Exact, fail-closed display and touchscreen identity checks.
 - Typed, narrowly scoped agent actions mediated by the Rust daemon.
 - Normalized Claude, Codex, OpenCode, host-health, and connected-tool status.
@@ -31,9 +32,9 @@ after reboot or replug does not weaken the hardware identity.
 
 ## Components
 
-- `xeneon-agentd`: Rust user daemon for Herdr state, host health, normalized AI
-  usage and Codex Micro status, safe actions, optional Voxtype dictation,
-  reconnects, and output/focus integration.
+- `xeneon-agentd`: Rust user daemon for Herdr or T3 Code agent state, host
+  health, normalized AI usage and Codex Micro status, safe actions, optional
+  Voxtype dictation, reconnects, and output/focus integration.
 - `xeneon-agentctl qml-bridge`: NDJSON bridge used by Quickshell.
 - `quickshell/`: standalone touch portal plus deterministic and live previews.
 - `config/` and `scripts/`: reversible user-service, exact-identity hotplug,
@@ -47,6 +48,38 @@ grounded safely.
 
 For the full boundary model, see the [architecture](docs/architecture.md) and
 [protocol](docs/protocol.md) documentation.
+
+## Agent managers
+
+The header's **Manager** control switches the whole command center between two
+agent managers. The daemon owns the choice, persists it under
+`$XDG_STATE_HOME/xeneon-edge-agents/agent-backend.toml`, and starts on the
+configured `agent_backend` (default `herdr`) when nothing is persisted.
+Switching clears the previous roster, private action targets, review latches,
+and focus history before the next manager is observed.
+
+**Herdr** mode is the original contract: all running local Herdr sessions,
+event subscriptions, capability-gated approve/interrupt, zoom, and Herdr's own
+grouped/priority ordering.
+
+**T3 Code** mode observes the local T3 Code server without any network or
+authenticated API. The daemon reads only the bounded thread, session, turn, and
+project projections from T3 Code's read-only SQLite state and gates everything
+on T3 Code's own server runtime descriptor plus its live server process. One
+card is shown per thread that is running, has a live provider session, or has
+finished a turn the human has not yet settled. Pending approvals, unanswered
+questions, actionable plans, and failed turns show as waiting; running turns
+show as working; unsettled completed turns are review-ready; settled threads
+are ready. Settling a thread in T3 Code acknowledges its review badge the same
+way a Herdr focus transition does. Card names are T3 Code's own thread titles,
+never message text.
+
+T3 Code exposes no public thread-focus API on Linux, so a card tap activates
+the exact `t3code` desktop window; zoom, approve, and interrupt are
+unavailable, and the Order control is a daemon-owned preference. Messages,
+activities, checkpoints, secrets, and provider payloads are never read, and
+T3 Code state is never written. Preview the mode with
+`scripts/preview t3code.ndjson`.
 
 ## Develop and preview
 

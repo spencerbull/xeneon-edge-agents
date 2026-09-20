@@ -9,9 +9,14 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::model::AgentBackend;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Agent manager observed at startup unless a persisted portal choice
+    /// overrides it. The portal can switch between `herdr` and `t3code`.
+    pub agent_backend: AgentBackend,
     pub herdr_bin: PathBuf,
     pub voxtype_bin: PathBuf,
     pub herdr_refresh_ms: u64,
@@ -21,6 +26,25 @@ pub struct Config {
     pub micro_refresh_ms: u64,
     pub screen: ScreenConfig,
     pub desktop: DesktopConfig,
+    pub t3code: T3codeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct T3codeConfig {
+    /// T3 Code data directory. Defaults to `$T3CODE_HOME`, then `~/.t3`.
+    pub home: Option<PathBuf>,
+    /// How often the read-only T3 Code projection sequence is polled.
+    pub refresh_ms: u64,
+}
+
+impl Default for T3codeConfig {
+    fn default() -> Self {
+        Self {
+            home: None,
+            refresh_ms: 1_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -42,6 +66,7 @@ pub struct DesktopConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            agent_backend: AgentBackend::Herdr,
             herdr_bin: PathBuf::from("herdr"),
             voxtype_bin: PathBuf::from("voxtype"),
             herdr_refresh_ms: 5_000,
@@ -51,6 +76,7 @@ impl Default for Config {
             micro_refresh_ms: 5_000,
             screen: ScreenConfig::default(),
             desktop: DesktopConfig::default(),
+            t3code: T3codeConfig::default(),
         }
     }
 }
@@ -107,6 +133,10 @@ impl Config {
         Duration::from_millis(self.micro_refresh_ms.max(1_000))
     }
 
+    pub fn t3code_refresh_interval(&self) -> Duration {
+        Duration::from_millis(self.t3code.refresh_ms.max(250))
+    }
+
     pub fn validate(&self) -> Result<()> {
         let screen_identity = [
             ("screen.connector", self.screen.connector.as_deref()),
@@ -158,8 +188,17 @@ impl Config {
             || self.voice_refresh_ms < 250
             || self.usage_refresh_ms < 5_000
             || self.micro_refresh_ms < 1_000
+            || self.t3code.refresh_ms < 250
         {
             anyhow::bail!("refresh intervals are below their safe minimum");
+        }
+        if self
+            .t3code
+            .home
+            .as_deref()
+            .is_some_and(|home| home.as_os_str().is_empty())
+        {
+            anyhow::bail!("t3code.home must not be empty");
         }
         Ok(())
     }
@@ -218,6 +257,33 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("commissioned screen identity"));
+    }
+
+    #[test]
+    fn backend_defaults_to_herdr_and_parses_t3code_section() {
+        let config = Config::default();
+        assert_eq!(config.agent_backend, AgentBackend::Herdr);
+        assert_eq!(config.t3code.refresh_ms, 1_000);
+        assert!(config.t3code.home.is_none());
+
+        let parsed: Config = toml::from_str(
+            "agent_backend = \"t3code\"\n[t3code]\nhome = \"/tmp/t3\"\nrefresh_ms = 500\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.agent_backend, AgentBackend::T3code);
+        assert_eq!(parsed.t3code.home.as_deref(), Some(Path::new("/tmp/t3")));
+        assert_eq!(parsed.t3code.refresh_ms, 500);
+        parsed.validate().unwrap();
+
+        assert!(toml::from_str::<Config>("agent_backend = \"tmux\"\n").is_err());
+        let too_fast = Config {
+            t3code: T3codeConfig {
+                refresh_ms: 10,
+                ..T3codeConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(too_fast.validate().is_err());
     }
 
     #[test]

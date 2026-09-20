@@ -21,6 +21,7 @@ const PORTAL_PREVIEW_CLASS_PREFIX: &str = "org.xeneon-edge.agent-portal-preview"
 pub enum DesktopApp {
     ChatGpt,
     Claude,
+    T3code,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +204,17 @@ impl DesktopController {
         }
     }
 
+    /// Focuses an already mapped fixed desktop client without launching it.
+    /// Agent focus never starts an application; a missing window is an error.
+    pub async fn focus_existing(&self, app: DesktopApp) -> Result<()> {
+        let spec = desktop_app_spec(app);
+        let clients = hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await?;
+        match select_desktop_candidate(&clients, spec)? {
+            Some(client) => dispatch_focus(&self.hyprctl_bin, &client.address).await,
+            None => bail!("no {} desktop client is mapped", spec.class),
+        }
+    }
+
     pub async fn activate_herdr(&self, session: &str, socket_path: &Path) -> Result<()> {
         let (clients, _) = hypr_state(&self.hyprctl_bin).await?;
         let processes = tokio::task::spawn_blocking(process_table)
@@ -367,6 +379,11 @@ fn desktop_app_spec(app: DesktopApp) -> DesktopAppSpec {
             desktop_id: "com.anthropic.Claude.desktop",
             class: "com.anthropic.Claude",
             main_title: "Claude",
+        },
+        DesktopApp::T3code => DesktopAppSpec {
+            desktop_id: "t3code.desktop",
+            class: "t3code",
+            main_title: "T3 Code",
         },
     }
 }
@@ -961,6 +978,35 @@ mod tests {
                 class: "com.anthropic.Claude",
                 main_title: "Claude",
             }
+        );
+        assert_eq!(
+            desktop_app_spec(DesktopApp::T3code),
+            DesktopAppSpec {
+                desktop_id: "t3code.desktop",
+                class: "t3code",
+                main_title: "T3 Code",
+            }
+        );
+    }
+
+    #[test]
+    fn t3code_window_selection_matches_the_exact_desktop_class() {
+        let clients: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x1","class":"kitty","initialClass":"kitty","title":"t3code","initialTitle":"t3code","pid":1,"monitor":0,"floating":false,"focusHistoryID":0},
+                {"address":"0x2","class":"t3code","initialClass":"t3code","title":"T3 Code (Alpha)","initialTitle":"T3 Code (Alpha)","pid":2,"monitor":0,"floating":false,"focusHistoryID":3}
+            ]"#,
+        )
+        .unwrap();
+
+        let selected = select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::T3code))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.address, "0x2");
+        assert!(
+            select_desktop_candidate(&clients[..1], desktop_app_spec(DesktopApp::T3code))
+                .unwrap()
+                .is_none()
         );
     }
 

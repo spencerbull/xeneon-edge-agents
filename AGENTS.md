@@ -2,15 +2,19 @@
 
 ## Project contract
 
-This repository owns the XENEON EDGE agent command center for Omarchy. Herdr is
-the agent/session authority, `xeneon-agentd` is the adapter and action authority,
-and Quickshell is presentation-only.
+This repository owns the XENEON EDGE agent command center for Omarchy. One
+agent manager at a time, Herdr or T3 Code, is the agent/session authority;
+`xeneon-agentd` is the adapter and action authority and owns which manager is
+active; Quickshell is presentation-only.
 
 ## Safety boundaries
 
 - Never send arbitrary terminal text or keys from QML.
 - Never retry a non-idempotent agent action.
 - Never show terminal or prompt contents on the portal.
+- Never write to T3 Code state, and never read its messages, activities,
+  checkpoints, secrets, or provider payloads; only the bounded thread,
+  session, turn, and project projections are inputs.
 - Never fall back to the primary display when the XENEON identity is absent or
   ambiguous.
 - Never apply a global touchscreen mapping; this host also has an internal
@@ -22,14 +26,16 @@ and Quickshell is presentation-only.
 
 ## Architecture
 
-- Rust workspace: daemon, bridge CLI, normalized protocol, Herdr adapter, health
-  collectors, and deterministic fixtures.
+- Rust workspace: daemon, bridge CLI, normalized protocol, Herdr adapter,
+  read-only T3 Code adapter, health collectors, and deterministic fixtures.
 - Quickshell: one standalone named configuration, one state bridge, and
   output-filtered `PanelWindow` delegates.
 - Hyprland: one project-owned Lua module loaded after the user's monitor/input
   modules. `hyprmoncfg` continues to own `monitors.lua`.
 - Herdr changes live in its own repository and must use the public socket/API
   boundary.
+- T3 Code has no public local thread-focus API on Linux; T3 mode activates only
+  its exact desktop window and offers no zoom, approve, or interrupt actions.
 
 ## Working loop
 

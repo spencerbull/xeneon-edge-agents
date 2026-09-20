@@ -8,6 +8,7 @@ Item {
     property var theme: ThemePalette.fallback
     property var agents: []
     property var sessions: []
+    property string managerLabel: "HERDR"
     property bool reducedMotion: false
     property int clockTick: 0
 
@@ -307,7 +308,8 @@ Item {
                 spacing: 4
 
                 Text {
-                    text: "HERDR FLEET"
+                    objectName: "fleetTitle"
+                    text: root.managerLabel + " FLEET"
                     textFormat: Text.PlainText
                     color: root.theme.textPrimary
                     font {
