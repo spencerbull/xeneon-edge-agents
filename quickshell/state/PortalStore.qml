@@ -549,6 +549,11 @@ QtObject {
         var battery = Math.floor(finiteNumber(source.battery, -1))
         return {
             "connected": source.connected === true,
+            "controlled": source.connected === true && source.controlled === true,
+            "slots": Array.isArray(source.slots)
+                ? source.slots.slice(0, 6).map(function(id) {
+                    return typeof id === "string" ? safeString(id, "", 128) : ""
+                }) : [],
             "firmware": safeString(source.firmware, "", 32),
             "battery": battery >= 0 && battery <= 100 ? battery : -1,
             "charging": source.charging === true,

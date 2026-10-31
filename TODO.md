@@ -478,3 +478,17 @@ verification, installation, and the live handoff.
   (accepted issue and maintainer approval when required); do not replace the
   stable Herdr install during physical commissioning without a separate
   reviewed upgrade.
+
+
+## T3 / Micro integration PR
+
+Goal: current metadata-only T3 status, exact thread navigation, shared six-slot assignments, and exclusive Micro controller ownership.
+
+- Branches: Xeneon `t3-micro-integration`; Micro `micro-controller-ownership` stacked on `herdr-current-compat`; T3 `t3-device-interfaces`.
+- Authorized: cleanup, commits, pushes, PRs, independent review, fixes, and merges after all required gates pass. No production deployment, credentials, billing, or real provider turns.
+- Gates: focused regressions and mutation proof for accepted findings; Rust/Clippy/format, Python/QML/installer checks; affected T3 checks; independent Codex xhigh review; exact-head CI.
+- Existing evidence: source checks, isolated socket/metadata tests, hardened-service authentication, live device acknowledgments, and Herdr restoration passed. Visual navigation, physical keys/LED appearance, and EDGE touch/hotplug remain unconfirmed.
+- PRs: Xeneon #14 to `main`; Micro #4 to `herdr-current-compat` (leave #3 open); T3 #2 to the dedicated `device-integration` baseline `80a2351f` (leave fork `main` unchanged).
+- Review gates: independent Codex xhigh reviews in progress. Full Xeneon checks pass, including an idle-stream heartbeat regression proven to fail without the heartbeat; T3 affected checks pass and fork-compatible CI runners are configured. Exact-head CI and final review resolution remain pending.
+
+- Independent Codex GPT-6.1 Sol xhigh reviews completed: Micro reported stable-lock identity/lifetime and custom-path sandbox issues; T3 reported activation readiness/cache, remote-only desktop, guest priority and stale child questions; Xeneon reported slow-action transport, helper shutdown, runnable queues and ring scope. Verified fixes are in progress with focused regressions and mutation proof; merges remain gated. Review reports are in the external publication ledger.

@@ -380,6 +380,8 @@ TestCase {
         }
         refresh.micro = {
             "connected": true,
+            "controlled": true,
+            "slots": ["telemetry-agent", 42],
             "firmware": "0.4.1",
             "battery": 46,
             "charging": false,
@@ -400,6 +402,9 @@ TestCase {
         compare(store.usage.providers[0].raw_tokens, undefined)
         compare(store.micro.connected, true)
         compare(store.micro.battery, 46)
+        compare(store.micro.controlled, true)
+        compare(store.micro.slots[0], "telemetry-agent")
+        compare(store.micro.slots[1], "")
         compare(store.micro.raw_message, undefined)
         compare(semanticActivitySpy.count, 0)
     }

@@ -265,3 +265,51 @@ checks before opening a pull request.
 ## License
 
 This project is available under the [MIT License](LICENSE).
+
+
+## T3 Code and Codex Micro
+
+T3 cards read the current V2 projection and open the exact thread's local web
+URL. Window activation alone does not clear review state; T3's own visit or
+settlement does. The read-only fallback never reads message, activity, or
+provider records. It cannot fully derive detached background work or suppress
+silent compaction runs.
+
+A T3 build with the companion device interfaces enables the metadata-only
+feed and native thread activation. Set these only after installing that build:
+
+```toml
+[t3code]
+status_file = "/run/user/1000/xeneon-edge-agents/t3-status.json"
+app_bin = "/path/to/patched/t3"
+```
+
+Enable the staged `xeneon-t3-status.service` after updating T3 (adjust the
+UID in `status_file` to your runtime directory). Its separate helper uses
+`t3 thread status --json --watch`, letting T3 manage its own authentication
+without giving the hardware daemon write access to T3 state. The daemon
+stops exposing actions if the metadata file expires or the helper exits. Native activation uses `t3 app --thread ID --environment ENV`;
+it never falls back to project activation or creates a thread.
+
+The installer stages `xeneon-micro-bridge.service` without enabling it. Before
+opting in, install the companion Herdr bridge ownership-lock update. Both
+controllers use `$XDG_RUNTIME_DIR/microd-controller/ownership.lock` (or `~/.cache/microd-controller/ownership.lock` without a runtime directory), independent of socket aliases and daemon restarts. Stop both controllers before upgrading an older adjacent-lock installation, update both consumers together, then:
+
+```sh
+touch ~/.config/xeneon-edge-agents/micro-control.enabled
+systemctl --user daemon-reload
+systemctl --user enable --now xeneon-micro-bridge.service
+```
+
+The selected Manager remains authoritative. In T3 mode, the bridge stops a
+previously active Herdr bridge, shares the daemon's first six slots, and maps
+agent keys, dial rotation, and the attention key to typed thread opens. Slots
+and the ambient ring use the existing attention colors. It restores Herdr
+when leaving T3 or shutting down, including service crash cleanup. It does
+not start a previously inactive Herdr bridge. Approval, raw Enter/Escape,
+zoom, and microphone keys are unassigned in this first T3 mapping.
+
+The daemon can run headless for Micro while the EDGE is absent; the portal
+still requires the exact commissioned display. To opt out, disable the Micro
+service and remove `micro-control.enabled`. Normal display-only lifecycle
+then resumes.

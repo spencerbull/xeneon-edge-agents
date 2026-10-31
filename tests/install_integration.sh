@@ -147,6 +147,8 @@ test_default_idempotence_and_uninstall() {
   assert_file "$root/.config/systemd/user/xeneon-edge-portal.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
   assert_file "$root/.config/systemd/user/xeneon-edge-input.path"
+  assert_file "$root/.local/bin/xeneon-micro-bridge"
+  assert_file "$root/.config/systemd/user/xeneon-micro-bridge.service"
   assert_file "$root/.local/bin/xeneon-edge-launch"
   assert_file "$root/.local/bin/xeneon-edge-reconcile"
   [[ -x "$root/.local/bin/xeneon-edge-launch" ]] ||
@@ -188,7 +190,7 @@ test_default_idempotence_and_uninstall() {
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
     "ReadWritePaths=\"$root/.local/state/xeneon-edge-agents\" %t/xeneon-edge-agents"
   assert_contains "$root/.config/systemd/user/xeneon-agentd.service" \
-    'EnvironmentFile=%t/xeneon-edge-agents/screen.env'
+    'EnvironmentFile=-%t/xeneon-edge-agents/screen.env'
   assert_contains "$root/.config/systemd/user/xeneon-edge-portal.service" \
     'EnvironmentFile=%t/xeneon-edge-agents/screen.env'
   assert_contains "$root/.config/systemd/user/xeneon-edge-input.path" \
@@ -216,6 +218,8 @@ test_default_idempotence_and_uninstall() {
   assert_no_file "$root/.config/systemd/user/xeneon-edge-reconcile.service"
   assert_no_file "$root/.config/systemd/user/xeneon-edge-input.path"
   assert_no_file "$root/.local/bin/xeneon-edge-launch"
+  assert_no_file "$root/.local/bin/xeneon-micro-bridge"
+  assert_no_file "$root/.config/systemd/user/xeneon-micro-bridge.service"
   assert_no_file "$root/.local/bin/xeneon-edge-reconcile"
   assert_no_file "$root/.local/share/applications/xeneon-edge-agents.desktop"
   assert_no_file "$root/.local/share/icons/hicolor/scalable/apps/xeneon-edge-agents.svg"
@@ -1428,6 +1432,26 @@ EOF
   assert_contains "$systemctl_log" \
     '--user stop xeneon-edge-portal.service xeneon-agentd.service'
   assert_contains "$hyprctl_log" 'enabled = false'
+
+  : >"$systemctl_log"
+  : >"$root/.config/xeneon-edge-agents/micro-control.enabled"
+  env \
+    XDG_CONFIG_HOME="$root/.config" \
+    XENEON_SYS_ROOT="$sys_root" \
+    XENEON_HYPR_MONITORS_JSON="$monitors" \
+    XENEON_HYPR_DEVICES_JSON="$devices" \
+    XENEON_RUNTIME_DIR="$runtime" \
+    XENEON_SYSTEMCTL="$stub_bin/systemctl" \
+    XENEON_HYPRCTL="$stub_bin/hyprctl" \
+    SYSTEMCTL_LOG="$systemctl_log" \
+    HYPRCTL_LOG="$hyprctl_log" \
+    "$root/.local/bin/xeneon-edge-reconcile" >/dev/null
+  grep -Fxq -- '--user stop xeneon-edge-portal.service' "$systemctl_log" ||
+    fail "absent EDGE must stop only the portal while Micro is active"
+  if grep -Fq -- '--user stop xeneon-edge-portal.service xeneon-agentd.service' "$systemctl_log"; then
+    fail "absent EDGE stopped the active headless Micro adapter"
+  fi
+  rm "$root/.config/xeneon-edge-agents/micro-control.enabled"
 
   : >"$systemctl_log"
   printf 'connected\n' >"$sys_root/devices/mock-drm/card0-DP-2/status"

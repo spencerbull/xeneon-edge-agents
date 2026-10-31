@@ -176,6 +176,7 @@ TestCase {
         mockActivity.ambientMode = false
         mockActivity.noteCount = 0
         portal.currentPage = 0
+        portal.hostName = "LOCAL"
         wait(0)
     }
 
@@ -347,6 +348,8 @@ TestCase {
         verify(claude !== null)
         verify(dots !== null)
 
+        portal.hostName = "a-long-runner-hostname-that-must-not-push-controls-over-pagination"
+        wait(0)
         compare(chatGpt.x, order.x + order.width + actions.spacing)
         compare(claude.x, chatGpt.x + chatGpt.width + actions.spacing)
         verify(actions.x + actions.width < dots.x)

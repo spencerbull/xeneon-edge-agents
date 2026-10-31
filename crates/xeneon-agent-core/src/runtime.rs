@@ -198,7 +198,10 @@ impl DaemonRuntime {
         let (invalidations, invalidation_rx) = mpsc::channel(64);
         let desktop = DesktopController::new(config.desktop.clone());
         let voice = VoiceController::from_config(&config, snapshot.daemon_epoch.clone())?;
-        let t3code = T3codeClient::from_config(config.t3code.home.as_deref())?;
+        let t3code = T3codeClient::from_config(
+            config.t3code.home.as_deref(),
+            config.t3code.status_file.as_deref(),
+        )?;
         Ok((
             Self {
                 herdr: HerdrClient::new(config.herdr_bin.clone()),
@@ -746,25 +749,63 @@ impl DaemonRuntime {
         let initial = updates.borrow().clone();
         write.write_all(initial.as_bytes()).await?;
         write.write_all(b"\n").await?;
+        // Transport liveness must not depend on metadata or collector cadence.
+        let mut heartbeat = interval(Duration::from_secs(1));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        heartbeat.tick().await;
 
-        loop {
-            tokio::select! {
-                changed = updates.changed() => {
-                    changed.context("snapshot publisher closed")?;
-                    let next = updates.borrow_and_update().clone();
-                    write.write_all(next.as_bytes()).await?;
-                    write.write_all(b"\n").await?;
-                    write.flush().await?;
+        let (results, mut action_results) = mpsc::channel(1);
+        let (stopping, mut stopped) = watch::channel(());
+        let mut commands = Box::pin(async move {
+            loop {
+                let line = tokio::select! {
+                    biased;
+                    _ = stopped.changed() => return Ok::<(), anyhow::Error>(()),
+                    line = lines.next_line() => line?,
+                };
+                let Some(line) = line else {
+                    return Ok(());
+                };
+                // Once started, an action must settle before disconnect cleanup can inspect its ownership.
+                let result = self.process_command(&line, client_id).await;
+                if results.send(result).await.is_err() {
+                    return Ok(());
                 }
-                line = lines.next_line() => {
-                    let Some(line) = line? else {
-                        return Ok(());
-                    };
-                    let result = self.process_command(&line, client_id).await;
-                    write.write_all(serde_json::to_string(&ServerMessage::ActionResult { result })?.as_bytes()).await?;
-                    write.write_all(b"\n").await?;
-                    write.flush().await?;
+            }
+        });
+        let mut writer = Box::pin(async move {
+            loop {
+                tokio::select! {
+                    changed = updates.changed() => {
+                        changed.context("snapshot publisher closed")?;
+                        let next = updates.borrow_and_update().clone();
+                        write.write_all(next.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                        heartbeat.reset();
+                    }
+                    _ = heartbeat.tick() => {
+                        let current = updates.borrow().clone();
+                        write.write_all(current.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                    }
+                    result = action_results.recv() => {
+                        let Some(result) = result else { return Ok::<(), anyhow::Error>(()); };
+                        write.write_all(serde_json::to_string(&ServerMessage::ActionResult { result })?.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                    }
                 }
+            }
+        });
+        tokio::select! {
+            result = &mut commands => result.and(writer.await),
+            result = &mut writer => {
+                // Closing the receiver unblocks a producer waiting to enqueue its final response.
+                drop(writer);
+                let _ = stopping.send(());
+                result.and(commands.await)
             }
         }
     }
@@ -914,9 +955,7 @@ impl DaemonRuntime {
 
         let herdr_target = match target {
             AgentTarget::Herdr(target) => target,
-            AgentTarget::T3code(_) => {
-                // T3 Code exposes no public thread-focus API on Linux; the
-                // only agent action is activating its exact desktop window.
+            AgentTarget::T3code(target) => {
                 if command.action != ActionKind::Open {
                     return action_error(
                         &command.request_id,
@@ -924,11 +963,18 @@ impl DaemonRuntime {
                         "action is not available for T3 Code threads",
                     );
                 }
-                return match self.desktop.focus_existing(DesktopApp::T3code).await {
+                let result = if let Some(bin) = self.config.t3code.app_bin.as_deref() {
+                    self.t3code.open_native(bin, &target.thread_id).await
+                } else {
+                    match self.t3code.thread_url(&target.thread_id) {
+                        Ok(url) => self.desktop.open_thread_url(&url).await,
+                        Err(error) => Err(error),
+                    }
+                };
+                return match result {
                     Ok(()) => {
-                        self.acknowledge_review_ready(&agent.id).await;
-                        let _ = self.invalidations.try_send(t3code::SESSION_NAME.to_owned());
-                        action_ok(&command.request_id, "action_completed")
+                        // Dispatch does not prove a human visited the target. T3's own visit/settle metadata acknowledges review.
+                        action_ok(&command.request_id, "thread_open_requested")
                     }
                     Err(error) => {
                         tracing::warn!(%error, "T3 Code window activation failed");
@@ -1475,6 +1521,15 @@ fn bind_socket(path: &Path) -> Result<UnixListener> {
 
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => bail!("daemon socket is already active"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
             fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
         }
         Ok(_) => bail!(
@@ -1546,7 +1601,7 @@ fn voice_action_error(request_id: &str, error: VoiceActionError) -> ActionResult
     action_error(request_id, code, message)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
@@ -1563,6 +1618,211 @@ mod tests {
     use crate::model::AgentView;
     use crate::voice::VoiceController;
 
+    #[tokio::test(start_paused = true)]
+    async fn idle_client_receives_heartbeats_without_metadata_changes() {
+        let (runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        let task =
+            tokio::spawn(async move { runtime.handle_client_inner(server, Uuid::new_v4()).await });
+        let (read, mut write) = client.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initial = lines.next_line().await.unwrap().unwrap();
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let heartbeat = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("idle connection lost its transport heartbeat")
+                .unwrap()
+                .unwrap();
+            assert_eq!(heartbeat, initial);
+        }
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_activation_does_not_block_snapshot_heartbeats() {
+        let temp = tempfile::tempdir().unwrap();
+        let userdata = temp.path().join("userdata");
+        fs::create_dir(&userdata).unwrap();
+        fs::write(userdata.join("environment-id"), "env").unwrap();
+        let native_socket = temp.path().join("native.sock");
+        let listener = tokio::net::UnixListener::bind(&native_socket).unwrap();
+        let binary = temp.path().join("t3");
+        fs::write(&binary, format!("#!/usr/bin/python3\nimport socket\ns=socket.socket(socket.AF_UNIX)\ns.connect({})\ns.sendall(b'ready')\ns.recv(1)\n", serde_json::to_string(&native_socket.to_string_lossy()).unwrap())).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            agent_backend: AgentBackend::T3code,
+            t3code: crate::config::T3codeConfig {
+                home: Some(temp.path().into()),
+                app_bin: Some(binary),
+                ..Default::default()
+            },
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 3;
+            let mut agent = test_agent("thread", AgentStatus::Idle, false);
+            agent.actions.open = true;
+            state.snapshot.agents = vec![agent];
+            state
+                .targets
+                .insert("thread".into(), t3code_target(1, false));
+        }
+        let (client, server) = UnixStream::pair().unwrap();
+        let task =
+            tokio::spawn(async move { runtime.handle_client_inner(server, Uuid::new_v4()).await });
+        let (read, mut write) = client.into_split();
+        let mut lines = BufReader::new(read).lines();
+        lines.next_line().await.unwrap().unwrap();
+        write.write_all(b"{\"schema_version\":1,\"request_id\":\"slow-open\",\"sequence\":3,\"action\":\"open\",\"agent_id\":\"thread\"}\n").await.unwrap();
+        let (mut native, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ready = [0; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut native, &mut ready)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        for _ in 0..6 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let frame = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("native action blocked transport heartbeat")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&frame).unwrap()["type"],
+                "snapshot"
+            );
+        }
+        tokio::time::resume();
+        native.write_all(b"x").await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if frame["type"] == "action_result" {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["ok"], true);
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn half_closed_command_batches_receive_every_action_result() {
+        for count in [1, 3] {
+            let (runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+            let (client, server) = UnixStream::pair().unwrap();
+            let task =
+                tokio::spawn(
+                    async move { runtime.handle_client_inner(server, Uuid::new_v4()).await },
+                );
+            let (read, mut write) = client.into_split();
+            for index in 0..count {
+                let line = format!(
+                    "{{\"schema_version\":1,\"request_id\":\"half-{index}\",\"sequence\":0,\"action\":\"open\",\"agent_id\":\"missing\"}}\n"
+                );
+                write.write_all(line.as_bytes()).await.unwrap();
+            }
+            write.shutdown().await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            let replies = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut replies = Vec::new();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if frame["type"] == "action_result" {
+                        replies.push(frame["request_id"].as_str().unwrap().to_owned());
+                    }
+                }
+                replies
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                replies,
+                (0..count)
+                    .map(|index| format!("half-{index}"))
+                    .collect::<Vec<_>>(),
+                "input EOF discarded an executed command reply"
+            );
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_settles_an_inflight_voice_start_before_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("voice-state");
+        let marker_path = temp.path().join("dictation-active");
+        let log_path = temp.path().join("voice-log");
+        let socket_path = temp.path().join("voice.sock");
+        let binary = temp.path().join("voxtype");
+        fs::write(&state_path, "idle").unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        fs::write(&binary, format!("#!/usr/bin/python3\nimport os,socket,sys\nwith open({},'a') as f: f.write(' '.join(sys.argv[1:])+'\\n')\nif sys.argv[2]=='start':\n s=socket.socket(socket.AF_UNIX)\n s.connect({})\n s.sendall((str(os.getpid())+'\\n').encode())\n s.recv(1)\n", serde_json::to_string(&log_path.to_string_lossy()).unwrap(), serde_json::to_string(&socket_path.to_string_lossy()).unwrap())).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+        runtime.voice = Arc::new(Mutex::new(VoiceController::new(
+            binary,
+            state_path,
+            marker_path.clone(),
+            "owner",
+        )));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let other = runtime.clone();
+        let mut task = tokio::spawn(async move { other.handle_client(server).await });
+        client.write_all(b"{\"schema_version\":1,\"request_id\":\"voice-start\",\"sequence\":0,\"action\":\"voice_start\"}\n").await.unwrap();
+        let (native, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut native = BufReader::new(native);
+        let mut pid = String::new();
+        native.read_line(&mut pid).await.unwrap();
+        assert!(marker_path.exists());
+        drop(client);
+        runtime.publish().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut task)
+                .await
+                .is_err(),
+            "disconnect abandoned an in-flight voice start"
+        );
+        native.get_mut().write_all(b"x").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            !marker_path.exists(),
+            "disconnect orphaned the recording marker"
+        );
+        let state = runtime.state.read().await;
+        assert!(state.voice_client_owner.is_none());
+        assert!(!state.snapshot.voice.owned);
+        assert_eq!(state.snapshot.voice.state, VoiceState::Idle);
+        assert_eq!(
+            fs::read_to_string(log_path).unwrap(),
+            "record start --type --no-auto-submit --no-smart-auto-submit\nrecord cancel\n"
+        );
+        assert!(
+            !Path::new("/proc").join(pid.trim()).exists(),
+            "fake start child was not reaped"
+        );
+    }
+
     #[test]
     fn socket_binding_refuses_regular_file() {
         let temp = tempfile::tempdir().unwrap();
@@ -1577,7 +1837,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("agentd.sock");
         drop(StdUnixListener::bind(&path).unwrap());
+        // Other tests fork subprocesses; an inherited CLOEXEC descriptor can briefly outlive our close.
+        for _ in 0..1000 {
+            if std::os::unix::net::UnixStream::connect(&path).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let listener = bind_socket(&path).unwrap();
+        assert!(bind_socket(&path).is_err());
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
         drop(listener);
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

@@ -31,7 +31,9 @@ jobs:
       - name: Install portable integration dependencies
         run: sudo apt-get update && sudo apt-get install -y desktop-file-utils lua5.4 shellcheck
       - name: Run shell static checks
-        run: shellcheck config/bin/* scripts/*.sh scripts/preview tests/*.sh tests/run-integration-tests tests/run-qml-tests
+        run: shellcheck config/bin/xeneon-edge-launch config/bin/xeneon-edge-reconcile scripts/*.sh scripts/preview tests/*.sh tests/run-integration-tests tests/run-qml-tests
+      - name: Run Micro controller tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Validate JSON assets
         run: |
           find . -type f -name '*.json' -print0 |

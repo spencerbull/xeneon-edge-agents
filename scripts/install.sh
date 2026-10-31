@@ -250,6 +250,19 @@ snapshot_activation_artifact() {
   fi
 }
 
+feed_unit=$temp_dir/xeneon-t3-status.service
+feed_helper=$repo_root/config/bin/xeneon-t3-status
+render_template "$repo_root/config/systemd/user/xeneon-t3-status.service.in" "$feed_unit" BIN_HOME "$bin_home"
+feed_target=$systemd_dir/xeneon-t3-status.service
+feed_helper_target=$bin_home/xeneon-t3-status
+micro_unit=$temp_dir/xeneon-micro-bridge.service
+micro_helper=$repo_root/config/bin/xeneon-micro-bridge
+render_template \
+  "$repo_root/config/systemd/user/xeneon-micro-bridge.service.in" "$micro_unit" \
+  BIN_HOME "$bin_home"
+micro_target=$systemd_dir/xeneon-micro-bridge.service
+micro_helper_target=$bin_home/xeneon-micro-bridge
+
 daemon_unit=$temp_dir/xeneon-agentd.service
 portal_unit=$temp_dir/xeneon-edge-portal.service
 reconcile_unit=$temp_dir/xeneon-edge-reconcile.service
@@ -296,6 +309,10 @@ fi
 
 # Preflight every managed overwrite before making any change. A collision
 # therefore leaves no partial installation to roll back.
+preflight_managed_target "$feed_unit" "$feed_target"
+preflight_managed_target "$feed_helper" "$feed_helper_target"
+preflight_managed_target "$micro_unit" "$micro_target"
+preflight_managed_target "$micro_helper" "$micro_helper_target"
 preflight_managed_target "$daemon_unit" "$daemon_target"
 preflight_managed_target "$portal_unit" "$portal_target"
 preflight_managed_target "$reconcile_unit" "$reconcile_target"
@@ -483,6 +500,10 @@ if ((activate)); then
     service_previous_enabled+=("$enabled_state")
   done
 
+  snapshot_activation_artifact "$feed_target"
+  snapshot_activation_artifact "$feed_helper_target"
+  snapshot_activation_artifact "$micro_target"
+  snapshot_activation_artifact "$micro_helper_target"
   snapshot_activation_artifact "$daemon_target"
   snapshot_activation_artifact "$portal_target"
   snapshot_activation_artifact "$reconcile_target"
@@ -511,6 +532,10 @@ if ((activate)); then
   rollback_artifacts=1
 fi
 
+install_managed_file "$feed_unit" "$feed_target"
+install_managed_file "$feed_helper" "$feed_helper_target" 0755
+install_managed_file "$micro_unit" "$micro_target"
+install_managed_file "$micro_helper" "$micro_helper_target" 0755
 install_managed_file "$daemon_unit" "$daemon_target"
 install_managed_file "$portal_unit" "$portal_target"
 install_managed_file "$reconcile_unit" "$reconcile_target"

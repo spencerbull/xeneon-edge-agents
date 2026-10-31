@@ -1,0 +1,26 @@
+[Unit]
+Description=Codex Micro controls for the selected XENEON T3 manager
+After=graphical-session.target microd.service
+PartOf=graphical-session.target
+Requires=microd.service
+
+[Service]
+Type=simple
+Environment="XDG_RUNTIME_DIR=%t"
+ExecStartPre=/usr/bin/systemctl --user start xeneon-agentd.service
+ExecStart="@BIN_HOME@/xeneon-micro-bridge" --manage-herdr-service
+ExecStopPost="@BIN_HOME@/xeneon-micro-bridge" --restore-herdr
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=xeneon-edge-agents microd-controller
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/xeneon-edge-agents %t/microd-controller
+
+[Install]
+WantedBy=graphical-session.target

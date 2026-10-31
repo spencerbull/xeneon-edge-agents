@@ -387,6 +387,7 @@ Item {
 
         Row {
             id: headerIdentity
+            width: Math.max(0, pageDots.x - headerActions.width - 44 - 24)
 
             anchors {
                 left: parent.left
@@ -402,9 +403,13 @@ Item {
             }
 
             Column {
+                width: Math.max(0, headerIdentity.width - 26)
                 spacing: 2
 
                 Text {
+                    objectName: "headerHostLabel"
+                    width: parent.width
+                    elide: Text.ElideRight
                     text: String(root.hostName || "LOCAL").toUpperCase()
                         + " // AGENT COMMAND"
                     textFormat: Text.PlainText
@@ -418,6 +423,8 @@ Item {
                 }
 
                 Text {
+                    width: parent.width
+                    elide: Text.ElideRight
                     text: root.attentionSummary()
                     textFormat: Text.PlainText
                     color: root.theme.textMuted

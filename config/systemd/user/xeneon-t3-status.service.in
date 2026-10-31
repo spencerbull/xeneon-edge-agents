@@ -1,0 +1,24 @@
+[Unit]
+Description=Metadata-only T3 thread feed for XENEON and Micro
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
+Environment="XDG_RUNTIME_DIR=%t"
+ExecStart="@BIN_HOME@/xeneon-t3-status"
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=xeneon-edge-agents
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.t3/userdata %t/xeneon-edge-agents
+
+[Install]
+WantedBy=graphical-session.target

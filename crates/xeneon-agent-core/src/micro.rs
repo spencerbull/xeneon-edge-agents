@@ -47,11 +47,46 @@ impl MicroCollector {
         else {
             return MicroSnapshot::default();
         };
-        timeout(status_timeout, self.sample_stream(stream))
+        let mut sample = timeout(status_timeout, self.sample_stream(stream))
             .await
             .ok()
             .and_then(Result::ok)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if sample.connected {
+            let path = self
+                .socket_path
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|runtime| runtime.join("xeneon-edge-agents/micro-controller.json"));
+            if let Some(path) = path {
+                let status = tokio::fs::read(&path)
+                    .await
+                    .ok()
+                    .filter(|bytes| bytes.len() <= 4096)
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                if let Some(status) = status.filter(|status| {
+                    status.get("controlled").and_then(Value::as_bool) == Some(true)
+                        && status.get("backend").and_then(Value::as_str) == Some("t3code")
+                        && status
+                            .get("updated_at_ms")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|updated| now_ms().abs_diff(updated) < 15_000)
+                }) {
+                    sample.controlled = true;
+                    sample.slots = status
+                        .get("slots")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .take(6)
+                        .filter_map(Value::as_str)
+                        .filter(|id| id.len() <= 128)
+                        .map(str::to_owned)
+                        .collect();
+                }
+            }
+        }
+        sample
     }
 
     async fn sample_stream(&self, stream: UnixStream) -> anyhow::Result<MicroSnapshot> {
@@ -105,6 +140,8 @@ fn status_from_message(value: &Value) -> Option<MicroSnapshot> {
     }
     Some(MicroSnapshot {
         connected: true,
+        controlled: false,
+        slots: Vec::new(),
         firmware: Some(firmware),
         battery: result
             .get("battery")

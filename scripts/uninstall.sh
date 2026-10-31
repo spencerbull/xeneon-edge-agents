@@ -52,12 +52,16 @@ runtime_dir=
 uninstall_gate=
 uninstall_gate_active=0
 service_units=(
+  xeneon-t3-status.service
+  xeneon-micro-bridge.service
   xeneon-edge-input.path
   xeneon-edge-reconcile.service
   xeneon-edge-portal.service
   xeneon-agentd.service
 )
 service_targets=(
+  "$systemd_dir/xeneon-t3-status.service"
+  "$systemd_dir/xeneon-micro-bridge.service"
   "$input_path_target"
   "$reconcile_target"
   "$portal_target"

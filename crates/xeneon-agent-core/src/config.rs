@@ -32,6 +32,10 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct T3codeConfig {
+    /// Use exact native activation on a patched T3 build; otherwise open its exact web URL.
+    pub app_bin: Option<PathBuf>,
+    /// Read the metadata-only file published by the separate T3 host CLI helper.
+    pub status_file: Option<PathBuf>,
     /// T3 Code data directory. Defaults to `$T3CODE_HOME`, then `~/.t3`.
     pub home: Option<PathBuf>,
     /// How often the read-only T3 Code projection sequence is polled.
@@ -41,6 +45,8 @@ pub struct T3codeConfig {
 impl Default for T3codeConfig {
     fn default() -> Self {
         Self {
+            app_bin: None,
+            status_file: None,
             home: None,
             refresh_ms: 1_000,
         }

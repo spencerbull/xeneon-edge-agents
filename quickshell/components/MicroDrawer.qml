@@ -23,6 +23,18 @@ Item {
     signal closeRequested()
     signal interacted()
 
+    function agentForSlot(index) {
+        if (root.micro.controlled && Array.isArray(root.micro.slots)) {
+            var id = root.micro.slots[index]
+            for (var i = 0; i < root.agents.length; i += 1) {
+                if (root.agents[i].id === id)
+                    return root.agents[i]
+            }
+            return null
+        }
+        return index < root.agents.length ? root.agents[index] : null
+    }
+
     function ringState() {
         var voiceState = String(voice.state || "unavailable")
         if (voiceState === "recording")
@@ -142,7 +154,7 @@ Item {
 
             Text {
                 text: root.micro.connected
-                    ? "DEVICE LINK ACTIVE · READ ONLY"
+                    ? (root.micro.controlled ? "T3 CONTROL ACTIVE · SHARED SLOTS" : "DEVICE LINK ACTIVE · READ ONLY")
                     : "DEVICE LINK UNAVAILABLE"
                 textFormat: Text.PlainText
                 color: root.readableConnectionColor
@@ -331,9 +343,7 @@ Item {
                     Rectangle {
                         required property int index
                         readonly property var agent:
-                            index < root.agents.length
-                                ? root.agents[index]
-                                : null
+                            root.agentForSlot(index)
                         readonly property color accent:
                             agent === null
                                 ? root.theme.border

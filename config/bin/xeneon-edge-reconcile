@@ -89,7 +89,12 @@ enable_touch() {
 
 stop_stack() {
   local status=0
-  "$systemctl_bin" --user stop "$portal_unit" "$daemon_unit" || status=$?
+  if [[ -f "$config_home/xeneon-edge-agents/micro-control.enabled" ]] &&
+    "$systemctl_bin" --user is-active --quiet xeneon-micro-bridge.service; then
+    "$systemctl_bin" --user stop "$portal_unit" || status=$?
+  else
+    "$systemctl_bin" --user stop "$portal_unit" "$daemon_unit" || status=$?
+  fi
   rm -f "$runtime_environment"
   return "$status"
 }
