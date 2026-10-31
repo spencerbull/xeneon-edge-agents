@@ -20,7 +20,7 @@ class MicroBridgeTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        environment = patch.dict(os.environ, {"XDG_RUNTIME_DIR": self.directory.name})
+        environment = patch.dict(os.environ, {"XDG_RUNTIME_DIR": self.directory.name, "MICROD_CONTROLLER_DIR": str(Path(self.directory.name) / "microd-controller")})
         environment.start()
         self.addCleanup(environment.stop)
         self.owner = Mock(marker=Path(self.directory.name) / "restore-herdr")

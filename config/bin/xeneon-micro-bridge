@@ -84,7 +84,7 @@ class HerdrOwner:
                 raise RuntimeError("could not stop the Herdr bridge")
         if self.micro_path is not None and self.lock_file is None:
             runtime = Path(os.environ.get("XDG_RUNTIME_DIR", str(Path.home() / ".cache")))
-            directory = runtime / "microd-controller"
+            directory = Path(os.environ.get("MICROD_CONTROLLER_DIR", str(runtime / "microd-controller")))
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             path = directory / "ownership.lock"
             fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
