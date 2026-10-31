@@ -749,6 +749,10 @@ impl DaemonRuntime {
         let initial = updates.borrow().clone();
         write.write_all(initial.as_bytes()).await?;
         write.write_all(b"\n").await?;
+        // Transport liveness must not depend on metadata or collector cadence.
+        let mut heartbeat = interval(Duration::from_secs(1));
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        heartbeat.tick().await;
 
         loop {
             tokio::select! {
@@ -756,6 +760,13 @@ impl DaemonRuntime {
                     changed.context("snapshot publisher closed")?;
                     let next = updates.borrow_and_update().clone();
                     write.write_all(next.as_bytes()).await?;
+                    write.write_all(b"\n").await?;
+                    write.flush().await?;
+                    heartbeat.reset();
+                }
+                _ = heartbeat.tick() => {
+                    let current = updates.borrow().clone();
+                    write.write_all(current.as_bytes()).await?;
                     write.write_all(b"\n").await?;
                     write.flush().await?;
                 }
@@ -1579,6 +1590,28 @@ mod tests {
     use super::*;
     use crate::model::AgentView;
     use crate::voice::VoiceController;
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_client_receives_heartbeats_without_metadata_changes() {
+        let (runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+        let (client, server) = UnixStream::pair().unwrap();
+        let task =
+            tokio::spawn(async move { runtime.handle_client_inner(server, Uuid::new_v4()).await });
+        let (read, mut write) = client.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let initial = lines.next_line().await.unwrap().unwrap();
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let heartbeat = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("idle connection lost its transport heartbeat")
+                .unwrap()
+                .unwrap();
+            assert_eq!(heartbeat, initial);
+        }
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
 
     #[test]
     fn socket_binding_refuses_regular_file() {

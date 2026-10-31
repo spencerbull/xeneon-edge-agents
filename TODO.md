@@ -488,4 +488,5 @@ Goal: current metadata-only T3 status, exact thread navigation, shared six-slot 
 - Authorized: cleanup, commits, pushes, PRs, independent review, fixes, and merges after all required gates pass. No production deployment, credentials, billing, or real provider turns.
 - Gates: focused regressions and mutation proof for accepted findings; Rust/Clippy/format, Python/QML/installer checks; affected T3 checks; independent Codex xhigh review; exact-head CI.
 - Existing evidence: source checks, isolated socket/metadata tests, hardened-service authentication, live device acknowledgments, and Herdr restoration passed. Visual navigation, physical keys/LED appearance, and EDGE touch/hotplug remain unconfirmed.
-- Review workers and PR/check status are recorded in the local publication ledger until verified complete.
+- PRs: Xeneon #14 to `main`; Micro #4 to `herdr-current-compat` (leave #3 open); T3 #2 to the dedicated `device-integration` baseline `80a2351f` (leave fork `main` unchanged).
+- Review gates: independent Codex xhigh reviews in progress. Full Xeneon checks pass, including an idle-stream heartbeat regression proven to fail without the heartbeat; T3 affected checks pass and fork-compatible CI runners are configured. Exact-head CI and final review resolution remain pending.
