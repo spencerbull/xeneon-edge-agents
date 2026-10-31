@@ -755,39 +755,57 @@ impl DaemonRuntime {
         heartbeat.tick().await;
 
         let (results, mut action_results) = mpsc::channel(1);
-        let commands = async move {
-            while let Some(line) = lines.next_line().await? {
+        let (stopping, mut stopped) = watch::channel(());
+        let mut commands = Box::pin(async move {
+            loop {
+                let line = tokio::select! {
+                    biased;
+                    _ = stopped.changed() => return Ok::<(), anyhow::Error>(()),
+                    line = lines.next_line() => line?,
+                };
+                let Some(line) = line else {
+                    return Ok(());
+                };
+                // Once started, an action must settle before disconnect cleanup can inspect its ownership.
                 let result = self.process_command(&line, client_id).await;
-                results
-                    .send(result)
-                    .await
-                    .context("client response writer closed")?;
+                if results.send(result).await.is_err() {
+                    return Ok(());
+                }
             }
-            Ok::<(), anyhow::Error>(())
-        };
-        tokio::pin!(commands);
-        loop {
-            tokio::select! {
-                result = &mut commands => return result,
-                changed = updates.changed() => {
-                    changed.context("snapshot publisher closed")?;
-                    let next = updates.borrow_and_update().clone();
-                    write.write_all(next.as_bytes()).await?;
-                    write.write_all(b"\n").await?;
-                    write.flush().await?;
-                    heartbeat.reset();
+        });
+        let mut writer = Box::pin(async move {
+            loop {
+                tokio::select! {
+                    changed = updates.changed() => {
+                        changed.context("snapshot publisher closed")?;
+                        let next = updates.borrow_and_update().clone();
+                        write.write_all(next.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                        heartbeat.reset();
+                    }
+                    _ = heartbeat.tick() => {
+                        let current = updates.borrow().clone();
+                        write.write_all(current.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                    }
+                    result = action_results.recv() => {
+                        let Some(result) = result else { return Ok::<(), anyhow::Error>(()); };
+                        write.write_all(serde_json::to_string(&ServerMessage::ActionResult { result })?.as_bytes()).await?;
+                        write.write_all(b"\n").await?;
+                        write.flush().await?;
+                    }
                 }
-                _ = heartbeat.tick() => {
-                    let current = updates.borrow().clone();
-                    write.write_all(current.as_bytes()).await?;
-                    write.write_all(b"\n").await?;
-                    write.flush().await?;
-                }
-                Some(result) = action_results.recv() => {
-                    write.write_all(serde_json::to_string(&ServerMessage::ActionResult { result })?.as_bytes()).await?;
-                    write.write_all(b"\n").await?;
-                    write.flush().await?;
-                }
+            }
+        });
+        tokio::select! {
+            result = &mut commands => result.and(writer.await),
+            result = &mut writer => {
+                // Closing the receiver unblocks a producer waiting to enqueue its final response.
+                drop(writer);
+                let _ = stopping.send(());
+                result.and(commands.await)
             }
         }
     }
@@ -1697,6 +1715,112 @@ mod tests {
         assert_eq!(result["ok"], true);
         write.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn half_closed_command_batches_receive_every_action_result() {
+        for count in [1, 3] {
+            let (runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+            let (client, server) = UnixStream::pair().unwrap();
+            let task =
+                tokio::spawn(
+                    async move { runtime.handle_client_inner(server, Uuid::new_v4()).await },
+                );
+            let (read, mut write) = client.into_split();
+            for index in 0..count {
+                let line = format!(
+                    "{{\"schema_version\":1,\"request_id\":\"half-{index}\",\"sequence\":0,\"action\":\"open\",\"agent_id\":\"missing\"}}\n"
+                );
+                write.write_all(line.as_bytes()).await.unwrap();
+            }
+            write.shutdown().await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            let replies = tokio::time::timeout(Duration::from_secs(3), async {
+                let mut replies = Vec::new();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if frame["type"] == "action_result" {
+                        replies.push(frame["request_id"].as_str().unwrap().to_owned());
+                    }
+                }
+                replies
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                replies,
+                (0..count)
+                    .map(|index| format!("half-{index}"))
+                    .collect::<Vec<_>>(),
+                "input EOF discarded an executed command reply"
+            );
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_settles_an_inflight_voice_start_before_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("voice-state");
+        let marker_path = temp.path().join("dictation-active");
+        let log_path = temp.path().join("voice-log");
+        let socket_path = temp.path().join("voice.sock");
+        let binary = temp.path().join("voxtype");
+        fs::write(&state_path, "idle").unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        fs::write(&binary, format!("#!/usr/bin/python3\nimport os,socket,sys\nwith open({},'a') as f: f.write(' '.join(sys.argv[1:])+'\\n')\nif sys.argv[2]=='start':\n s=socket.socket(socket.AF_UNIX)\n s.connect({})\n s.sendall((str(os.getpid())+'\\n').encode())\n s.recv(1)\n", serde_json::to_string(&log_path.to_string_lossy()).unwrap(), serde_json::to_string(&socket_path.to_string_lossy()).unwrap())).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut runtime, _) = DaemonRuntime::new(Config::default()).unwrap();
+        runtime.voice = Arc::new(Mutex::new(VoiceController::new(
+            binary,
+            state_path,
+            marker_path.clone(),
+            "owner",
+        )));
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let other = runtime.clone();
+        let mut task = tokio::spawn(async move { other.handle_client(server).await });
+        client.write_all(b"{\"schema_version\":1,\"request_id\":\"voice-start\",\"sequence\":0,\"action\":\"voice_start\"}\n").await.unwrap();
+        let (native, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut native = BufReader::new(native);
+        let mut pid = String::new();
+        native.read_line(&mut pid).await.unwrap();
+        assert!(marker_path.exists());
+        drop(client);
+        runtime.publish().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut task)
+                .await
+                .is_err(),
+            "disconnect abandoned an in-flight voice start"
+        );
+        native.get_mut().write_all(b"x").await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            !marker_path.exists(),
+            "disconnect orphaned the recording marker"
+        );
+        let state = runtime.state.read().await;
+        assert!(state.voice_client_owner.is_none());
+        assert!(!state.snapshot.voice.owned);
+        assert_eq!(state.snapshot.voice.state, VoiceState::Idle);
+        assert_eq!(
+            fs::read_to_string(log_path).unwrap(),
+            "record start --type --no-auto-submit --no-smart-auto-submit\nrecord cancel\n"
+        );
+        assert!(
+            !Path::new("/proc").join(pid.trim()).exists(),
+            "fake start child was not reaped"
+        );
     }
 
     #[test]
