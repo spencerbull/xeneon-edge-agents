@@ -754,8 +754,21 @@ impl DaemonRuntime {
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         heartbeat.tick().await;
 
+        let (results, mut action_results) = mpsc::channel(1);
+        let commands = async move {
+            while let Some(line) = lines.next_line().await? {
+                let result = self.process_command(&line, client_id).await;
+                results
+                    .send(result)
+                    .await
+                    .context("client response writer closed")?;
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::pin!(commands);
         loop {
             tokio::select! {
+                result = &mut commands => return result,
                 changed = updates.changed() => {
                     changed.context("snapshot publisher closed")?;
                     let next = updates.borrow_and_update().clone();
@@ -770,11 +783,7 @@ impl DaemonRuntime {
                     write.write_all(b"\n").await?;
                     write.flush().await?;
                 }
-                line = lines.next_line() => {
-                    let Some(line) = line? else {
-                        return Ok(());
-                    };
-                    let result = self.process_command(&line, client_id).await;
+                Some(result) = action_results.recv() => {
                     write.write_all(serde_json::to_string(&ServerMessage::ActionResult { result })?.as_bytes()).await?;
                     write.write_all(b"\n").await?;
                     write.flush().await?;
@@ -1609,6 +1618,83 @@ mod tests {
                 .unwrap();
             assert_eq!(heartbeat, initial);
         }
+        write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_activation_does_not_block_snapshot_heartbeats() {
+        let temp = tempfile::tempdir().unwrap();
+        let userdata = temp.path().join("userdata");
+        fs::create_dir(&userdata).unwrap();
+        fs::write(userdata.join("environment-id"), "env").unwrap();
+        let native_socket = temp.path().join("native.sock");
+        let listener = tokio::net::UnixListener::bind(&native_socket).unwrap();
+        let binary = temp.path().join("t3");
+        fs::write(&binary, format!("#!/usr/bin/python3\nimport socket\ns=socket.socket(socket.AF_UNIX)\ns.connect({})\ns.sendall(b'ready')\ns.recv(1)\n", serde_json::to_string(&native_socket.to_string_lossy()).unwrap())).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let (runtime, _) = DaemonRuntime::new(Config {
+            agent_backend: AgentBackend::T3code,
+            t3code: crate::config::T3codeConfig {
+                home: Some(temp.path().into()),
+                app_bin: Some(binary),
+                ..Default::default()
+            },
+            ..Config::default()
+        })
+        .unwrap();
+        {
+            let mut state = runtime.state.write().await;
+            state.snapshot.sequence = 3;
+            let mut agent = test_agent("thread", AgentStatus::Idle, false);
+            agent.actions.open = true;
+            state.snapshot.agents = vec![agent];
+            state
+                .targets
+                .insert("thread".into(), t3code_target(1, false));
+        }
+        let (client, server) = UnixStream::pair().unwrap();
+        let task =
+            tokio::spawn(async move { runtime.handle_client_inner(server, Uuid::new_v4()).await });
+        let (read, mut write) = client.into_split();
+        let mut lines = BufReader::new(read).lines();
+        lines.next_line().await.unwrap().unwrap();
+        write.write_all(b"{\"schema_version\":1,\"request_id\":\"slow-open\",\"sequence\":3,\"action\":\"open\",\"agent_id\":\"thread\"}\n").await.unwrap();
+        let (mut native, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ready = [0; 5];
+        tokio::io::AsyncReadExt::read_exact(&mut native, &mut ready)
+            .await
+            .unwrap();
+        tokio::time::pause();
+        for _ in 0..6 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let frame = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("native action blocked transport heartbeat")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&frame).unwrap()["type"],
+                "snapshot"
+            );
+        }
+        tokio::time::resume();
+        native.write_all(b"x").await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if frame["type"] == "action_result" {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["ok"], true);
         write.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
     }

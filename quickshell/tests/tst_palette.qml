@@ -39,6 +39,36 @@ TestCase {
         theme: semanticTheme
     }
 
+    MicroDrawer {
+        id: microDrawer
+        width: 2560
+        height: 720
+        reducedMotion: true
+    }
+
+    function test_microRingIncludesOffSlotAttentionAndVoice() {
+        var roster = []
+        for (var i = 0; i < 6; i += 1)
+            roster.push({"id": String(i), "status": "working", "review_ready": false})
+        microDrawer.agents = roster
+        microDrawer.voice = {"state": "idle"}
+        compare(microDrawer.ringState(), "working")
+        roster.push({"id": "seventh", "status": "done", "review_ready": true})
+        microDrawer.agents = roster.slice()
+        compare(microDrawer.ringState(), "review")
+        for (var voice of ["recording", "processing", "error"]) {
+            microDrawer.voice = {"state": voice}
+            compare(microDrawer.ringState(), voice)
+        }
+        microDrawer.micro = {"controlled": true, "slots": ["5", "0"]}
+        compare(microDrawer.agentForSlot(0).id, "5")
+        compare(microDrawer.agentForSlot(1).id, "0")
+        compare(microDrawer.agentForSlot(2), null)
+        microDrawer.agents = []
+        microDrawer.voice = {"state": "idle"}
+        microDrawer.micro = {"connected": false}
+    }
+
     function agent(status, reviewReady) {
         return {
             "status": status,

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import runpy
 import socket
@@ -19,6 +20,9 @@ class MicroBridgeTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
+        environment = patch.dict(os.environ, {"XDG_RUNTIME_DIR": self.directory.name})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.owner = Mock(marker=Path(self.directory.name) / "restore-herdr")
         self.bridge = Bridge("portal", "micro", Path(self.directory.name), self.owner)
         self.portal, self.peer = socket.socketpair()
@@ -110,6 +114,58 @@ class MicroBridgeTests(unittest.TestCase):
             self.bridge.micro_event({"id": "ring-error", "ok": False})
         self.assertFalse(self.bridge.status_path.exists())
 
+    def test_full_roster_and_voice_drive_ring_with_both_acknowledgements(self):
+        micro, peer = socket.socketpair()
+        self.addCleanup(micro.close)
+        self.addCleanup(peer.close)
+        reader = peer.makefile("rb")
+        self.addCleanup(reader.close)
+        self.bridge.micro = micro
+        self.bridge.selector.register(micro, 1)
+        self.snapshot["agents"] = [agent(str(i)) for i in range(6)]
+        self.bridge.acknowledged_slots = []
+        previous_ring = None
+        for voice, outside_review, expected_color in [
+                ("idle", False, 0x0080FF), ("idle", True, 0x00FF00),
+                ("recording", True, 0x2E8B57), ("processing", True, 0xFFFFFF),
+                ("error", True, 0xFF2020)]:
+            self.snapshot["agents"] = self.snapshot["agents"][:6] + ([agent("seventh", "done", True)] if outside_review else [])
+            self.snapshot["voice"] = {"state": voice}
+            self.bridge.portal_event(self.snapshot)
+            self.bridge.update()
+            peer.settimeout(0.2)
+            slots, ring = json.loads(reader.readline()), json.loads(reader.readline())
+            self.assertEqual(ring["ambient"]["color"], expected_color)
+            if previous_ring:
+                self.bridge.micro_event({"id": previous_ring, "ok": True})
+                self.assertEqual(self.bridge.ring_request, ring["id"])
+            self.bridge.micro_event({"id": slots["id"], "ok": True})
+            self.event("AG00")
+            with self.assertRaises(TimeoutError): self.read()
+            self.bridge.micro_event({"id": ring["id"], "ok": True})
+            self.assertEqual(json.loads(self.bridge.status_path.read_text())["slots"], [str(i) for i in range(6)])
+            previous_ring = ring["id"]
+        self.bridge.release()
+
+    def test_pending_open_uses_native_deadline_but_dead_transport_releases_ownership(self):
+        self.bridge.micro = Mock()
+        self.bridge.disconnect = Mock()
+        self.bridge.send = Mock()
+        with patch.dict(Bridge.update.__globals__, time=Mock(monotonic=Mock(return_value=100), time=time.time)):
+            self.bridge.received = 100
+            self.bridge.pending = ("request", "one", 85)
+            self.bridge.update()
+            self.assertIsNotNone(self.bridge.pending)
+            self.bridge.pending = ("request", "one", 74)
+            self.bridge.update()
+            self.assertIsNone(self.bridge.pending)
+            self.bridge.pending = ("request", "one", 99)
+            self.bridge.received = 95
+            self.bridge.update()
+            self.assertIsNone(self.bridge.micro)
+            self.assertIsNone(self.bridge.pending)
+            self.owner.restore.assert_called_once()
+
     def test_empty_and_removed_slots_are_cleared(self):
         frame = MODULE["lights"]([agent("one", "blocked")])
         self.assertEqual(len(frame), 6)
@@ -127,14 +183,21 @@ class MicroBridgeTests(unittest.TestCase):
         owner.command.assert_called_once_with("start", "herdr-bridge.service")
         self.assertFalse(owner.marker.exists())
 
-    def test_shared_per_device_lock_prevents_a_second_integration(self):
-        hub = Path(self.directory.name) / "microd.sock"
+    def test_socket_aliases_and_daemon_directory_cleanup_preserve_controller_exclusion(self):
+        hub = Path(self.directory.name) / "microd/microd.sock"
         first = HerdrOwner(Path(self.directory.name), micro_path=hub)
-        second = HerdrOwner(Path(self.directory.name), micro_path=hub)
+        hub.parent.mkdir(parents=True, exist_ok=True)
+        alias = Path(self.directory.name) / "alias.sock"
+        alias.symlink_to(hub)
+        second = HerdrOwner(Path(self.directory.name), micro_path=alias)
         first.command = second.command = Mock(return_value=3)
         with patch("pathlib.Path.iterdir", return_value=[]):
             first.acquire()
-            self.assertTrue(hub.with_suffix(".integration.lock").exists())
+            with self.assertRaises(BlockingIOError):
+                second.acquire()
+            self.assertTrue((Path(self.directory.name) / "microd-controller/ownership.lock").exists())
+            hub.parent.rmdir()
+            hub.parent.mkdir()
             with self.assertRaises(BlockingIOError):
                 second.acquire()
             first.restore()

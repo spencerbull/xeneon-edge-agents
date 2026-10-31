@@ -20,16 +20,26 @@ COLORS = {"blocked": 0xFFAA00, "review": 0x00FF00, "working": 0x0080FF,
 
 
 def effective_state(agent):
-    status = agent.get("status", "unknown")
-    if status in ("done", "idle"):
-        return "review" if agent.get("review_ready") else "idle"
-    return status if status in COLORS else "unknown"
+    status = str(agent.get("status", "unknown")).lower()
+    if status in ("blocked", "working"):
+        return status
+    if agent.get("review_ready") is True:
+        return "review"
+    return "idle" if status in ("done", "idle") else "unknown"
 
 
 def lights(agents):
     return [{"slot": i, "color": COLORS[effective_state(agents[i])] if i < len(agents) else 0,
              "effect": "breath" if i < len(agents) and effective_state(agents[i]) == "working" else "solid",
              "speed": 50} for i in range(SLOTS)]
+
+
+def ring_state(snapshot):
+    voice = snapshot.get("voice", {}).get("state")
+    if voice in ("recording", "processing", "error"):
+        return voice
+    states = [effective_state(agent) for agent in snapshot.get("agents", [])]
+    return next((state for state in ("blocked", "review", "working") if state in states), "idle")
 
 
 def choose_agent(event, agents, selected):
@@ -73,7 +83,10 @@ class HerdrOwner:
             if self.command("stop", "herdr-bridge.service") != 0:
                 raise RuntimeError("could not stop the Herdr bridge")
         if self.micro_path is not None and self.lock_file is None:
-            path = self.micro_path.with_suffix(".integration.lock")
+            runtime = Path(os.environ.get("XDG_RUNTIME_DIR", str(Path.home() / ".cache")))
+            directory = runtime / "microd-controller"
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = directory / "ownership.lock"
             fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             self.lock_file = os.fdopen(fd, "a")
             try:
@@ -171,6 +184,8 @@ class Bridge:
         temporary.replace(self.status_path)
 
     def update(self):
+        if self.pending and time.monotonic() - self.pending[2] > 25:
+            self.pending = None  # Native activation is bounded at 20s; never replay an uncertain action.
         if not self.is_t3() or time.monotonic() - self.received > 4:
             if self.micro or self.owner.marker.exists():
                 self.release()
@@ -185,17 +200,16 @@ class Bridge:
         if self.selected not in ids:
             self.selected = next((a["id"] for a in agents if a.get("focused")), None)
         frame = lights(agents)
-        signature = (json.dumps(frame), tuple(ids), self.snapshot.get("voice", {}).get("state"))
+        state = ring_state(self.snapshot)
+        signature = (json.dumps(frame), tuple(ids), state)
         if signature != self.frame:
             request = "lights-" + uuid.uuid4().hex
             self.send(self.micro, {"id": request, "cmd": "lights", "lights": frame})
-            states = [effective_state(a) for a in agents]
-            state = next((s for s in ("blocked", "review", "working") if s in states), "idle")
             self.ring_request = "ring-" + uuid.uuid4().hex
             self.led_sent_at = time.monotonic()
             self.send(self.micro, {"id": self.ring_request, "cmd": "lighting_config",
                                   "ambient": {"effect": "solid", "brightness": 0.5,
-                                              "color": COLORS[state] if state != "idle" else 0},
+                                              "color": {"recording": 0x2E8B57, "processing": 0xFFFFFF, "error": 0xFF2020}.get(state, COLORS.get(state, 0)) if state != "idle" else 0},
                                   "keys": {"effect": "off", "brightness": 0, "color": 0}})
             self.lights_request = (request, ids)
             self.frame = signature
@@ -247,8 +261,6 @@ class Bridge:
                     if self.portal is None:
                         self.portal = self.connect(self.portal_path)
                     self.update()
-                    if self.pending and time.monotonic() - self.pending[2] > 10:
-                        self.pending = None  # Never replay an uncertain action.
                     for key, _ in self.selector.select(0.5):
                         data = key.fileobj.recv(65536)
                         if not data:

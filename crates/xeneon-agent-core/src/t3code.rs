@@ -620,7 +620,7 @@ fn read_v2_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
          json_extract(t.payload_json,'$.settledAt'), json_extract(t.payload_json,'$.snoozedUntil'),
          t.created_at, COALESCE(t.provider_instance_id,t.default_provider), p.title, p.workspace_root,
          r.status, r.requested_at, r.completed_at,
-         EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND a.status IN ('preparing','starting','running','waiting'))
+         EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND (a.status IN ('preparing','starting','running','waiting') OR (a.status='queued' AND json_extract(a.payload_json,'$.queueHeld') IS NOT 1)))
           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting')) AS active_work,
          json_extract(t.payload_json,'$.lastVisitedAt'), json_extract(t.payload_json,'$.settledOverride')
          FROM orchestration_v2_projection_threads t
@@ -632,7 +632,7 @@ fn read_v2_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
          WHERE t.deleted_at IS NULL AND t.archived_at IS NULL AND (p.project_id IS NULL OR p.deleted_at IS NULL)
          AND (json_extract(t.payload_json,'$.settledOverride') IS NOT 'settled'
            OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q WHERE q.thread_id=t.thread_id AND q.status='pending')
-           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND a.status IN ('preparing','starting','running','waiting'))
+           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND (a.status IN ('preparing','starting','running','waiting') OR (a.status='queued' AND json_extract(a.payload_json,'$.queueHeld') IS NOT 1)))
            OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting')))
          AND (json_extract(t.payload_json,'$.lineage.relationshipToParent') IS NOT 'subagent' OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q WHERE q.thread_id=t.thread_id AND q.status='pending'))
          ORDER BY 5 DESC, active_work DESC, t.updated_at DESC, t.thread_id LIMIT ?1"
@@ -663,6 +663,7 @@ fn read_v2_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
             session_status: Some(if active_work { "running" } else { "ready" }.into()),
             last_turn: state.map(|state| TurnRow {
                 state: match state.as_str() {
+                    "queued" => "pending".into(),
                     "preparing" | "starting" | "waiting" => "running".into(),
                     "failed" => "error".into(),
                     "cancelled" => "interrupted".into(),
@@ -1056,6 +1057,51 @@ mod tests {
                 .unwrap()
                 .contains("private")
         );
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_runs SET status='queued',payload_json='{}'",
+                [],
+            )
+            .unwrap();
+        for payload in [
+            "{}",
+            r#"{"settledOverride":"settled","settledAt":"2026-09-11T12:06:00Z"}"#,
+            r#"{"snoozedUntil":"2099-01-01T00:00:00Z"}"#,
+        ] {
+            current
+                .execute(
+                    "UPDATE orchestration_v2_projection_threads SET payload_json=?1",
+                    [payload],
+                )
+                .unwrap();
+            assert_eq!(
+                fixture.client.observe("epoch", NOW_MS).agents[0].status,
+                AgentStatus::Working
+            );
+        }
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_runs SET payload_json='{\"queueHeld\":true}'",
+                [],
+            )
+            .unwrap();
+        assert!(fixture.client.observe("epoch", NOW_MS).agents.is_empty());
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_threads SET payload_json='{}'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).agents[0].status,
+            AgentStatus::Idle
+        );
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_runs SET status='running',payload_json='{}'",
+                [],
+            )
+            .unwrap();
         current.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES('current','pending')",[]).unwrap();
         assert_eq!(
             fixture.client.observe("epoch", NOW_MS).agents[0].status,

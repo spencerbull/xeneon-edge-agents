@@ -293,7 +293,7 @@ it never falls back to project activation or creates a thread.
 
 The installer stages `xeneon-micro-bridge.service` without enabling it. Before
 opting in, install the companion Herdr bridge ownership-lock update. Both
-controllers lock `microd.integration.lock` beside the Micro socket. Then:
+controllers use `$XDG_RUNTIME_DIR/microd-controller/ownership.lock` (or `~/.cache/microd-controller/ownership.lock` without a runtime directory), independent of socket aliases and daemon restarts. Stop both controllers before upgrading an older adjacent-lock installation, update both consumers together, then:
 
 ```sh
 touch ~/.config/xeneon-edge-agents/micro-control.enabled
