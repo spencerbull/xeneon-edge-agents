@@ -478,3 +478,23 @@ verification, installation, and the live handoff.
   (accepted issue and maintainer approval when required); do not replace the
   stable Herdr install during physical commissioning without a separate
   reviewed upgrade.
+
+
+## Current T3 / Micro integration
+
+Goal: current metadata-only T3 roster, exact thread navigation, matching six-slot display/pad assignments, exclusive action/LED ownership.
+
+Allowed: isolated implementation, local checks, reversible user-owned installation and service transitions, and maintainer-authorized commits/pushes to owned forks. Forbidden: merges, real provider turns, prompt/credential content in the portal, active T3 host replacement.
+
+- Xeneon worktree: `xeneon-edge-agents-worktrees/t3-micro-integration`, branch `t3-micro-integration`, base `6c0bcc5`; original root clean.
+- Micro worktree: `/home/sbull/Work/micro-controller-ownership`, branch `micro-controller-ownership`, base `ea86696`. Original compatibility worktree and its preexisting untracked TODO are preserved.
+- T3 worktree: `/home/sbull/src/github.com/pingdotgg/t3code`, branch `t3-device-interfaces`, base `80a2351f`; original clean checkout now contains only this work.
+- Workers completed: `/root/t3_contract_design` (read-only schema/navigation evidence), `/root/t3_device_interfaces` (T3 implementation), `/root/review_xeneon_micro` and `/root/review_t3_interfaces` (initial findings), `/root/review_final_integration` (service/feed findings), `/root/review_service_boundary` (no substantive findings after repairs). Parent verified findings and owns retained worktrees/evidence. No worker process or test app is left running.
+- Cross-project delegate_task rejected the project mismatch; native named worker and direct isolated implementation were used.
+- Completed: V2 fallback, metadata-file ingestion, exact web/native routing, shared slot/ACK guards, separate authenticated T3 helper, cooperative Herdr lock, reversible installation, focused/broad checks, independent reviews, isolated integration, live device acknowledgments, and Herdr restoration.
+- Current runtime: T3 selected; microd/agentd/Micro bridge active with zero restarts; Herdr bridge and absent-display portal inactive. Original `--voxtype` survives restoration.
+- Evidence: `/home/sbull/Work/codex-micro-t3-evidence-20261031/REPORT.md`, JSON results, patches, installation list, and backups.
+- Remaining activation: rebuild/install the T3 branch for its native exact-thread API and metadata feed. The current host remains on its nightly, using the installed V2/web fallback.
+- Remaining physical checks: visible navigation, pad key/LED appearance, EDGE touch/hotplug. Cua returned no windows for the compositor-confirmed preview; no visible-GUI claim is made.
+
+- Publication: maintainer authorized committing and pushing the three reviewed branches. No PR or merge was requested.

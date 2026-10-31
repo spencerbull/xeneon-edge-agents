@@ -7,6 +7,7 @@ fmt:
     cargo fmt --all -- --check
 
 rust:
+    PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_*.py' -v
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
 

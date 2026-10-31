@@ -198,7 +198,10 @@ impl DaemonRuntime {
         let (invalidations, invalidation_rx) = mpsc::channel(64);
         let desktop = DesktopController::new(config.desktop.clone());
         let voice = VoiceController::from_config(&config, snapshot.daemon_epoch.clone())?;
-        let t3code = T3codeClient::from_config(config.t3code.home.as_deref())?;
+        let t3code = T3codeClient::from_config(
+            config.t3code.home.as_deref(),
+            config.t3code.status_file.as_deref(),
+        )?;
         Ok((
             Self {
                 herdr: HerdrClient::new(config.herdr_bin.clone()),
@@ -914,9 +917,7 @@ impl DaemonRuntime {
 
         let herdr_target = match target {
             AgentTarget::Herdr(target) => target,
-            AgentTarget::T3code(_) => {
-                // T3 Code exposes no public thread-focus API on Linux; the
-                // only agent action is activating its exact desktop window.
+            AgentTarget::T3code(target) => {
                 if command.action != ActionKind::Open {
                     return action_error(
                         &command.request_id,
@@ -924,11 +925,18 @@ impl DaemonRuntime {
                         "action is not available for T3 Code threads",
                     );
                 }
-                return match self.desktop.focus_existing(DesktopApp::T3code).await {
+                let result = if let Some(bin) = self.config.t3code.app_bin.as_deref() {
+                    self.t3code.open_native(bin, &target.thread_id).await
+                } else {
+                    match self.t3code.thread_url(&target.thread_id) {
+                        Ok(url) => self.desktop.open_thread_url(&url).await,
+                        Err(error) => Err(error),
+                    }
+                };
+                return match result {
                     Ok(()) => {
-                        self.acknowledge_review_ready(&agent.id).await;
-                        let _ = self.invalidations.try_send(t3code::SESSION_NAME.to_owned());
-                        action_ok(&command.request_id, "action_completed")
+                        // Dispatch does not prove a human visited the target. T3's own visit/settle metadata acknowledges review.
+                        action_ok(&command.request_id, "thread_open_requested")
                     }
                     Err(error) => {
                         tracing::warn!(%error, "T3 Code window activation failed");
@@ -1475,6 +1483,15 @@ fn bind_socket(path: &Path) -> Result<UnixListener> {
 
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Ok(_) => bail!("daemon socket is already active"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
             fs::remove_file(path).with_context(|| format!("removing stale {}", path.display()))?;
         }
         Ok(_) => bail!(
@@ -1546,7 +1563,7 @@ fn voice_action_error(request_id: &str, error: VoiceActionError) -> ActionResult
     action_error(request_id, code, message)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
@@ -1577,7 +1594,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("agentd.sock");
         drop(StdUnixListener::bind(&path).unwrap());
+        // Other tests fork subprocesses; an inherited CLOEXEC descriptor can briefly outlive our close.
+        for _ in 0..1000 {
+            if std::os::unix::net::UnixStream::connect(&path).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let listener = bind_socket(&path).unwrap();
+        assert!(bind_socket(&path).is_err());
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
         drop(listener);
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);

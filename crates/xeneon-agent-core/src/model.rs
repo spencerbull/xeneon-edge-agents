@@ -216,6 +216,10 @@ pub struct AiUsageSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MicroSnapshot {
     pub connected: bool,
+    #[serde(default)]
+    pub controlled: bool,
+    #[serde(default)]
+    pub slots: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

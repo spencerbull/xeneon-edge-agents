@@ -12,7 +12,8 @@ active; Quickshell is presentation-only.
 - Never send arbitrary terminal text or keys from QML.
 - Never retry a non-idempotent agent action.
 - Never show terminal or prompt contents on the portal.
-- Never write to T3 Code state, and never read its messages, activities,
+- Never directly write T3 Code orchestration state. Its own host CLI may
+  manage its normal authentication session. Never read T3 messages, activities,
   checkpoints, secrets, or provider payloads; only the bounded thread,
   session, turn, and project projections are inputs.
 - Never fall back to the primary display when the XENEON identity is absent or
@@ -34,8 +35,19 @@ active; Quickshell is presentation-only.
   modules. `hyprmoncfg` continues to own `monitors.lua`.
 - Herdr changes live in its own repository and must use the public socket/API
   boundary.
-- T3 Code has no public local thread-focus API on Linux; T3 mode activates only
-  its exact desktop window and offers no zoom, approve, or interrupt actions.
+- T3 mode opens the exact environment/thread URL on the installed nightly.
+  A T3 build with `t3 app --thread` can be selected through `t3code.app_bin`.
+  Never substitute project activation: it can create a new thread. Zoom,
+  approve, and interrupt remain unavailable.
+- The opt-in Micro bridge consumes the daemon's ordered roster and typed
+  actions. It must share the per-device integration flock with Herdr, restore
+  only a previously active Herdr service, and wait for slot and ring ACKs
+  before claiming control or routing a changed slot.
+- `t3code.status_file` opts into the separate metadata-only T3 helper. Only
+  the T3-owned host CLI may manage its normal authentication session; the
+  hardware daemon keeps T3 data read-only. Without the file, the
+  read-only V2 fallback extracts only allowlisted scalar projection fields;
+  it cannot infer all detached background work or silent compaction states.
 
 ## Working loop
 

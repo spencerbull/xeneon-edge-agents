@@ -14,6 +14,7 @@ use std::{
     collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 
@@ -41,6 +42,7 @@ const MAX_LABEL_CHARS: usize = 96;
 pub struct T3codeClient {
     userdata: PathBuf,
     expected_comm: Option<String>,
+    status_file: Option<PathBuf>,
 }
 
 /// Private action-routing state for one T3 Code thread card.
@@ -94,6 +96,8 @@ struct ThreadRow {
     project_title: Option<String>,
     workspace_root: Option<String>,
     last_turn: Option<TurnRow>,
+    active_work: bool,
+    visited_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -112,21 +116,163 @@ struct Classification {
     acknowledged: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct StatusSnapshot {
+    schema_version: u32,
+    environment_id: String,
+    generated_at_ms: u64,
+    threads: Vec<StatusThread>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StatusThread {
+    thread_id: String,
+    title: String,
+    project_title: String,
+    workspace_root: String,
+    branch: Option<String>,
+    worktree_path: Option<String>,
+    provider: String,
+    status: String,
+    settled: bool,
+    snoozed: bool,
+    pending_input: bool,
+    background_work: bool,
+    updated_at: String,
+    latest_run_completed_at: Option<String>,
+    last_visited_at: Option<String>,
+}
+
+impl StatusSnapshot {
+    fn rows(&self) -> Vec<ThreadRow> {
+        self.threads
+            .iter()
+            .map(|thread| {
+                let active = thread.background_work
+                    || matches!(
+                        thread.status.as_str(),
+                        "working" | "running" | "preparing" | "starting" | "waiting" | "queued"
+                    );
+                ThreadRow {
+                    thread_id: thread.thread_id.clone(),
+                    title: thread.title.clone(),
+                    project_title: Some(thread.project_title.clone()),
+                    workspace_root: Some(thread.workspace_root.clone()),
+                    branch: thread.branch.clone(),
+                    worktree_path: thread.worktree_path.clone(),
+                    provider_name: Some(thread.provider.clone()),
+                    pending_user_input_count: i64::from(thread.pending_input),
+                    active_work: active,
+                    created_at: thread.updated_at.clone(),
+                    visited_at: thread.last_visited_at.clone(),
+                    settled_at: thread.settled.then(|| thread.updated_at.clone()),
+                    snoozed_until: thread.snoozed.then(|| "2999-01-01T00:00:00Z".into()),
+                    session_status: Some("ready".into()),
+                    last_turn: if thread.status == "idle"
+                        && thread.latest_run_completed_at.is_none()
+                    {
+                        None
+                    } else {
+                        Some(TurnRow {
+                            state: match thread.status.as_str() {
+                                "failed" | "error" => "error",
+                                "blocked" => "error",
+                                "working" | "running" | "preparing" | "starting" | "waiting" => {
+                                    "running"
+                                }
+                                "completed" | "idle" | "done" => "completed",
+                                "interrupted" | "cancelled" => "interrupted",
+                                "queued" => "pending",
+                                _ => "unknown",
+                            }
+                            .into(),
+                            requested_at: thread.updated_at.clone(),
+                            started_at: None,
+                            completed_at: thread.latest_run_completed_at.clone(),
+                        })
+                    },
+                    ..ThreadRow::default()
+                }
+            })
+            .collect()
+    }
+}
+
 impl T3codeClient {
+    pub async fn open_native(&self, bin: &Path, thread_id: &str) -> Result<()> {
+        let environment = fs::read_to_string(self.userdata.join("environment-id"))?;
+        let mut child = tokio::process::Command::new(bin)
+            .args([
+                "app",
+                "--thread",
+                thread_id,
+                "--environment",
+                environment.trim(),
+                "--base-dir",
+            ])
+            .arg(
+                self.userdata
+                    .parent()
+                    .ok_or_else(|| anyhow!("T3 home is missing"))?,
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let status = tokio::time::timeout(Duration::from_secs(20), child.wait()).await??;
+        anyhow::ensure!(status.success(), "native T3 thread activation failed");
+        Ok(())
+    }
+    fn read_status_feed(&self, now_ms: u64) -> Result<StatusSnapshot> {
+        let path = self
+            .status_file
+            .as_ref()
+            .ok_or_else(|| anyhow!("T3 feed is not configured"))?;
+        anyhow::ensure!(
+            fs::metadata(path)?.len() <= 4_194_304,
+            "T3 metadata frame is too large"
+        );
+        let feed: StatusSnapshot =
+            serde_json::from_reader(std::io::Read::take(fs::File::open(path)?, 4_194_305))?;
+        let environment = fs::read_to_string(self.userdata.join("environment-id"))?;
+        anyhow::ensure!(
+            feed.schema_version == 1
+                && feed.threads.len() <= MAX_ROSTER
+                && feed.environment_id == environment.trim()
+                && now_ms.abs_diff(feed.generated_at_ms) < 10_000,
+            "invalid or stale T3 feed"
+        );
+        Ok(feed)
+    }
+
+    pub fn thread_url(&self, thread_id: &str) -> Result<String> {
+        let runtime: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(self.runtime_path())?)?;
+        let origin = runtime
+            .get("origin")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("T3 runtime has no origin"))?;
+        let environment = fs::read_to_string(self.userdata.join("environment-id"))?;
+        thread_url(origin, environment.trim(), thread_id)
+    }
     /// Builds a client for a T3 Code data directory (the parent of `userdata`).
     pub fn new(home: impl Into<PathBuf>) -> Self {
         Self {
             userdata: home.into().join("userdata"),
             expected_comm: Some("t3code".into()),
+            status_file: None,
         }
     }
 
-    pub fn from_config(configured_home: Option<&Path>) -> Result<Self> {
+    pub fn from_config(configured_home: Option<&Path>, status_file: Option<&Path>) -> Result<Self> {
         let home = match configured_home {
             Some(home) => home.to_path_buf(),
             None => default_home()?,
         };
-        Ok(Self::new(home))
+        let mut client = Self::new(home);
+        client.status_file = status_file.map(Path::to_path_buf);
+        Ok(client)
     }
 
     /// Tests run without a T3 Code server process, so they observe their own
@@ -138,7 +284,12 @@ impl T3codeClient {
     }
 
     fn database_path(&self) -> PathBuf {
-        self.userdata.join("state.sqlite")
+        let current = self.userdata.join("statev2.sqlite");
+        if current.exists() {
+            current
+        } else {
+            self.userdata.join("state.sqlite")
+        }
     }
 
     fn runtime_path(&self) -> PathBuf {
@@ -177,6 +328,12 @@ impl T3codeClient {
 
     /// Cheap change signal: the highest projection sequence T3 Code applied.
     pub fn projection_sequence(&self) -> Result<Option<u64>> {
+        if self.status_file.is_some() {
+            return Ok(self
+                .read_status_feed(crate::runtime::now_ms())
+                .ok()
+                .map(|feed| feed.generated_at_ms));
+        }
         let connection = self.open()?;
         read_projection_sequence(&connection)
     }
@@ -184,6 +341,31 @@ impl T3codeClient {
     /// Observes the live T3 Code roster. Failures are reported as session
     /// states rather than errors so the caller can publish them safely.
     pub fn observe(&self, daemon_epoch: &str, now_ms: u64) -> T3codeObservation {
+        if self.status_file.is_some() {
+            return match self.read_status_feed(now_ms) {
+                Ok(feed) => observation_from_rows(
+                    feed.rows(),
+                    daemon_epoch,
+                    now_ms,
+                    Some(1),
+                    Some(feed.generated_at_ms),
+                ),
+                Err(_) => T3codeObservation {
+                    session: SessionView {
+                        name: SESSION_NAME.into(),
+                        state: SessionState::Stale,
+                        version: None,
+                        protocol: Some(1),
+                        last_sync_ms: Some(now_ms),
+                        message: Some("T3 metadata feed is unavailable".into()),
+                    },
+                    agents: Vec::new(),
+                    targets: HashMap::new(),
+                    projection_sequence: None,
+                },
+            };
+        }
+
         let (protocol, offline_message) = match self.liveness() {
             Liveness::Running(version) => (Some(version), None),
             Liveness::Missing => (None, Some("T3 Code server is not running")),
@@ -265,71 +447,119 @@ impl T3codeClient {
             }
         };
 
-        let mut agents = Vec::new();
-        let mut targets = HashMap::new();
-        for row in rows {
-            if agents.len() >= MAX_ROSTER {
-                break;
-            }
-            let Some(classification) = classify(&row, now_ms) else {
-                continue;
-            };
-            let id = opaque_agent_id(daemon_epoch, &row.thread_id);
-            let source_order = agents.len();
-            targets.insert(
-                id.clone(),
-                T3codeTarget {
-                    thread_id: row.thread_id.clone(),
-                    state_change_seq: classification.state_change_seq,
-                    acknowledged: classification.acknowledged,
-                },
-            );
-            agents.push(AgentView {
-                id,
-                display_name: display_name(&row),
-                agent: agent_kind(row.provider_name.as_deref()),
-                status: classification.status,
-                review_ready: false,
-                launch_pending: classification.launch_pending,
-                workspace: workspace_label(&row),
-                repository: row
-                    .workspace_root
-                    .as_deref()
-                    .and_then(path_leaf)
-                    .map(|leaf| sanitize(leaf, MAX_LABEL_CHARS)),
-                worktree: row
-                    .worktree_path
-                    .as_deref()
-                    .and_then(path_leaf)
-                    .map(|leaf| sanitize(leaf, MAX_LABEL_CHARS)),
-                session: SESSION_NAME.into(),
-                focused: false,
-                observed_for_seconds: 0,
-                state_change_seq: classification.state_change_seq,
-                source_order,
-                actions: AgentActions {
-                    open: true,
-                    zoom: false,
-                    approve: None,
-                    interrupt: None,
-                },
-            });
-        }
-
-        T3codeObservation {
-            session: SessionView {
-                name: SESSION_NAME.into(),
-                state: SessionState::Connected,
-                version: None,
-                protocol,
-                last_sync_ms: Some(now_ms),
-                message: None,
-            },
-            agents,
-            targets,
-            projection_sequence,
-        }
+        observation_from_rows(rows, daemon_epoch, now_ms, protocol, projection_sequence)
     }
+}
+
+fn observation_from_rows(
+    rows: Vec<ThreadRow>,
+    daemon_epoch: &str,
+    now_ms: u64,
+    protocol: Option<u32>,
+    projection_sequence: Option<u64>,
+) -> T3codeObservation {
+    let mut agents = Vec::new();
+    let mut targets = HashMap::new();
+    for row in rows {
+        if agents.len() >= MAX_ROSTER {
+            break;
+        }
+        let Some(classification) = classify(&row, now_ms) else {
+            continue;
+        };
+        let id = opaque_agent_id(daemon_epoch, &row.thread_id);
+        let source_order = agents.len();
+        targets.insert(
+            id.clone(),
+            T3codeTarget {
+                thread_id: row.thread_id.clone(),
+                state_change_seq: classification.state_change_seq,
+                acknowledged: classification.acknowledged,
+            },
+        );
+        agents.push(AgentView {
+            id,
+            display_name: display_name(&row),
+            agent: agent_kind(row.provider_name.as_deref()),
+            status: classification.status,
+            review_ready: false,
+            launch_pending: classification.launch_pending,
+            workspace: workspace_label(&row),
+            repository: row
+                .workspace_root
+                .as_deref()
+                .and_then(path_leaf)
+                .map(|leaf| sanitize(leaf, MAX_LABEL_CHARS)),
+            worktree: row
+                .worktree_path
+                .as_deref()
+                .and_then(path_leaf)
+                .map(|leaf| sanitize(leaf, MAX_LABEL_CHARS)),
+            session: SESSION_NAME.into(),
+            focused: false,
+            observed_for_seconds: 0,
+            state_change_seq: classification.state_change_seq,
+            source_order,
+            actions: AgentActions {
+                open: true,
+                zoom: false,
+                approve: None,
+                interrupt: None,
+            },
+        });
+    }
+
+    T3codeObservation {
+        session: SessionView {
+            name: SESSION_NAME.into(),
+            state: SessionState::Connected,
+            version: None,
+            protocol,
+            last_sync_ms: Some(now_ms),
+            message: None,
+        },
+        agents,
+        targets,
+        projection_sequence,
+    }
+}
+
+fn thread_url(origin: &str, environment: &str, thread_id: &str) -> Result<String> {
+    let address = origin
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow!("T3 local origin must use HTTP"))?;
+    let (host, port) = address
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("T3 local origin has no port"))?;
+    anyhow::ensure!(
+        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+            && port.parse::<u16>().is_ok_and(|port| port != 0),
+        "T3 local origin is not loopback"
+    );
+    anyhow::ensure!(
+        !environment.is_empty()
+            && !thread_id.is_empty()
+            && environment.len() <= 256
+            && thread_id.len() <= 256,
+        "invalid thread target"
+    );
+    fn component(value: &str) -> String {
+        value
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect()
+    }
+    Ok(format!(
+        "{origin}/{}/{}",
+        component(environment),
+        component(thread_id)
+    ))
 }
 
 fn default_home() -> Result<PathBuf> {
@@ -355,6 +585,14 @@ fn process_alive(pid: i64, expected_comm: Option<&str>) -> bool {
 }
 
 fn read_projection_sequence(connection: &Connection) -> Result<Option<u64>> {
+    if is_v2(connection)? {
+        let sequence: Option<i64> = connection.query_row(
+            "SELECT last_sequence FROM orchestration_v2_projection_metadata WHERE projection_name = 'thread-projections' AND schema_version = 2", [], |row| row.get(0)
+        ).optional()?;
+        return sequence
+            .map(|value| u64::try_from(value).context("invalid projection sequence"))
+            .transpose();
+    }
     let sequence: Option<i64> = connection
         .query_row(
             "SELECT MAX(last_applied_sequence) FROM projection_state",
@@ -365,7 +603,88 @@ fn read_projection_sequence(connection: &Connection) -> Result<Option<u64>> {
     Ok(sequence.and_then(|value| u64::try_from(value).ok()))
 }
 
+fn is_v2(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='orchestration_v2_projection_threads')", [], |row| row.get(0))?)
+}
+
+fn read_v2_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
+    anyhow::ensure!(
+        read_projection_sequence(connection)?.is_some(),
+        "unsupported T3 projection schema"
+    );
+    // Extract only allowlisted metadata scalars: complete JSON records contain private content.
+    let mut statement = connection.prepare(
+        "SELECT t.thread_id, t.title, json_extract(t.payload_json,'$.branch'),
+         json_extract(t.payload_json,'$.worktreePath'),
+         EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q WHERE q.thread_id=t.thread_id AND q.status='pending'),
+         json_extract(t.payload_json,'$.settledAt'), json_extract(t.payload_json,'$.snoozedUntil'),
+         t.created_at, COALESCE(t.provider_instance_id,t.default_provider), p.title, p.workspace_root,
+         r.status, r.requested_at, r.completed_at,
+         EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND a.status IN ('preparing','starting','running','waiting'))
+          OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting')) AS active_work,
+         json_extract(t.payload_json,'$.lastVisitedAt'), json_extract(t.payload_json,'$.settledOverride')
+         FROM orchestration_v2_projection_threads t
+         LEFT JOIN projection_projects p ON p.project_id=t.project_id
+         LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=(
+          SELECT candidate.run_id FROM orchestration_v2_projection_runs candidate WHERE candidate.thread_id=t.thread_id
+          AND NOT(candidate.status='queued' AND json_extract(candidate.payload_json,'$.queueHeld') IS 1)
+          ORDER BY candidate.ordinal DESC,candidate.run_id DESC LIMIT 1)
+         WHERE t.deleted_at IS NULL AND t.archived_at IS NULL AND (p.project_id IS NULL OR p.deleted_at IS NULL)
+         AND (json_extract(t.payload_json,'$.settledOverride') IS NOT 'settled'
+           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q WHERE q.thread_id=t.thread_id AND q.status='pending')
+           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a WHERE a.thread_id=t.thread_id AND a.status IN ('preparing','starting','running','waiting'))
+           OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting')))
+         AND (json_extract(t.payload_json,'$.lineage.relationshipToParent') IS NOT 'subagent' OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q WHERE q.thread_id=t.thread_id AND q.status='pending'))
+         ORDER BY 5 DESC, active_work DESC, t.updated_at DESC, t.thread_id LIMIT ?1"
+    )?;
+    let rows = statement.query_map([MAX_CANDIDATES as i64], |row| {
+        let state: Option<String> = row.get(11)?;
+        let requested_at: Option<String> = row.get(12)?;
+        let completed_at: Option<String> = row.get(13)?;
+        let active_work: bool = row.get(14)?;
+        let settled_override: Option<String> = row.get(16)?;
+        let settled_at = if settled_override.as_deref() == Some("active") {
+            None
+        } else {
+            row.get(5)?
+        };
+        Ok(ThreadRow {
+            thread_id: row.get(0)?,
+            title: row.get(1)?,
+            branch: row.get(2)?,
+            worktree_path: row.get(3)?,
+            pending_approval_count: row.get(4)?,
+            settled_at,
+            snoozed_until: row.get(6)?,
+            created_at: row.get(7)?,
+            provider_name: row.get(8)?,
+            project_title: row.get(9)?,
+            workspace_root: row.get(10)?,
+            session_status: Some(if active_work { "running" } else { "ready" }.into()),
+            last_turn: state.map(|state| TurnRow {
+                state: match state.as_str() {
+                    "preparing" | "starting" | "waiting" => "running".into(),
+                    "failed" => "error".into(),
+                    "cancelled" => "interrupted".into(),
+                    _ => state,
+                },
+                requested_at: requested_at.unwrap_or_default(),
+                started_at: None,
+                completed_at,
+            }),
+            active_work,
+            visited_at: row.get(15)?,
+            ..ThreadRow::default()
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
+    if is_v2(connection)? {
+        return read_v2_threads(connection);
+    }
     let mut statement = connection
         .prepare(
             "SELECT t.thread_id, t.title, t.branch, t.worktree_path, \
@@ -400,6 +719,8 @@ fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
                 project_title: row.get(12)?,
                 workspace_root: row.get(13)?,
                 last_turn: None,
+                active_work: false,
+                visited_at: None,
             })
         })
         .context("querying T3 Code threads")?;
@@ -434,11 +755,14 @@ fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
 /// Maps T3 Code thread state onto the portal's attention vocabulary. `None`
 /// excludes the thread from the roster.
 fn classify(row: &ThreadRow, now_ms: u64) -> Option<Classification> {
-    if row
-        .snoozed_until
-        .as_deref()
-        .and_then(timestamp_ms)
-        .is_some_and(|until| until > now_ms)
+    if !row.active_work
+        && row.pending_approval_count == 0
+        && row.pending_user_input_count == 0
+        && row
+            .snoozed_until
+            .as_deref()
+            .and_then(timestamp_ms)
+            .is_some_and(|until| until > now_ms)
     {
         return None;
     }
@@ -479,6 +803,21 @@ fn classify(row: &ThreadRow, now_ms: u64) -> Option<Classification> {
         });
     }
 
+    if row.active_work {
+        return Some(Classification {
+            status: AgentStatus::Working,
+            launch_pending: false,
+            state_change_seq: turn_started,
+            acknowledged: false,
+        });
+    }
+
+    let visited = row
+        .visited_at
+        .as_deref()
+        .and_then(timestamp_ms)
+        .is_some_and(|visited| visited >= turn_finished);
+
     let turn_state = last_turn.map(|turn| turn.state.as_str());
     let classification = match (session_status, turn_state) {
         ("running", None) => Classification {
@@ -499,7 +838,7 @@ fn classify(row: &ThreadRow, now_ms: u64) -> Option<Classification> {
             state_change_seq: turn_finished,
             acknowledged: false,
         },
-        (_, Some("completed" | "interrupted")) if settled => Classification {
+        (_, Some("completed" | "interrupted")) if settled || visited => Classification {
             status: AgentStatus::Idle,
             launch_pending: false,
             state_change_seq: settled_ms,
@@ -624,6 +963,160 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     const NOW_MS: u64 = 1_788_000_000_000;
+
+    #[test]
+    fn metadata_feed_maps_background_waits_and_empty_threads_without_false_review() {
+        let snapshot: StatusSnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"environment_id":"env","generated_at_ms":NOW_MS,"threads":[{
+                "thread_id":"thread","title":"Thread","project_title":"Project","workspace_root":"/work/project",
+                "branch":null,"worktree_path":null,"provider":"codex","status":"idle","settled":false,"snoozed":false,
+                "pending_input":false,"background_work":false,"updated_at":"2026-09-11T12:00:00Z",
+                "latest_run_completed_at":null,"last_visited_at":null
+            }]
+        })).unwrap();
+        assert_eq!(
+            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            AgentStatus::Idle
+        );
+        let mut snapshot = snapshot;
+        snapshot.threads[0].status = "waiting".into();
+        assert_eq!(
+            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            AgentStatus::Working
+        );
+        snapshot.threads[0].pending_input = true;
+        assert_eq!(
+            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            AgentStatus::Blocked
+        );
+        snapshot.threads[0].pending_input = false;
+        snapshot.threads[0].status = "idle".into();
+        snapshot.threads[0].background_work = true;
+        assert_eq!(
+            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            AgentStatus::Working
+        );
+    }
+
+    #[test]
+    fn metadata_file_establishes_liveness_without_a_desktop_process_and_expires() {
+        let dir = tempdir().unwrap();
+        let userdata = dir.path().join("userdata");
+        fs::create_dir_all(&userdata).unwrap();
+        fs::write(userdata.join("environment-id"), "env").unwrap();
+        let path = dir.path().join("metadata.json");
+        let frame = serde_json::json!({"schema_version":1,"environment_id":"env","generated_at_ms":NOW_MS,"threads":[]});
+        fs::write(&path, frame.to_string()).unwrap();
+        let client = T3codeClient::from_config(Some(dir.path()), Some(&path)).unwrap();
+        assert_eq!(
+            client.observe("epoch", NOW_MS).session.state,
+            SessionState::Connected
+        );
+        assert_eq!(
+            client.observe("epoch", NOW_MS + 10_001).session.state,
+            SessionState::Stale
+        );
+        fs::write(
+            &path,
+            frame
+                .to_string()
+                .replace("\"env\"", "\"wrong-environment\""),
+        )
+        .unwrap();
+        assert_eq!(
+            client.observe("epoch", NOW_MS).session.state,
+            SessionState::Stale
+        );
+        fs::remove_file(&path).unwrap();
+        assert!(client.observe("epoch", NOW_MS).targets.is_empty());
+    }
+
+    #[test]
+    fn current_projection_wins_over_stale_legacy_and_keeps_private_records_out() {
+        let fixture = fixture();
+        let current = Connection::open(fixture.client.userdata.join("statev2.sqlite")).unwrap();
+        current.execute_batch("CREATE TABLE orchestration_v2_projection_metadata(projection_name TEXT,schema_version INTEGER,last_sequence INTEGER);
+          INSERT INTO orchestration_v2_projection_metadata VALUES('thread-projections',2,99);
+          CREATE TABLE projection_projects(project_id TEXT,title TEXT,workspace_root TEXT,deleted_at TEXT);
+          INSERT INTO projection_projects VALUES('p','project','/work/project',NULL);
+          CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT,project_id TEXT,title TEXT,provider_instance_id TEXT,default_provider TEXT,created_at TEXT,updated_at TEXT,deleted_at TEXT,archived_at TEXT,payload_json TEXT);
+          CREATE TABLE orchestration_v2_projection_runs(run_id TEXT,thread_id TEXT,status TEXT,ordinal INTEGER,requested_at TEXT,completed_at TEXT,payload_json TEXT);
+          CREATE TABLE orchestration_v2_projection_runtime_requests(thread_id TEXT,status TEXT);
+          CREATE TABLE orchestration_v2_projection_subagents(thread_id TEXT,status TEXT);
+          INSERT INTO orchestration_v2_projection_threads VALUES('current','p','Current thread','codex','codex','2026-09-11T00:00:00Z','2026-09-11T12:00:00Z',NULL,NULL,'{\"branch\":\"main\",\"private\":\"private prompt\"}');
+          INSERT INTO orchestration_v2_projection_runs VALUES('run','current','running',1,'2026-09-11T12:00:00Z',NULL,'{\"private\":\"private provider payload\"}');
+        ").unwrap();
+        let observed = fixture.client.observe("epoch", NOW_MS);
+        assert_eq!(observed.session.state, SessionState::Connected);
+        assert_eq!(observed.projection_sequence, Some(99));
+        assert_eq!(observed.agents.len(), 1);
+        assert_eq!(observed.agents[0].status, AgentStatus::Working);
+        assert!(
+            !serde_json::to_string(&observed.agents)
+                .unwrap()
+                .contains("private")
+        );
+        current.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES('current','pending')",[]).unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).agents[0].status,
+            AgentStatus::Blocked
+        );
+        current
+            .execute(
+                "DELETE FROM orchestration_v2_projection_runtime_requests",
+                [],
+            )
+            .unwrap();
+        current.execute("UPDATE orchestration_v2_projection_runs SET status='completed',completed_at='2026-09-11T12:05:00Z'",[]).unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).agents[0].status,
+            AgentStatus::Done
+        );
+        current.execute("UPDATE orchestration_v2_projection_threads SET payload_json='{\"lastVisitedAt\":\"2026-09-11T12:06:00Z\"}'",[]).unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).agents[0].status,
+            AgentStatus::Idle
+        );
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_runs SET status='failed'",
+                [],
+            )
+            .unwrap();
+        current.execute("UPDATE orchestration_v2_projection_threads SET payload_json='{\"settledOverride\":\"settled\",\"settledAt\":\"2026-09-11T12:06:00Z\"}'",[]).unwrap();
+        assert!(fixture.client.observe("epoch", NOW_MS).agents.is_empty());
+        current.execute("INSERT INTO orchestration_v2_projection_runtime_requests VALUES('current','pending')",[]).unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).agents[0].status,
+            AgentStatus::Blocked
+        );
+        current
+            .execute(
+                "UPDATE orchestration_v2_projection_metadata SET schema_version=999",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.client.observe("epoch", NOW_MS).session.state,
+            SessionState::Incompatible
+        );
+    }
+
+    #[test]
+    fn exact_thread_urls_are_loopback_only_and_escape_target_components() {
+        assert_eq!(
+            thread_url("http://127.0.0.1:3773", "env", "thread/with?query").unwrap(),
+            "http://127.0.0.1:3773/env/thread%2Fwith%3Fquery"
+        );
+        for origin in [
+            "https://evil.test",
+            "http://localhost:3773@evil.test:80",
+            "http://127.0.0.1:3773/path",
+            "http://127.0.0.1:0",
+        ] {
+            assert!(thread_url(origin, "env", "thread").is_err());
+        }
+    }
 
     fn schema() -> &'static str {
         "CREATE TABLE projection_state (projector TEXT PRIMARY KEY, last_applied_sequence INTEGER NOT NULL, updated_at TEXT NOT NULL);

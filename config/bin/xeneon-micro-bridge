@@ -1,0 +1,306 @@
+#!/usr/bin/python3
+"""Map Micro controls to the daemon's ordered T3 roster; never synthesize keys."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import selectors
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+
+MAX_FRAME = 524288
+SLOTS = 6
+COLORS = {"blocked": 0xFFAA00, "review": 0x00FF00, "working": 0x0080FF,
+          "idle": 0x242424, "unknown": 0x800080}
+
+
+def effective_state(agent):
+    status = agent.get("status", "unknown")
+    if status in ("done", "idle"):
+        return "review" if agent.get("review_ready") else "idle"
+    return status if status in COLORS else "unknown"
+
+
+def lights(agents):
+    return [{"slot": i, "color": COLORS[effective_state(agents[i])] if i < len(agents) else 0,
+             "effect": "breath" if i < len(agents) and effective_state(agents[i]) == "working" else "solid",
+             "speed": 50} for i in range(SLOTS)]
+
+
+def choose_agent(event, agents, selected):
+    if event.get("event") != "key":
+        return None
+    key, action = event.get("key"), event.get("action")
+    if action == "press" and key in [f"AG{i:02}" for i in range(SLOTS)]:
+        index = int(key[2:])
+        return agents[index] if index < len(agents) else None
+    current = next((i for i, agent in enumerate(agents) if agent["id"] == selected), -1)
+    if action == "step" and key in ("ENC_CW", "ENC_CC") and agents:
+        index = (current + (1 if key == "ENC_CW" else -1)) % len(agents)
+        return agents[index]
+    if action == "press" and key == "ACT08":
+        for offset in range(1, len(agents) + 1):
+            agent = agents[(current + offset) % len(agents)]
+            if effective_state(agent) in ("blocked", "review"):
+                return agent
+    return None
+
+
+class HerdrOwner:
+    def __init__(self, state_dir, manage=False, systemctl="systemctl", micro_path=None):
+        self.marker = state_dir / "restore-herdr"
+        self.manage = manage
+        self.systemctl = systemctl
+        self.micro_path = micro_path
+        self.lock_file = None
+
+    def command(self, *args):
+        return subprocess.run([self.systemctl, "--user", *args], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=8, check=False).returncode
+
+    def acquire(self):
+        if self.command("is-active", "--quiet", "herdr-bridge.service") == 0:
+            if not self.manage:
+                raise RuntimeError("Herdr bridge is active; explicit service management is required")
+            self.marker.write_text("restart previously active Herdr bridge\n")
+            self.marker.chmod(0o600)
+            if self.command("stop", "herdr-bridge.service") != 0:
+                raise RuntimeError("could not stop the Herdr bridge")
+        if self.micro_path is not None and self.lock_file is None:
+            path = self.micro_path.with_suffix(".integration.lock")
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            self.lock_file = os.fdopen(fd, "a")
+            try:
+                fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BaseException:
+                self.lock_file.close()
+                self.lock_file = None
+                raise
+        # A manually launched bridge is outside systemd's ownership boundary.
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if entry.stat().st_uid == os.getuid() and (entry / "comm").read_text().strip() == "herdr-bridge":
+                    raise RuntimeError("another Herdr bridge still owns Micro controls")
+            except (OSError, ProcessLookupError):
+                continue
+
+    def restore(self):
+        if self.lock_file is not None:
+            self.lock_file.close()
+            self.lock_file = None
+        if self.marker.exists():
+            if self.command("start", "herdr-bridge.service") != 0:
+                raise RuntimeError("could not restore the previously active Herdr bridge")
+            self.marker.unlink()
+
+
+class Bridge:
+    def __init__(self, portal_path, micro_path, state_dir, owner):
+        self.portal_path, self.micro_path = portal_path, micro_path
+        self.state_dir, self.owner = state_dir, owner
+        self.selector = selectors.DefaultSelector()
+        self.portal = self.micro = None
+        self.buffers = {}
+        self.snapshot = None
+        self.received = 0
+        self.selected = None
+        self.pending = None
+        self.frame = None
+        self.lights_request = None
+        self.ring_request = None
+        self.led_sent_at = 0
+        self.acknowledged_slots = []
+        self.running = True
+        self.status_path = state_dir / "micro-controller.json"
+
+    def connect(self, path):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(1)
+        try:
+            client.connect(str(path))
+            client.settimeout(1)
+            self.selector.register(client, selectors.EVENT_READ)
+            self.buffers[client] = b""
+            return client
+        except BaseException:
+            client.close()
+            raise
+
+    def send(self, client, message):
+        client.sendall(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+
+    def disconnect(self, client):
+        if client is not None:
+            self.selector.unregister(client)
+            self.buffers.pop(client, None)
+            client.close()
+
+    def release(self):
+        self.disconnect(self.micro)
+        self.micro = None
+        self.frame = self.pending = self.lights_request = self.ring_request = None
+        self.acknowledged_slots = []
+        self.status_path.unlink(missing_ok=True)
+        try:
+            self.owner.restore()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            print(f"xeneon-micro-bridge: {error}", file=sys.stderr)
+
+    def agents(self):
+        if not self.snapshot or self.snapshot.get("connection") != "connected":
+            return []
+        return self.snapshot.get("agents", [])[:SLOTS]
+
+    def is_t3(self):
+        return self.snapshot and self.snapshot.get("backend", {}).get("mode") == "t3code"
+
+    def publish_status(self):
+        value = {"controlled": True, "backend": "t3code", "slots": self.acknowledged_slots,
+                 "selected_agent": self.selected, "updated_at_ms": int(time.time() * 1000)}
+        temporary = self.status_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value))
+        temporary.chmod(0o600)
+        temporary.replace(self.status_path)
+
+    def update(self):
+        if not self.is_t3() or time.monotonic() - self.received > 4:
+            if self.micro or self.owner.marker.exists():
+                self.release()
+            return
+        if self.micro is None:
+            self.owner.acquire()
+            self.micro = self.connect(self.micro_path)
+        if (self.lights_request or self.ring_request) and time.monotonic() - self.led_sent_at > 5:
+            raise RuntimeError("Micro lighting acknowledgement timed out")
+        agents = self.agents()
+        ids = [agent["id"] for agent in agents]
+        if self.selected not in ids:
+            self.selected = next((a["id"] for a in agents if a.get("focused")), None)
+        frame = lights(agents)
+        signature = (json.dumps(frame), tuple(ids), self.snapshot.get("voice", {}).get("state"))
+        if signature != self.frame:
+            request = "lights-" + uuid.uuid4().hex
+            self.send(self.micro, {"id": request, "cmd": "lights", "lights": frame})
+            states = [effective_state(a) for a in agents]
+            state = next((s for s in ("blocked", "review", "working") if s in states), "idle")
+            self.ring_request = "ring-" + uuid.uuid4().hex
+            self.led_sent_at = time.monotonic()
+            self.send(self.micro, {"id": self.ring_request, "cmd": "lighting_config",
+                                  "ambient": {"effect": "solid", "brightness": 0.5,
+                                              "color": COLORS[state] if state != "idle" else 0},
+                                  "keys": {"effect": "off", "brightness": 0, "color": 0}})
+            self.lights_request = (request, ids)
+            self.frame = signature
+        if self.acknowledged_slots == ids and self.lights_request is None and self.ring_request is None:
+            self.publish_status()
+
+    def portal_event(self, event):
+        if event.get("type") == "snapshot" and event.get("schema_version") == 1:
+            agents = event.get("agents")
+            if not isinstance(agents, list) or len(agents) > 64 or not all(
+                    isinstance(a, dict) and isinstance(a.get("id"), str) for a in agents):
+                raise RuntimeError("invalid portal roster")
+            self.snapshot, self.received = event, time.monotonic()
+        elif event.get("type") == "action_result" and self.pending and event.get("request_id") == self.pending[0]:
+            if event.get("ok"):
+                self.selected = self.pending[1]
+            self.pending = None
+
+    def micro_event(self, event):
+        if self.lights_request and event.get("id") == self.lights_request[0]:
+            if not event.get("ok"):
+                raise RuntimeError("Micro rejected slot lighting")
+            self.acknowledged_slots = self.lights_request[1]
+            self.lights_request = None
+            if self.ring_request is None:
+                self.publish_status()
+        if self.ring_request and event.get("id") == self.ring_request:
+            if not event.get("ok"):
+                raise RuntimeError("Micro rejected ambient lighting")
+            self.ring_request = None
+            if self.lights_request is None:
+                self.publish_status()
+        if (not self.is_t3() or self.pending or time.monotonic() - self.received > 4
+                or self.lights_request or self.ring_request
+                or self.acknowledged_slots != [a["id"] for a in self.agents()]):
+            return
+        target = choose_agent(event, self.agents(), self.selected)
+        if target and target.get("actions", {}).get("open"):
+            request = uuid.uuid4().hex
+            self.send(self.portal, {"schema_version": 1, "request_id": request,
+                                   "sequence": self.snapshot["sequence"], "action": "open",
+                                   "agent_id": target["id"]})
+            self.pending = (request, target["id"], time.monotonic())
+
+    def run(self):
+        try:
+            while self.running:
+                try:
+                    if self.portal is None:
+                        self.portal = self.connect(self.portal_path)
+                    self.update()
+                    if self.pending and time.monotonic() - self.pending[2] > 10:
+                        self.pending = None  # Never replay an uncertain action.
+                    for key, _ in self.selector.select(0.5):
+                        data = key.fileobj.recv(65536)
+                        if not data:
+                            raise ConnectionError("socket disconnected")
+                        buffer = self.buffers[key.fileobj] + data
+                        if len(buffer) > MAX_FRAME:
+                            raise RuntimeError("socket frame exceeds limit")
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            event = json.loads(line)
+                            if not isinstance(event, dict):
+                                raise RuntimeError("invalid socket message")
+                            if key.fileobj is self.portal:
+                                self.portal_event(event)
+                            else:
+                                self.micro_event(event)
+                        self.buffers[key.fileobj] = buffer
+                except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    print(f"xeneon-micro-bridge: {error}", file=sys.stderr)
+                    self.release()
+                    self.disconnect(self.portal)
+                    self.portal = self.snapshot = None
+                    if self.running:
+                        time.sleep(1)
+        finally:
+            self.release()
+            self.disconnect(self.portal)
+            self.selector.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(os.getuid())))
+    parser.add_argument("--portal-socket", type=Path, default=runtime / "xeneon-edge-agents/agentd.sock")
+    parser.add_argument("--micro-socket", type=Path, default=runtime / "microd/microd.sock")
+    parser.add_argument("--state-dir", type=Path, default=runtime / "xeneon-edge-agents")
+    parser.add_argument("--manage-herdr-service", action="store_true")
+    parser.add_argument("--restore-herdr", action="store_true")
+    args = parser.parse_args()
+    os.umask(0o077)
+    args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    owner = HerdrOwner(args.state_dir, args.manage_herdr_service, micro_path=args.micro_socket)
+    with (args.state_dir / "micro-controller.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        owner.restore()
+        if args.restore_herdr:
+            return
+        bridge = Bridge(args.portal_socket, args.micro_socket, args.state_dir, owner)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, lambda *_: setattr(bridge, "running", False))
+        bridge.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -77,6 +77,22 @@ struct HyprMonitor {
 }
 
 impl DesktopController {
+    pub async fn open_thread_url(&self, url: &str) -> Result<()> {
+        let status = timeout(
+            Duration::from_secs(5),
+            Command::new("xdg-open")
+                .arg(url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .context("opening T3 thread timed out")??;
+        anyhow::ensure!(status.success(), "T3 thread URL could not be opened");
+        Ok(())
+    }
     pub fn new(config: DesktopConfig) -> Self {
         Self {
             config,
