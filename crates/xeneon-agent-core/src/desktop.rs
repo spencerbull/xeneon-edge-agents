@@ -34,6 +34,7 @@ pub enum DesktopAppOutcome {
 struct DesktopAppSpec {
     desktop_id: &'static str,
     class: &'static str,
+    extra_classes: &'static [&'static str],
     main_title: &'static str,
 }
 
@@ -78,19 +79,58 @@ struct HyprMonitor {
 
 impl DesktopController {
     pub async fn open_thread_url(&self, url: &str) -> Result<()> {
-        let status = timeout(
-            Duration::from_secs(5),
-            Command::new("xdg-open")
+        anyhow::ensure!(
+            url.starts_with("t3code://threads/"),
+            "T3 thread URL must use the t3code://threads/ scheme"
+        );
+        // Dispatch via `uwsm app -t service -- xdg-open <url>` so the desktop
+        // URL handler (including FUSE AppImage builds) runs outside the
+        // daemon's strict systemd sandbox. Fall back to direct `xdg-open` only
+        // when `uwsm` is unavailable.
+        let mut child = match Command::new(&self.uwsm_bin)
+            .args(["app", "-t", "service", "--", "xdg-open", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Command::new("xdg-open")
                 .arg(url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .context("opening T3 thread timed out")??;
-        anyhow::ensure!(status.success(), "T3 thread URL could not be opened");
+                .spawn()
+                .context("launching xdg-open for T3 thread deep link")?,
+            Err(error) => return Err(error).context("launching uwsm for T3 thread deep link"),
+        };
+
+        match timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(status) => {
+                anyhow::ensure!(status?.success(), "T3 thread deep link could not be opened");
+            }
+            Err(_) => {
+                tokio::spawn(async move {
+                    if let Ok(status) = child.wait().await
+                        && !status.success()
+                    {
+                        tracing::warn!(
+                            ?status,
+                            "T3 thread deep link command exited unsuccessfully"
+                        );
+                    }
+                });
+            }
+        }
+
+        if let Ok(clients) =
+            hypr_json::<Vec<HyprClient>>(&self.hyprctl_bin, &["clients", "-j"]).await
+            && let Ok(Some(client)) =
+                select_desktop_candidate(&clients, desktop_app_spec(DesktopApp::T3code))
+            && let Err(error) = dispatch_focus(&self.hyprctl_bin, &client.address).await
+        {
+            tracing::debug!(%error, "could not focus T3 Code window after deep link");
+        }
         Ok(())
     }
     pub fn new(config: DesktopConfig) -> Self {
@@ -317,8 +357,11 @@ fn desktop_candidates(clients: &[HyprClient], spec: DesktopAppSpec) -> Vec<&Hypr
     clients
         .iter()
         .filter(|client| {
-            client.class.eq_ignore_ascii_case(spec.class)
-                || client.initial_class.eq_ignore_ascii_case(spec.class)
+            let matches_class = |expected: &str| {
+                client.class.eq_ignore_ascii_case(expected)
+                    || client.initial_class.eq_ignore_ascii_case(expected)
+            };
+            matches_class(spec.class) || spec.extra_classes.iter().any(|c| matches_class(c))
         })
         .collect()
 }
@@ -389,16 +432,19 @@ fn desktop_app_spec(app: DesktopApp) -> DesktopAppSpec {
         DesktopApp::ChatGpt => DesktopAppSpec {
             desktop_id: "chatgpt.desktop",
             class: "chatgpt",
+            extra_classes: &[],
             main_title: "ChatGPT",
         },
         DesktopApp::Claude => DesktopAppSpec {
             desktop_id: "com.anthropic.Claude.desktop",
             class: "com.anthropic.Claude",
+            extra_classes: &[],
             main_title: "Claude",
         },
         DesktopApp::T3code => DesktopAppSpec {
             desktop_id: "t3code.desktop",
             class: "t3code",
+            extra_classes: &["com.t3tools.T3Code"],
             main_title: "T3 Code",
         },
     }
@@ -984,6 +1030,7 @@ mod tests {
             DesktopAppSpec {
                 desktop_id: "chatgpt.desktop",
                 class: "chatgpt",
+                extra_classes: &[],
                 main_title: "ChatGPT",
             }
         );
@@ -992,6 +1039,7 @@ mod tests {
             DesktopAppSpec {
                 desktop_id: "com.anthropic.Claude.desktop",
                 class: "com.anthropic.Claude",
+                extra_classes: &[],
                 main_title: "Claude",
             }
         );
@@ -1000,6 +1048,7 @@ mod tests {
             DesktopAppSpec {
                 desktop_id: "t3code.desktop",
                 class: "t3code",
+                extra_classes: &["com.t3tools.T3Code"],
                 main_title: "T3 Code",
             }
         );
@@ -1023,6 +1072,62 @@ mod tests {
             select_desktop_candidate(&clients[..1], desktop_app_spec(DesktopApp::T3code))
                 .unwrap()
                 .is_none()
+        );
+
+        let nightly: Vec<HyprClient> = serde_json::from_str(
+            r#"[
+                {"address":"0x3","class":"com.t3tools.T3Code","initialClass":"com.t3tools.T3Code","title":"T3 Code","initialTitle":"T3 Code","pid":3,"monitor":0,"floating":false,"focusHistoryID":1}
+            ]"#,
+        )
+        .unwrap();
+        let selected_nightly =
+            select_desktop_candidate(&nightly, desktop_app_spec(DesktopApp::T3code))
+                .unwrap()
+                .unwrap();
+        assert_eq!(selected_nightly.address, "0x3");
+    }
+
+    #[tokio::test]
+    async fn open_thread_url_rejects_non_t3code_schemes_and_dispatches_via_uwsm() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("uwsm.log");
+        let fake_uwsm = dir.path().join("uwsm");
+        fs::write(
+            &fake_uwsm,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                log_path.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake_uwsm, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut controller = DesktopController::new(DesktopConfig::default());
+        controller.uwsm_bin = fake_uwsm;
+        controller.hyprctl_bin = dir.path().join("missing-hyprctl");
+
+        assert!(
+            controller
+                .open_thread_url("http://127.0.0.1:3773/env/thr")
+                .await
+                .is_err()
+        );
+        controller
+            .open_thread_url("t3code://threads/env-1/thr-1")
+            .await
+            .unwrap();
+        let args = fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<_> = args.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "app",
+                "-t",
+                "service",
+                "--",
+                "xdg-open",
+                "t3code://threads/env-1/thr-1"
+            ]
         );
     }
 

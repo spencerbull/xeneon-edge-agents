@@ -389,18 +389,12 @@ impl T3codeClient {
     }
 
     pub fn thread_url(&self, environment_id: &str, thread_id: &str) -> Result<String> {
-        let runtime: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(self.runtime_path())?)?;
-        let origin = runtime
-            .get("origin")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow!("T3 runtime has no origin"))?;
         let environment = if environment_id.trim().is_empty() {
             fs::read_to_string(self.userdata.join("environment-id"))?
         } else {
             environment_id.to_owned()
         };
-        thread_url(origin, environment.trim(), thread_id)
+        thread_url(environment.trim(), thread_id)
     }
     /// Builds a client for a T3 Code data directory (the parent of `userdata`).
     pub fn new(home: impl Into<PathBuf>) -> Self {
@@ -770,18 +764,7 @@ fn observation_from_rows(
     }
 }
 
-fn thread_url(origin: &str, environment: &str, thread_id: &str) -> Result<String> {
-    let address = origin
-        .strip_prefix("http://")
-        .ok_or_else(|| anyhow!("T3 local origin must use HTTP"))?;
-    let (host, port) = address
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow!("T3 local origin has no port"))?;
-    anyhow::ensure!(
-        matches!(host, "127.0.0.1" | "localhost" | "[::1]")
-            && port.parse::<u16>().is_ok_and(|port| port != 0),
-        "T3 local origin is not loopback"
-    );
+fn thread_url(environment: &str, thread_id: &str) -> Result<String> {
     validate_target_component(environment, false)?;
     validate_target_component(thread_id, false)?;
     fn component(value: &str) -> String {
@@ -797,7 +780,7 @@ fn thread_url(origin: &str, environment: &str, thread_id: &str) -> Result<String
             .collect()
     }
     Ok(format!(
-        "{origin}/{}/{}",
+        "t3code://threads/{}/{}",
         component(environment),
         component(thread_id)
     ))
@@ -1391,7 +1374,7 @@ mod tests {
             client
                 .thread_url(&target.environment_id, &target.thread_id)
                 .unwrap(),
-            "http://127.0.0.1:3773/env-grace/shared-id"
+            "t3code://threads/env-grace/shared-id"
         );
 
         // Devices sort online+local first, then online alpha, then offline alpha.
@@ -1561,19 +1544,13 @@ mod tests {
     }
 
     #[test]
-    fn exact_thread_urls_are_loopback_only_and_escape_target_components() {
+    fn exact_thread_urls_use_t3code_deep_link_and_escape_target_components() {
         assert_eq!(
-            thread_url("http://127.0.0.1:3773", "env", "thread/with?query").unwrap(),
-            "http://127.0.0.1:3773/env/thread%2Fwith%3Fquery"
+            thread_url("env", "thread/with?query#frag").unwrap(),
+            "t3code://threads/env/thread%2Fwith%3Fquery%23frag"
         );
-        for origin in [
-            "https://evil.test",
-            "http://localhost:3773@evil.test:80",
-            "http://127.0.0.1:3773/path",
-            "http://127.0.0.1:0",
-        ] {
-            assert!(thread_url(origin, "env", "thread").is_err());
-        }
+        assert!(thread_url("", "thread").is_err());
+        assert!(thread_url("env", "").is_err());
     }
 
     fn schema() -> &'static str {
@@ -2125,9 +2102,9 @@ mod tests {
 
     #[test]
     fn thread_url_and_target_validation_reject_traversal_and_flag_injection() {
-        assert!(thread_url("http://127.0.0.1:3773", "..", "thr-1").is_err());
-        assert!(thread_url("http://127.0.0.1:3773", "env-1", ".").is_err());
-        assert!(thread_url("http://127.0.0.1:3773", "env 1", "thr-1").is_err());
+        assert!(thread_url("..", "thr-1").is_err());
+        assert!(thread_url("env-1", ".").is_err());
+        assert!(thread_url("env 1", "thr-1").is_err());
         assert!(validate_target_component("--flag", true).is_err());
         assert!(validate_target_component("env-valid_1", true).is_ok());
     }
