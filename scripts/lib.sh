@@ -337,6 +337,38 @@ normalize_hypr_device_name() {
   printf '%s\n' "$value"
 }
 
+# Hyprland appends "-N" to a device whose normalized kernel name is already
+# taken. The EDGE touch controller exposes a touchscreen and a mouse interface
+# under one kernel name, so the touchscreen holds the bare name when it
+# enumerates first and the "-1" suffix when the mouse interface does. Emit the
+# commissioned name, its suffix-free base, and the base with the first
+# collision suffix, without duplicates, so every name the touchscreen can hold
+# is disabled during lifecycle transitions whichever one was commissioned.
+touch_device_candidates() {
+  local name=$1
+  local base=$name
+  local candidate
+  local -a emitted=()
+  if [[ "$name" =~ ^(.+)-[0-9]+$ ]]; then
+    base=${BASH_REMATCH[1]}
+  fi
+  for candidate in "$name" "$base" "$base-1"; do
+    [[ " ${emitted[*]} " == *" $candidate "* ]] && continue
+    emitted+=("$candidate")
+    printf '%s\n' "$candidate"
+  done
+}
+
+lua_touch_device_list() {
+  local name first=1
+  while IFS= read -r name; do
+    ((first)) || printf ', '
+    printf '"%s"' "$name"
+    first=0
+  done < <(touch_device_candidates "$1")
+  printf '\n'
+}
+
 drm_connector_name() {
   local path=$1
   local base prefix
