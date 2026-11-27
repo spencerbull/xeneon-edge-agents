@@ -9,6 +9,7 @@ Item {
     property var theme: ThemePalette.fallback
     property bool reducedMotion: false
     property var agents: []
+    property var devices: []
     property var health: ({})
     property var voice: ({})
     property string connectionState: "reconnecting"
@@ -23,6 +24,13 @@ Item {
     readonly property int entryDurationMs: 1350
     readonly property int exitDurationMs: 1000
     readonly property int nodeLimit: 14
+    readonly property int fleetDeviceLimit: 8
+    readonly property var visibleDevices:
+        Array.isArray(devices) ? devices.slice(0, fleetDeviceLimit) : []
+    readonly property int overflowDeviceCount:
+        Array.isArray(devices)
+            ? Math.max(0, devices.length - fleetDeviceLimit)
+            : 0
     readonly property bool denseConstellation: visibleAgentCount > 6
     readonly property int visibleAgentCount: Math.min(
         nodeLimit,
@@ -212,6 +220,267 @@ Item {
         anchors.fill: parent
         color: root.theme.canvas
         opacity: root.curtainProgress
+    }
+
+    Rectangle {
+        id: ambientFleetDevices
+
+        objectName: "ambientFleetDevices"
+        visible: Array.isArray(root.devices) && root.devices.length > 0
+        x: 28
+        width: 276
+        height: Math.max(
+            fleetColumn.implicitHeight + 32,
+            65 + root.visibleDevices.length * 54
+                + (root.overflowDeviceCount > 0 ? 26 : 0)
+        )
+        anchors.verticalCenter: parent.verticalCenter
+        radius: 18
+        color: Qt.alpha(root.theme.surface, 0.88)
+        border.width: 1
+        border.color: Qt.alpha(root.theme.border, 0.92)
+        opacity: root.nodeProgress
+        z: 5
+
+        Column {
+            id: fleetColumn
+
+            anchors {
+                left: parent.left
+                right: parent.right
+                top: parent.top
+                margins: 16
+            }
+            spacing: 10
+
+            Row {
+                width: parent.width
+                height: 22
+                spacing: 8
+
+                Text {
+                    id: fleetHeaderTitle
+
+                    objectName: "ambientFleetTitle"
+                    width: parent.width - fleetHeaderCount.width - parent.spacing
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "T3 FLEET"
+                    textFormat: Text.PlainText
+                    color: root.theme.textPrimary
+                    elide: Text.ElideRight
+                    font {
+                        family: "monospace"
+                        pixelSize: 13
+                        weight: Font.Bold
+                        letterSpacing: 1.4
+                    }
+                }
+
+                Rectangle {
+                    id: fleetHeaderCount
+
+                    readonly property var counts: root.deviceSummary()
+                    readonly property color badgeTone: counts.online === 0
+                        ? root.theme.error
+                        : counts.offline > 0
+                            ? root.theme.needsHelp
+                            : root.theme.success
+                    readonly property color badgeFill: ThemePalette.mixColors(
+                        String(root.theme.surface),
+                        String(badgeTone),
+                        0.16
+                    )
+
+                    width: fleetHeaderCountText.implicitWidth + 14
+                    height: 20
+                    radius: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: badgeFill
+                    border.width: 1
+                    border.color: Qt.alpha(badgeTone, 0.56)
+
+                    Text {
+                        id: fleetHeaderCountText
+
+                        objectName: "ambientFleetOnlineSummary"
+                        anchors.centerIn: parent
+                        text: fleetHeaderCount.counts.online + "/"
+                            + fleetHeaderCount.counts.total + " ONLINE"
+                        textFormat: Text.PlainText
+                        color: ThemePalette.ensureContrast(
+                            String(fleetHeaderCount.badgeTone),
+                            String(fleetHeaderCount.badgeFill),
+                            4.5
+                        )
+                        font {
+                            family: "monospace"
+                            pixelSize: 9
+                            weight: Font.Bold
+                            letterSpacing: 0.5
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 1
+                color: Qt.alpha(root.theme.border, 0.72)
+            }
+
+            Repeater {
+                model: root.visibleDevices
+
+                Rectangle {
+                    required property var modelData
+                    required property int index
+
+                    readonly property string deviceState:
+                        String(modelData.state || "unknown").toLowerCase()
+                    readonly property bool online: deviceState === "online"
+                    readonly property bool offline: deviceState === "offline"
+                    readonly property color stateTone: online
+                        ? root.theme.success
+                        : offline
+                            ? root.theme.error
+                            : root.theme.needsHelp
+                    readonly property color rowFill: online
+                        ? ThemePalette.mixColors(
+                            String(root.theme.surfaceRaised),
+                            String(root.theme.success),
+                            0.08
+                        )
+                        : ThemePalette.mixColors(
+                            String(root.theme.surface),
+                            String(root.theme.surfaceRaised),
+                            0.55
+                        )
+                    readonly property color readableStateColor:
+                        ThemePalette.ensureContrast(
+                            String(stateTone),
+                            String(rowFill),
+                            4.5
+                        )
+
+                    objectName: "ambientDeviceRow-" + index
+                    width: fleetColumn.width
+                    height: 44
+                    radius: 12
+                    color: rowFill
+                    border.width: 1
+                    border.color: online
+                        ? Qt.alpha(stateTone, 0.42)
+                        : Qt.alpha(root.theme.border, 0.65)
+
+                    Row {
+                        anchors {
+                            fill: parent
+                            leftMargin: 12
+                            rightMargin: 12
+                        }
+                        spacing: 10
+
+                        Item {
+                            width: 14
+                            height: 14
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Rectangle {
+                                visible: parent.parent.parent.online
+                                anchors.fill: parent
+                                radius: 7
+                                color: Qt.alpha(
+                                    parent.parent.parent.stateTone,
+                                    0.22
+                                )
+                            }
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 8
+                                height: 8
+                                radius: 4
+                                color: parent.parent.parent.stateTone
+                            }
+                        }
+
+                        Column {
+                            width: parent.width - 14 - deviceStateBadge.width
+                                - parent.spacing * 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 1
+
+                            Text {
+                                objectName: "ambientDeviceLabel-" + index
+                                width: parent.width
+                                text: String(modelData.label || "DEVICE")
+                                    .toUpperCase()
+                                textFormat: Text.PlainText
+                                color: parent.parent.parent.offline
+                                    ? root.theme.textSecondary
+                                    : root.theme.textPrimary
+                                elide: Text.ElideRight
+                                font {
+                                    family: "monospace"
+                                    pixelSize: 12
+                                    weight: Font.Bold
+                                    letterSpacing: 0.6
+                                }
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: (modelData.local === true ? "LOCAL" : "REMOTE")
+                                    + (String(modelData.machine || "") !== ""
+                                        ? " · " + String(modelData.machine)
+                                            .toUpperCase()
+                                        : "")
+                                textFormat: Text.PlainText
+                                color: root.theme.textMuted
+                                elide: Text.ElideRight
+                                font {
+                                    family: "monospace"
+                                    pixelSize: 9
+                                    letterSpacing: 0.4
+                                }
+                            }
+                        }
+
+                        Text {
+                            id: deviceStateBadge
+
+                            objectName: "ambientDeviceState-" + index
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.deviceStatusLabel(modelData)
+                            textFormat: Text.PlainText
+                            color: parent.parent.readableStateColor
+                            font {
+                                family: "monospace"
+                                pixelSize: 9
+                                weight: Font.Bold
+                                letterSpacing: 0.5
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                objectName: "ambientFleetOverflow"
+                visible: root.overflowDeviceCount > 0
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: "+" + root.overflowDeviceCount + " MORE DEVICES"
+                textFormat: Text.PlainText
+                color: root.theme.textMuted
+                font {
+                    family: "monospace"
+                    pixelSize: 10
+                    weight: Font.DemiBold
+                    letterSpacing: 0.6
+                }
+            }
+        }
     }
 
     Item {
@@ -485,9 +754,39 @@ Item {
         return "AMBIENT"
     }
 
+    function deviceSummary() {
+        var list = Array.isArray(devices) ? devices : []
+        var online = 0
+        var offline = 0
+        for (var index = 0; index < list.length; index += 1) {
+            var state = String(list[index].state || "").toLowerCase()
+            if (state === "online")
+                online += 1
+            else if (state === "offline")
+                offline += 1
+        }
+        return {"total": list.length, "online": online, "offline": offline}
+    }
+
+    function deviceStatusLabel(device) {
+        var state = String(device.state || "unknown").toLowerCase()
+        if (state === "online") {
+            var count = Math.max(0, Math.floor(Number(device.agent_count || 0)))
+            return count > 0 ? count + " ACTIVE" : "ONLINE"
+        }
+        if (state === "offline")
+            return "OFFLINE"
+        return "UNKNOWN"
+    }
+
     function centerDetail() {
         if (mode !== "off")
             return Palette.ambientLabel(mode)
+        var counts = deviceSummary()
+        if (counts.total > 0) {
+            return agents.length + " AGENTS // "
+                + counts.online + "/" + counts.total + " ONLINE"
+        }
         return agents.length + " AGENTS // "
             + String(health.status || "UNKNOWN").toUpperCase()
     }

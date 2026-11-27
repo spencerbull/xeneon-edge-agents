@@ -62,23 +62,37 @@ and focus history before the next manager is observed.
 event subscriptions, capability-gated approve/interrupt, zoom, and Herdr's own
 grouped/priority ordering.
 
-**T3 Code** mode observes the local T3 Code server without any network or
-authenticated API. The daemon reads only the bounded thread, session, turn, and
-project projections from T3 Code's read-only SQLite state and gates everything
-on T3 Code's own server runtime descriptor plus its live server process. One
-card is shown per thread that is running, has a live provider session, or has
-finished a turn the human has not yet settled. Pending approvals, unanswered
-questions, actionable plans, and failed turns show as waiting; running turns
-show as working; unsettled completed turns are review-ready; settled threads
-are ready. Settling a thread in T3 Code acknowledges its review badge the same
-way a Herdr focus transition does. Card names are T3 Code's own thread titles,
-never message text.
+**T3 Code** mode observes the local T3 Code server and, when the optional
+`xeneon-t3-status` helper is configured via `t3code.status_file`, tracks agent
+statuses across your entire **T3 Connect** device fleet. Without the helper,
+the daemon reads only the bounded thread, session, turn, and project projections
+from T3 Code's read-only SQLite state and gates everything on T3 Code's own
+server runtime descriptor plus its live server process.
 
-T3 Code exposes no public thread-focus API on Linux, so a card tap activates
-the exact `t3code` desktop window; zoom, approve, and interrupt are
+With `xeneon-t3-status` enabled (`xeneon-t3-status login` stores its own OAuth
+token and ES256 DPoP keypair under `$XDG_STATE_HOME/xeneon-edge-agents/t3-connect/`
+without reading T3 secrets), the metadata-only helper merges local read-only
+SQLite projections with T3 Connect Relay fleet device status (online/offline)
+and remote agent statuses (using full allowlisted shell metadata on approved
+environments and falling back cleanly to the relay's aggregate agent-activity
+feed when device approval is pending). Cards display each thread's host device
+badge, the header and footer report online/offline fleet counts, and the
+Ambient screen showcases every online and offline fleet device alongside the
+agent constellation.
+
+One card is shown per thread that is running, has a live provider session, or
+has finished a turn the human has not yet settled. Pending approvals,
+unanswered questions, actionable plans, and failed turns show as waiting;
+running turns show as working; unsettled completed turns are review-ready;
+settled threads are ready. Settling a thread in T3 Code acknowledges its review
+badge the same way a Herdr focus transition does. Card names are T3 Code's own
+thread titles, never message text.
+
+A card tap opens the exact `/{environmentId}/{threadId}` URL (or `t3 app --thread`
+when configured through `t3code.app_bin`); zoom, approve, and interrupt stay
 unavailable, and the Order control is a daemon-owned preference. Messages,
-activities, checkpoints, secrets, and provider payloads are never read, and
-T3 Code state is never written. Preview the mode with
+activities, checkpoints, secrets, and provider payloads are never read, and T3
+Code state is never written. Preview the fleet mode with
 `scripts/preview t3code.ndjson`.
 
 ## Develop and preview
@@ -284,12 +298,17 @@ status_file = "/run/user/1000/xeneon-edge-agents/t3-status.json"
 app_bin = "/path/to/patched/t3"
 ```
 
-Enable the staged `xeneon-t3-status.service` after updating T3 (adjust the
-UID in `status_file` to your runtime directory). Its separate helper uses
-`t3 thread status --json --watch`, letting T3 manage its own authentication
-without giving the hardware daemon write access to T3 state. The daemon
-stops exposing actions if the metadata file expires or the helper exits. Native activation uses `t3 app --thread ID --environment ENV`;
-it never falls back to project activation or creates a thread.
+Enable the staged `xeneon-t3-status.service` (adjust the UID in `status_file`
+to your runtime directory) and run `xeneon-t3-status login` once to authorize
+T3 Connect fleet polling. Its separate helper stores its own OAuth token and
+ES256 DPoP keypair under `$XDG_STATE_HOME/xeneon-edge-agents/t3-connect/`
+without reading T3 secrets or giving the hardware daemon write access to T3
+state. It merges local read-only SQLite metadata with T3 Connect fleet online/offline
+devices and remote thread statuses (falling back to the legacy
+`t3 thread status --json --watch` pipe when invoked with `--t3-bin`). The daemon
+stops exposing actions if the metadata file expires or the helper exits. Native
+activation uses `t3 app --thread ID --environment ENV`; it never falls back to
+project activation or creates a thread.
 
 The installer stages `xeneon-micro-bridge.service` without enabling it. Before
 opting in, install the companion Herdr bridge ownership-lock update. Both

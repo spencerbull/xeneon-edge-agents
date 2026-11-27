@@ -143,6 +143,41 @@ pub struct AgentActions {
     pub interrupt: Option<ActionCapability>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceState {
+    Online,
+    Offline,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+impl DeviceState {
+    pub fn sort_rank(self) -> u8 {
+        match self {
+            Self::Online => 0,
+            Self::Offline => 1,
+            Self::Unknown => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceView {
+    pub id: String,
+    pub label: String,
+    pub state: DeviceState,
+    #[serde(default)]
+    pub local: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub agent_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentView {
     pub id: String,
@@ -158,6 +193,10 @@ pub struct AgentView {
     pub repository: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_local: Option<bool>,
     pub session: String,
     pub focused: bool,
     pub observed_for_seconds: u64,
@@ -329,6 +368,8 @@ pub struct PortalSnapshot {
     pub generated_at_ms: u64,
     pub connection: ConnectionState,
     pub sessions: Vec<SessionView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceView>,
     pub agents: Vec<AgentView>,
     #[serde(default)]
     pub agent_order: AgentOrderSnapshot,
@@ -349,6 +390,7 @@ impl PortalSnapshot {
             generated_at_ms: 0,
             connection: ConnectionState::Offline,
             sessions: Vec::new(),
+            devices: Vec::new(),
             agents: Vec::new(),
             agent_order: AgentOrderSnapshot::default(),
             backend: AgentBackendSnapshot::default(),
@@ -428,6 +470,8 @@ mod tests {
             workspace: "workspace".into(),
             repository: None,
             worktree: None,
+            device: None,
+            device_local: None,
             session: "default".into(),
             focused: false,
             observed_for_seconds: 0,

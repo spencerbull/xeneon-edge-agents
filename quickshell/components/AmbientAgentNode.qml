@@ -20,6 +20,9 @@ Item {
     readonly property string agentState:
         Palette.effectiveAgentState(agent)
     readonly property color accent: Palette.agentColor(agent, theme)
+    readonly property string deviceLabel:
+        agent === null ? "" : String(agent.device || "").trim()
+    readonly property bool hasDevice: deviceLabel !== ""
     readonly property real angleRadians: angleDegrees * Math.PI / 180
     readonly property bool pulsing: !reducedMotion
         && reveal > 0
@@ -96,8 +99,7 @@ Item {
         opacity: root.agentState === "idle" ? 0.62 : 1
     }
 
-    Text {
-        objectName: "ambientAgentDisplayName"
+    Column {
         anchors {
             left: parent.left
             leftMargin: root.dense ? 27 : 38
@@ -105,16 +107,39 @@ Item {
             rightMargin: root.dense ? 10 : 18
             verticalCenter: parent.verticalCenter
         }
-        text: String(root.agent.display_name || "AGENT").toUpperCase()
-        textFormat: Text.PlainText
-        color: root.theme.textPrimary
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-        font {
-            family: "monospace"
-            pixelSize: root.dense ? 13 : 16
-            weight: Font.DemiBold
-            letterSpacing: root.dense ? 0.5 : 0.8
+        spacing: root.dense ? 1 : 2
+
+        Text {
+            objectName: "ambientAgentDisplayName"
+            width: parent.width
+            text: String(root.agent.display_name || "AGENT").toUpperCase()
+            textFormat: Text.PlainText
+            color: root.theme.textPrimary
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            font {
+                family: "monospace"
+                pixelSize: root.dense ? 13 : 16
+                weight: Font.DemiBold
+                letterSpacing: root.dense ? 0.5 : 0.8
+            }
+        }
+
+        Text {
+            objectName: "ambientAgentDeviceLabel"
+            visible: root.hasDevice
+            width: parent.width
+            text: root.deviceLabel.toUpperCase()
+            textFormat: Text.PlainText
+            color: root.theme.textSecondary
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+            font {
+                family: "monospace"
+                pixelSize: root.dense ? 9 : 11
+                weight: Font.DemiBold
+                letterSpacing: 0.7
+            }
         }
     }
 

@@ -390,6 +390,9 @@ class QmlSafetyContractTests(unittest.TestCase):
 
         self.assertIn("normalizeUsage", store)
         self.assertIn("normalizeMicro", store)
+        self.assertIn("normalizeDevices", store)
+        self.assertIn('objectName: "agentDeviceBadge"', source("components/AgentCard.qml"))
+        self.assertIn('objectName: "ambientFleetDevices"', source("components/AmbientView.qml"))
         self.assertIn('sendBuilt("chatgpt_desktop"', bridge)
         self.assertIn('sendBuilt("claude_desktop"', bridge)
         self.assertIn("AiUsageDock", portal)

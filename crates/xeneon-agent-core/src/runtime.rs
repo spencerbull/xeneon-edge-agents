@@ -459,6 +459,9 @@ impl DaemonRuntime {
             SessionState::Stale | SessionState::Incompatible => ConnectionState::Reconnecting,
         };
         state.snapshot.sessions = vec![observation.session];
+        if session_state != SessionState::Stale {
+            state.snapshot.devices = observation.devices;
+        }
         state.snapshot.agents = agents;
         state.snapshot.agent_order = agent_order;
         state.snapshot.sequence = state.snapshot.sequence.saturating_add(1);
@@ -707,6 +710,7 @@ impl DaemonRuntime {
         };
         apply_agent_order(&mut agents, &agent_order);
         state.snapshot.sessions = sessions;
+        state.snapshot.devices.clear();
         state.snapshot.agents = agents;
         state.snapshot.agent_order = agent_order;
         state.snapshot.connection = if descriptors.is_empty() {
@@ -964,9 +968,14 @@ impl DaemonRuntime {
                     );
                 }
                 let result = if let Some(bin) = self.config.t3code.app_bin.as_deref() {
-                    self.t3code.open_native(bin, &target.thread_id).await
+                    self.t3code
+                        .open_native(bin, &target.environment_id, &target.thread_id)
+                        .await
                 } else {
-                    match self.t3code.thread_url(&target.thread_id) {
+                    match self
+                        .t3code
+                        .thread_url(&target.environment_id, &target.thread_id)
+                    {
                         Ok(url) => self.desktop.open_thread_url(&url).await,
                         Err(error) => Err(error),
                     }
@@ -1233,6 +1242,7 @@ impl DaemonRuntime {
         state.focused_agents.clear();
         state.t3code_sequence = None;
         state.snapshot.sessions.clear();
+        state.snapshot.devices.clear();
         state.snapshot.agents.clear();
         state.snapshot.agent_order = AgentOrderSnapshot::default();
         state.snapshot.connection = ConnectionState::Reconnecting;
@@ -2417,6 +2427,8 @@ mod tests {
             workspace: "workspace".into(),
             repository: None,
             worktree: None,
+            device: None,
+            device_local: None,
             session: "default".into(),
             focused,
             observed_for_seconds: 0,
@@ -2439,6 +2451,7 @@ mod tests {
 
     fn t3code_target(state_change_seq: u64, acknowledged: bool) -> AgentTarget {
         AgentTarget::T3code(T3codeTarget {
+            environment_id: "env".into(),
             thread_id: "thread".into(),
             state_change_seq,
             acknowledged,

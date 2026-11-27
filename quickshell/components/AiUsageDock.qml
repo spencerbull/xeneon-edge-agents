@@ -8,6 +8,7 @@ Item {
     property var theme: ThemePalette.fallback
     property var agents: []
     property var sessions: []
+    property var devices: []
     property string managerLabel: "HERDR"
     property bool reducedMotion: false
     property int clockTick: 0
@@ -67,12 +68,43 @@ Item {
         return count + " " + (count === 1 ? singular : plural)
     }
 
+    function deviceCounts() {
+        var total = Array.isArray(devices) ? devices.length : 0
+        var online = 0
+        var offline = 0
+        for (var index = 0; index < total; index += 1) {
+            var state = String(devices[index].state || "").toLowerCase()
+            if (state === "online")
+                online += 1
+            else if (state === "offline")
+                offline += 1
+        }
+        return {"total": total, "online": online, "offline": offline}
+    }
+
     function fleetSummary() {
+        var counts = deviceCounts()
+        if (counts.total > 0) {
+            return countLabel(agents.length, "AGENT", "AGENTS")
+                + " · " + counts.online + "/" + counts.total
+                + " DEVICES ONLINE"
+        }
         return countLabel(agents.length, "AGENT", "AGENTS")
             + " · " + countLabel(sessions.length, "SESSION", "SESSIONS")
     }
 
     function focusedSummary() {
+        var counts = deviceCounts()
+        if (counts.total > 0) {
+            if (counts.online === counts.total)
+                return counts.online + " ONLINE · ALL CONNECTED"
+            if (counts.offline > 0) {
+                return counts.online + " ONLINE · " + counts.offline
+                    + " OFFLINE"
+            }
+            return counts.online + " ONLINE · "
+                + (counts.total - counts.online) + " UNKNOWN"
+        }
         var focused = 0
         for (var index = 0; index < agents.length; index += 1) {
             if (agents[index].focused === true)

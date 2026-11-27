@@ -17,6 +17,7 @@ TestCase {
         signal noticeReceived(var notice)
 
         property var agents: []
+        property var devices: []
         property var agentOrder: ({"available": true, "mode": "grouped"})
         property var backend: ({"mode": "herdr", "switchable": true})
         property var sessions: []
@@ -149,6 +150,7 @@ TestCase {
 
     function init() {
         mockStore.agents = agents(20)
+        mockStore.devices = []
         mockStore.agentOrder = {"available": true, "mode": "grouped"}
         mockStore.backend = {"mode": "herdr", "switchable": true}
         mockStore.connection = {"state": "connected", "detail": ""}
@@ -494,5 +496,32 @@ TestCase {
 
         mockActivity.ambientMode = true
         tryCompare(portal, "paletteSettingsOpen", false)
+    }
+
+    function test_t3CodeCardsShowDeviceContextBadgeAndFleetSummary() {
+        mockStore.backend = {"mode": "t3code", "switchable": true}
+        mockStore.devices = [
+            {"id": "env-saber", "label": "saber", "state": "online", "local": true, "agent_count": 1},
+            {"id": "env-xps", "label": "xps-grace", "state": "online", "local": false, "agent_count": 1},
+            {"id": "env-mini", "label": "mac-mini", "state": "offline", "local": false, "agent_count": 0}
+        ]
+        var remoteAgent = Object.assign(agent(0), {
+            "device": "xps-grace",
+            "device_local": false
+        })
+        mockStore.agents = [remoteAgent]
+        wait(0)
+
+        var card = findChild(portal, "agentCard_0_0")
+        var badge = findChild(card, "agentDeviceBadge")
+        var badgeLabel = findChild(card, "agentDeviceLabel")
+        verify(card !== null)
+        verify(badge !== null)
+        compare(card.hasDevice, true)
+        compare(card.isLocalDevice, false)
+        verify(badge.width > 40)
+        compare(badgeLabel.text, "XPS-GRACE")
+        compare(badgeLabel.textFormat, Text.PlainText)
+        verify(portal.attentionSummary().indexOf("2/3 DEVICES") !== -1)
     }
 }

@@ -18,6 +18,9 @@ micro_refresh_ms = 5000
 # T3 Code data directory. Defaults to $T3CODE_HOME, then ~/.t3. Only the
 # read-only state projection and server runtime descriptor are read.
 # home = "/home/user/.t3"
+# Optional metadata-only fleet feed published by xeneon-t3-status.service
+# (tracks local threads plus online/offline T3 Connect fleet devices).
+# status_file = "/run/user/1000/xeneon-edge-agents/t3-status.json"
 refresh_ms = 1000
 
 [desktop]

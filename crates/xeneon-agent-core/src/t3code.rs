@@ -24,7 +24,9 @@ use serde::Deserialize;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::model::{AgentActions, AgentStatus, AgentView, SessionState, SessionView};
+use crate::model::{
+    AgentActions, AgentStatus, AgentView, DeviceState, DeviceView, SessionState, SessionView,
+};
 
 /// Session name reported for the single local T3 Code server.
 pub const SESSION_NAME: &str = "t3code";
@@ -35,8 +37,11 @@ const BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_CANDIDATES: usize = 512;
 /// Upper bound on cards produced per reconciliation.
 const MAX_ROSTER: usize = 64;
+/// Upper bound on fleet devices accepted per reconciliation.
+const MAX_DEVICES: usize = 32;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_LABEL_CHARS: usize = 96;
+const MAX_DEVICE_LABEL_CHARS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct T3codeClient {
@@ -48,6 +53,7 @@ pub struct T3codeClient {
 /// Private action-routing state for one T3 Code thread card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct T3codeTarget {
+    pub environment_id: String,
     pub thread_id: String,
     pub state_change_seq: u64,
     /// T3 Code recorded the human settling this thread, which acknowledges a
@@ -58,6 +64,7 @@ pub struct T3codeTarget {
 #[derive(Debug)]
 pub struct T3codeObservation {
     pub session: SessionView,
+    pub devices: Vec<DeviceView>,
     pub agents: Vec<AgentView>,
     pub targets: HashMap<String, T3codeTarget>,
     /// Highest projection sequence applied by T3 Code, used as a cheap change
@@ -81,6 +88,9 @@ enum Liveness {
 
 #[derive(Debug, Clone, Default)]
 struct ThreadRow {
+    environment_id: String,
+    device_label: Option<String>,
+    device_local: Option<bool>,
     thread_id: String,
     title: String,
     branch: Option<String>,
@@ -117,15 +127,36 @@ struct Classification {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct StatusDevice {
+    id: String,
+    label: String,
+    state: String,
+    #[serde(default)]
+    local: bool,
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    checked_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct StatusSnapshot {
     schema_version: u32,
     environment_id: String,
     generated_at_ms: u64,
+    #[serde(default)]
+    devices: Vec<StatusDevice>,
     threads: Vec<StatusThread>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct StatusThread {
+    #[serde(default)]
+    environment_id: Option<String>,
+    #[serde(default)]
+    device_label: Option<String>,
+    #[serde(default)]
+    device_local: Option<bool>,
     thread_id: String,
     title: String,
     project_title: String,
@@ -144,42 +175,128 @@ struct StatusThread {
 }
 
 impl StatusSnapshot {
-    fn rows(&self) -> Vec<ThreadRow> {
+    fn devices(&self) -> Vec<DeviceView> {
+        if self.devices.is_empty() {
+            let id = sanitize(&self.environment_id, 128);
+            if id.is_empty() {
+                return Vec::new();
+            }
+            return vec![DeviceView {
+                id,
+                label: local_device_label(),
+                state: DeviceState::Online,
+                local: true,
+                machine: None,
+                agent_count: 0,
+                last_checked_ms: Some(self.generated_at_ms),
+            }];
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut devices = Vec::new();
+        for device in &self.devices {
+            if devices.len() >= MAX_DEVICES {
+                break;
+            }
+            let id = sanitize(&device.id, 128);
+            if id.is_empty() || !seen.insert(id.clone()) {
+                continue;
+            }
+            let label = sanitize(&device.label, MAX_DEVICE_LABEL_CHARS);
+            let label = if label.is_empty() {
+                id.chars().take(12).collect()
+            } else {
+                label
+            };
+            let state = match device.state.trim().to_ascii_lowercase().as_str() {
+                "online" | "connected" | "reachable" => DeviceState::Online,
+                "offline" | "disconnected" | "unreachable" => DeviceState::Offline,
+                _ => DeviceState::Unknown,
+            };
+            let machine = device
+                .machine
+                .as_deref()
+                .map(|value| sanitize(value, 32))
+                .filter(|value| !value.is_empty());
+            devices.push(DeviceView {
+                local: device.local || id == self.environment_id,
+                id,
+                label,
+                state,
+                machine,
+                agent_count: 0,
+                last_checked_ms: device.checked_at_ms.or(Some(self.generated_at_ms)),
+            });
+        }
+        devices
+    }
+
+    fn rows(&self, devices: &[DeviceView]) -> Vec<ThreadRow> {
+        let device_index: HashMap<&str, (&str, bool)> = devices
+            .iter()
+            .map(|device| (device.id.as_str(), (device.label.as_str(), device.local)))
+            .collect();
         self.threads
             .iter()
             .map(|thread| {
+                let environment_id = thread
+                    .environment_id
+                    .as_deref()
+                    .map(|value| sanitize(value, 128))
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| sanitize(&self.environment_id, 128));
+                let known_device = device_index.get(environment_id.as_str()).copied();
+                let device_label = thread
+                    .device_label
+                    .as_deref()
+                    .map(|value| sanitize(value, MAX_DEVICE_LABEL_CHARS))
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| known_device.map(|(label, _)| label.to_owned()));
+                let device_local = thread
+                    .device_local
+                    .or_else(|| known_device.map(|(_, local)| local))
+                    .or_else(|| Some(environment_id == self.environment_id));
+                let status = thread.status.trim().to_ascii_lowercase();
+                let pending_input = thread.pending_input
+                    || matches!(
+                        status.as_str(),
+                        "waiting_for_approval" | "waiting_for_input"
+                    );
                 let active = thread.background_work
                     || matches!(
-                        thread.status.as_str(),
+                        status.as_str(),
                         "working" | "running" | "preparing" | "starting" | "waiting" | "queued"
                     );
                 ThreadRow {
-                    thread_id: thread.thread_id.clone(),
+                    environment_id,
+                    device_label,
+                    device_local,
+                    thread_id: sanitize(&thread.thread_id, 256),
                     title: thread.title.clone(),
                     project_title: Some(thread.project_title.clone()),
                     workspace_root: Some(thread.workspace_root.clone()),
                     branch: thread.branch.clone(),
                     worktree_path: thread.worktree_path.clone(),
                     provider_name: Some(thread.provider.clone()),
-                    pending_user_input_count: i64::from(thread.pending_input),
+                    pending_user_input_count: i64::from(pending_input),
                     active_work: active,
                     created_at: thread.updated_at.clone(),
                     visited_at: thread.last_visited_at.clone(),
                     settled_at: thread.settled.then(|| thread.updated_at.clone()),
                     snoozed_until: thread.snoozed.then(|| "2999-01-01T00:00:00Z".into()),
                     session_status: Some("ready".into()),
-                    last_turn: if thread.status == "idle"
-                        && thread.latest_run_completed_at.is_none()
-                    {
+                    last_turn: if status == "idle" && thread.latest_run_completed_at.is_none() {
                         None
                     } else {
                         Some(TurnRow {
-                            state: match thread.status.as_str() {
-                                "failed" | "error" => "error",
-                                "blocked" => "error",
-                                "working" | "running" | "preparing" | "starting" | "waiting" => {
-                                    "running"
-                                }
+                            state: match status.as_str() {
+                                "failed" | "error" | "blocked" => "error",
+                                "working"
+                                | "running"
+                                | "preparing"
+                                | "starting"
+                                | "waiting"
+                                | "waiting_for_approval"
+                                | "waiting_for_input" => "running",
                                 "completed" | "idle" | "done" => "completed",
                                 "interrupted" | "cancelled" => "interrupted",
                                 "queued" => "pending",
@@ -199,15 +316,27 @@ impl StatusSnapshot {
 }
 
 impl T3codeClient {
-    pub async fn open_native(&self, bin: &Path, thread_id: &str) -> Result<()> {
-        let environment = fs::read_to_string(self.userdata.join("environment-id"))?;
+    pub async fn open_native(
+        &self,
+        bin: &Path,
+        environment_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        let environment = if environment_id.trim().is_empty() {
+            fs::read_to_string(self.userdata.join("environment-id"))?
+        } else {
+            environment_id.to_owned()
+        };
+        let environment = environment.trim();
+        validate_target_component(environment, true)?;
+        validate_target_component(thread_id, true)?;
         let mut child = tokio::process::Command::new(bin)
             .args([
                 "app",
                 "--thread",
                 thread_id,
                 "--environment",
-                environment.trim(),
+                environment,
                 "--base-dir",
             ])
             .arg(
@@ -224,6 +353,7 @@ impl T3codeClient {
         anyhow::ensure!(status.success(), "native T3 thread activation failed");
         Ok(())
     }
+
     fn read_status_feed(&self, now_ms: u64) -> Result<StatusSnapshot> {
         let path = self
             .status_file
@@ -239,6 +369,7 @@ impl T3codeClient {
         anyhow::ensure!(
             feed.schema_version == 1
                 && feed.threads.len() <= MAX_ROSTER
+                && feed.devices.len() <= MAX_DEVICES
                 && feed.environment_id == environment.trim()
                 && now_ms.abs_diff(feed.generated_at_ms) < 10_000,
             "invalid or stale T3 feed"
@@ -246,14 +377,18 @@ impl T3codeClient {
         Ok(feed)
     }
 
-    pub fn thread_url(&self, thread_id: &str) -> Result<String> {
+    pub fn thread_url(&self, environment_id: &str, thread_id: &str) -> Result<String> {
         let runtime: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(self.runtime_path())?)?;
         let origin = runtime
             .get("origin")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow!("T3 runtime has no origin"))?;
-        let environment = fs::read_to_string(self.userdata.join("environment-id"))?;
+        let environment = if environment_id.trim().is_empty() {
+            fs::read_to_string(self.userdata.join("environment-id"))?
+        } else {
+            environment_id.to_owned()
+        };
         thread_url(origin, environment.trim(), thread_id)
     }
     /// Builds a client for a T3 Code data directory (the parent of `userdata`).
@@ -338,18 +473,30 @@ impl T3codeClient {
         read_projection_sequence(&connection)
     }
 
+    fn local_environment_id(&self) -> Option<String> {
+        fs::read_to_string(self.userdata.join("environment-id"))
+            .ok()
+            .map(|value| sanitize(&value, 128))
+            .filter(|value| !value.is_empty())
+    }
+
     /// Observes the live T3 Code roster. Failures are reported as session
     /// states rather than errors so the caller can publish them safely.
     pub fn observe(&self, daemon_epoch: &str, now_ms: u64) -> T3codeObservation {
         if self.status_file.is_some() {
             return match self.read_status_feed(now_ms) {
-                Ok(feed) => observation_from_rows(
-                    feed.rows(),
-                    daemon_epoch,
-                    now_ms,
-                    Some(1),
-                    Some(feed.generated_at_ms),
-                ),
+                Ok(feed) => {
+                    let devices = feed.devices();
+                    let rows = feed.rows(&devices);
+                    observation_from_rows(
+                        rows,
+                        devices,
+                        daemon_epoch,
+                        now_ms,
+                        Some(1),
+                        Some(feed.generated_at_ms),
+                    )
+                }
                 Err(_) => T3codeObservation {
                     session: SessionView {
                         name: SESSION_NAME.into(),
@@ -359,6 +506,7 @@ impl T3codeClient {
                         last_sync_ms: Some(now_ms),
                         message: Some("T3 metadata feed is unavailable".into()),
                     },
+                    devices: Vec::new(),
                     agents: Vec::new(),
                     targets: HashMap::new(),
                     projection_sequence: None,
@@ -366,6 +514,8 @@ impl T3codeClient {
             };
         }
 
+        let local_env = self.local_environment_id();
+        let local_label = local_device_label();
         let (protocol, offline_message) = match self.liveness() {
             Liveness::Running(version) => (Some(version), None),
             Liveness::Missing => (None, Some("T3 Code server is not running")),
@@ -385,6 +535,7 @@ impl T3codeClient {
                             "T3 Code runtime descriptor {version} is unsupported; expected {SUPPORTED_RUNTIME_VERSION}"
                         )),
                     },
+                    devices: Vec::new(),
                     agents: Vec::new(),
                     targets: HashMap::new(),
                     projection_sequence: None,
@@ -392,6 +543,19 @@ impl T3codeClient {
             }
         };
         if let Some(message) = offline_message {
+            let devices = local_env
+                .map(|id| {
+                    vec![DeviceView {
+                        id,
+                        label: local_label,
+                        state: DeviceState::Offline,
+                        local: true,
+                        machine: None,
+                        agent_count: 0,
+                        last_checked_ms: Some(now_ms),
+                    }]
+                })
+                .unwrap_or_default();
             return T3codeObservation {
                 session: SessionView {
                     name: SESSION_NAME.into(),
@@ -401,6 +565,7 @@ impl T3codeClient {
                     last_sync_ms: Some(now_ms),
                     message: Some(message.into()),
                 },
+                devices,
                 agents: Vec::new(),
                 targets: HashMap::new(),
                 projection_sequence: None,
@@ -420,6 +585,7 @@ impl T3codeClient {
                         last_sync_ms: Some(now_ms),
                         message: Some("T3 Code state is unavailable".into()),
                     },
+                    devices: Vec::new(),
                     agents: Vec::new(),
                     targets: HashMap::new(),
                     projection_sequence: None,
@@ -427,7 +593,7 @@ impl T3codeClient {
             }
         };
         let projection_sequence = read_projection_sequence(&connection).ok().flatten();
-        let rows = match read_threads(&connection) {
+        let mut rows = match read_threads(&connection) {
             Ok(rows) => rows,
             Err(error) => {
                 tracing::warn!(%error, "T3 Code state schema is unsupported");
@@ -440,19 +606,54 @@ impl T3codeClient {
                         last_sync_ms: Some(now_ms),
                         message: Some("T3 Code state schema is unsupported".into()),
                     },
+                    devices: Vec::new(),
                     agents: Vec::new(),
                     targets: HashMap::new(),
                     projection_sequence,
                 };
             }
         };
+        for row in &mut rows {
+            if row.environment_id.is_empty()
+                && let Some(env_id) = local_env.as_ref()
+            {
+                row.environment_id = env_id.clone();
+            }
+            if row.device_label.is_none() {
+                row.device_label = Some(local_label.clone());
+            }
+            if row.device_local.is_none() {
+                row.device_local = Some(true);
+            }
+        }
+        let devices = local_env
+            .map(|id| {
+                vec![DeviceView {
+                    id,
+                    label: local_label,
+                    state: DeviceState::Online,
+                    local: true,
+                    machine: None,
+                    agent_count: 0,
+                    last_checked_ms: Some(now_ms),
+                }]
+            })
+            .unwrap_or_default();
 
-        observation_from_rows(rows, daemon_epoch, now_ms, protocol, projection_sequence)
+        observation_from_rows(
+            rows,
+            devices,
+            daemon_epoch,
+            now_ms,
+            protocol,
+            projection_sequence,
+        )
     }
 }
 
 fn observation_from_rows(
     rows: Vec<ThreadRow>,
+    mut devices: Vec<DeviceView>,
     daemon_epoch: &str,
     now_ms: u64,
     protocol: Option<u32>,
@@ -460,6 +661,7 @@ fn observation_from_rows(
 ) -> T3codeObservation {
     let mut agents = Vec::new();
     let mut targets = HashMap::new();
+    let mut device_counts: HashMap<String, usize> = HashMap::new();
     for row in rows {
         if agents.len() >= MAX_ROSTER {
             break;
@@ -467,16 +669,28 @@ fn observation_from_rows(
         let Some(classification) = classify(&row, now_ms) else {
             continue;
         };
-        let id = opaque_agent_id(daemon_epoch, &row.thread_id);
+        let id = opaque_agent_id(daemon_epoch, &row.environment_id, &row.thread_id);
+        if targets.contains_key(&id) {
+            continue;
+        }
         let source_order = agents.len();
+        if !row.environment_id.is_empty() {
+            *device_counts.entry(row.environment_id.clone()).or_default() += 1;
+        }
         targets.insert(
             id.clone(),
             T3codeTarget {
+                environment_id: row.environment_id.clone(),
                 thread_id: row.thread_id.clone(),
                 state_change_seq: classification.state_change_seq,
                 acknowledged: classification.acknowledged,
             },
         );
+        let device = row
+            .device_label
+            .as_deref()
+            .map(|label| sanitize(label, MAX_DEVICE_LABEL_CHARS))
+            .filter(|label| !label.is_empty());
         agents.push(AgentView {
             id,
             display_name: display_name(&row),
@@ -495,6 +709,8 @@ fn observation_from_rows(
                 .as_deref()
                 .and_then(path_leaf)
                 .map(|leaf| sanitize(leaf, MAX_LABEL_CHARS)),
+            device,
+            device_local: row.device_local,
             session: SESSION_NAME.into(),
             focused: false,
             observed_for_seconds: 0,
@@ -509,6 +725,22 @@ fn observation_from_rows(
         });
     }
 
+    for device in &mut devices {
+        device.agent_count = device_counts.get(&device.id).copied().unwrap_or(0);
+    }
+    devices.sort_by(|left, right| {
+        left.state
+            .sort_rank()
+            .cmp(&right.state.sort_rank())
+            .then_with(|| right.local.cmp(&left.local))
+            .then_with(|| {
+                left.label
+                    .to_ascii_lowercase()
+                    .cmp(&right.label.to_ascii_lowercase())
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
     T3codeObservation {
         session: SessionView {
             name: SESSION_NAME.into(),
@@ -518,6 +750,7 @@ fn observation_from_rows(
             last_sync_ms: Some(now_ms),
             message: None,
         },
+        devices,
         agents,
         targets,
         projection_sequence,
@@ -536,13 +769,8 @@ fn thread_url(origin: &str, environment: &str, thread_id: &str) -> Result<String
             && port.parse::<u16>().is_ok_and(|port| port != 0),
         "T3 local origin is not loopback"
     );
-    anyhow::ensure!(
-        !environment.is_empty()
-            && !thread_id.is_empty()
-            && environment.len() <= 256
-            && thread_id.len() <= 256,
-        "invalid thread target"
-    );
+    validate_target_component(environment, false)?;
+    validate_target_component(thread_id, false)?;
     fn component(value: &str) -> String {
         value
             .bytes()
@@ -560,6 +788,21 @@ fn thread_url(origin: &str, environment: &str, thread_id: &str) -> Result<String
         component(environment),
         component(thread_id)
     ))
+}
+
+fn validate_target_component(value: &str, reject_leading_dash: bool) -> Result<()> {
+    anyhow::ensure!(
+        !value.is_empty()
+            && value.len() <= 256
+            && value != "."
+            && value != ".."
+            && (!reject_leading_dash || !value.starts_with('-'))
+            && !value
+                .chars()
+                .any(|ch| ch.is_control() || ch.is_whitespace()),
+        "invalid thread target"
+    );
+    Ok(())
 }
 
 fn default_home() -> Result<PathBuf> {
@@ -722,6 +965,7 @@ fn read_threads(connection: &Connection) -> Result<Vec<ThreadRow>> {
                 last_turn: None,
                 active_work: false,
                 visited_at: None,
+                ..ThreadRow::default()
             })
         })
         .context("querying T3 Code threads")?;
@@ -950,12 +1194,26 @@ fn sanitize(value: &str, limit: usize) -> String {
         .to_owned()
 }
 
-fn opaque_agent_id(epoch: &str, thread_id: &str) -> String {
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("{epoch}\0{SESSION_NAME}\0{thread_id}").as_bytes(),
-    )
-    .to_string()
+fn local_device_label() -> String {
+    let candidate = fs::read_to_string("/etc/hostname")
+        .ok()
+        .or_else(|| env::var("HOSTNAME").ok())
+        .unwrap_or_default();
+    let label = sanitize(&candidate, MAX_DEVICE_LABEL_CHARS);
+    if label.is_empty() {
+        "local".into()
+    } else {
+        label
+    }
+}
+
+fn opaque_agent_id(epoch: &str, environment_id: &str, thread_id: &str) -> String {
+    let key = if environment_id.is_empty() {
+        format!("{epoch}\0{SESSION_NAME}\0{thread_id}")
+    } else {
+        format!("{epoch}\0{SESSION_NAME}\0{environment_id}\0{thread_id}")
+    };
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, key.as_bytes()).to_string()
 }
 
 #[cfg(test)]
@@ -975,27 +1233,168 @@ mod tests {
                 "latest_run_completed_at":null,"last_visited_at":null
             }]
         })).unwrap();
+        let devices = snapshot.devices();
         assert_eq!(
-            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            classify(&snapshot.rows(&devices)[0], NOW_MS)
+                .unwrap()
+                .status,
             AgentStatus::Idle
         );
         let mut snapshot = snapshot;
         snapshot.threads[0].status = "waiting".into();
         assert_eq!(
-            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            classify(&snapshot.rows(&devices)[0], NOW_MS)
+                .unwrap()
+                .status,
             AgentStatus::Working
         );
         snapshot.threads[0].pending_input = true;
         assert_eq!(
-            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            classify(&snapshot.rows(&devices)[0], NOW_MS)
+                .unwrap()
+                .status,
             AgentStatus::Blocked
         );
         snapshot.threads[0].pending_input = false;
+        snapshot.threads[0].status = "waiting_for_approval".into();
+        assert_eq!(
+            classify(&snapshot.rows(&devices)[0], NOW_MS)
+                .unwrap()
+                .status,
+            AgentStatus::Blocked
+        );
         snapshot.threads[0].status = "idle".into();
         snapshot.threads[0].background_work = true;
         assert_eq!(
-            classify(&snapshot.rows()[0], NOW_MS).unwrap().status,
+            classify(&snapshot.rows(&devices)[0], NOW_MS)
+                .unwrap()
+                .status,
             AgentStatus::Working
+        );
+    }
+
+    #[test]
+    fn fleet_metadata_feed_tracks_online_offline_devices_and_remote_thread_targets() {
+        let dir = tempdir().unwrap();
+        let userdata = dir.path().join("userdata");
+        fs::create_dir_all(&userdata).unwrap();
+        fs::write(userdata.join("environment-id"), "env-saber").unwrap();
+        write_runtime(&userdata, i64::from(std::process::id()), 1);
+        fs::write(
+            userdata.join("server-runtime.json"),
+            r#"{"version":1,"pid":1,"host":"127.0.0.1","port":3773,"origin":"http://127.0.0.1:3773"}"#,
+        )
+        .unwrap();
+        let path = dir.path().join("fleet.json");
+        let frame = serde_json::json!({
+            "schema_version": 1,
+            "environment_id": "env-saber",
+            "generated_at_ms": NOW_MS,
+            "devices": [
+                {"id": "env-offline", "label": "zeta-box", "state": "offline", "local": false, "machine": "server", "checked_at_ms": NOW_MS - 100},
+                {"id": "env-taker", "label": "taker", "state": "online", "local": false, "machine": "desktop", "checked_at_ms": NOW_MS - 50},
+                {"id": "env-saber", "label": "saber", "state": "online", "local": true, "machine": "laptop", "checked_at_ms": NOW_MS},
+                {"id": "env-grace", "label": "xps-grace", "state": "online", "local": false, "machine": "laptop", "checked_at_ms": NOW_MS - 20}
+            ],
+            "threads": [
+                {
+                    "environment_id": "env-grace",
+                    "thread_id": "shared-id",
+                    "title": "Diagnose Speaker",
+                    "project_title": "audio",
+                    "workspace_root": "/work/audio",
+                    "branch": "main",
+                    "worktree_path": null,
+                    "provider": "antigravity",
+                    "status": "running",
+                    "settled": false,
+                    "snoozed": false,
+                    "pending_input": false,
+                    "background_work": false,
+                    "updated_at": "2026-09-11T12:00:00Z",
+                    "latest_run_completed_at": null,
+                    "last_visited_at": null
+                },
+                {
+                    "environment_id": "env-taker",
+                    "thread_id": "shared-id",
+                    "title": "Update Cua Plugin",
+                    "project_title": "omabot",
+                    "workspace_root": "/work/omabot",
+                    "branch": null,
+                    "worktree_path": null,
+                    "provider": "claudeAgent",
+                    "status": "waiting_for_input",
+                    "settled": false,
+                    "snoozed": false,
+                    "pending_input": false,
+                    "background_work": false,
+                    "updated_at": "2026-09-11T12:00:00Z",
+                    "latest_run_completed_at": null,
+                    "last_visited_at": null
+                },
+                {
+                    "environment_id": "env-saber",
+                    "thread_id": "local-id",
+                    "title": "Show Fleet Status",
+                    "project_title": "xeneon-edge-agents",
+                    "workspace_root": "/work/xeneon-edge-agents",
+                    "branch": "t3/t3-fleet-agent-status",
+                    "worktree_path": null,
+                    "provider": "antigravity",
+                    "status": "running",
+                    "settled": false,
+                    "snoozed": false,
+                    "pending_input": false,
+                    "background_work": false,
+                    "updated_at": "2026-09-11T12:00:00Z",
+                    "latest_run_completed_at": null,
+                    "last_visited_at": null
+                }
+            ]
+        });
+        fs::write(&path, frame.to_string()).unwrap();
+
+        let client = T3codeClient::from_config(Some(dir.path()), Some(&path)).unwrap();
+        let observed = client.observe("epoch", NOW_MS);
+        assert_eq!(observed.session.state, SessionState::Connected);
+        assert_eq!(observed.agents.len(), 3);
+        // Same raw thread_id on two different devices produces distinct opaque IDs.
+        let grace = agent_by_name(&observed, "Diagnose Speaker");
+        let taker = agent_by_name(&observed, "Update Cua Plugin");
+        let saber = agent_by_name(&observed, "Show Fleet Status");
+        assert_ne!(grace.id, taker.id);
+        assert_eq!(grace.device.as_deref(), Some("xps-grace"));
+        assert_eq!(grace.device_local, Some(false));
+        assert_eq!(taker.device.as_deref(), Some("taker"));
+        assert_eq!(taker.status, AgentStatus::Blocked);
+        assert_eq!(saber.device.as_deref(), Some("saber"));
+        assert_eq!(saber.device_local, Some(true));
+
+        let target = &observed.targets[&grace.id];
+        assert_eq!(target.environment_id, "env-grace");
+        assert_eq!(target.thread_id, "shared-id");
+        assert_eq!(
+            client
+                .thread_url(&target.environment_id, &target.thread_id)
+                .unwrap(),
+            "http://127.0.0.1:3773/env-grace/shared-id"
+        );
+
+        // Devices sort online+local first, then online alpha, then offline alpha.
+        let ordered: Vec<_> = observed
+            .devices
+            .iter()
+            .map(|device| (device.label.as_str(), device.state, device.agent_count))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                ("saber", DeviceState::Online, 1),
+                ("taker", DeviceState::Online, 1),
+                ("xps-grace", DeviceState::Online, 1),
+                ("zeta-box", DeviceState::Offline, 0),
+            ]
         );
     }
 
@@ -1709,5 +2108,64 @@ mod tests {
         assert_eq!(agent_kind(Some("Open Code!")), "opencode");
         assert_eq!(agent_kind(Some("   ")), "agent");
         assert_eq!(agent_kind(None), "agent");
+    }
+
+    #[test]
+    fn thread_url_and_target_validation_reject_traversal_and_flag_injection() {
+        assert!(thread_url("http://127.0.0.1:3773", "..", "thr-1").is_err());
+        assert!(thread_url("http://127.0.0.1:3773", "env-1", ".").is_err());
+        assert!(thread_url("http://127.0.0.1:3773", "env 1", "thr-1").is_err());
+        assert!(validate_target_component("--flag", true).is_err());
+        assert!(validate_target_component("env-valid_1", true).is_ok());
+    }
+
+    #[test]
+    fn duplicate_feed_threads_are_deduplicated_before_counting() {
+        let dir = tempdir().unwrap();
+        let userdata = dir.path().join("userdata");
+        fs::create_dir_all(&userdata).unwrap();
+        fs::write(userdata.join("environment-id"), "env-saber\n").unwrap();
+        let feed_path = dir.path().join("t3-status.json");
+        let thread = serde_json::json!({
+            "environment_id": "env-saber",
+            "device_label": "saber",
+            "device_local": true,
+            "thread_id": "thr-dup",
+            "title": "Duplicate Thread",
+            "project_title": "xeneon-edge-agents",
+            "workspace_root": "/home/sbull/xeneon-edge-agents",
+            "branch": "main",
+            "worktree_path": null,
+            "provider": "claude",
+            "status": "working",
+            "settled": false,
+            "snoozed": false,
+            "pending_input": false,
+            "background_work": true,
+            "updated_at": "2026-09-11T10:20:00.000Z",
+            "latest_run_completed_at": null,
+            "last_visited_at": null
+        });
+        fs::write(
+            &feed_path,
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "environment_id": "env-saber",
+                "generated_at_ms": NOW_MS,
+                "devices": [
+                    { "id": "env-saber", "label": "saber", "state": "online", "local": true }
+                ],
+                "threads": [thread.clone(), thread]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let client = T3codeClient::from_config(Some(dir.path()), Some(&feed_path))
+            .unwrap()
+            .without_process_identity();
+        let obs = client.observe("epoch-dedup", NOW_MS);
+        assert_eq!(obs.agents.len(), 1);
+        assert_eq!(obs.devices.len(), 1);
+        assert_eq!(obs.devices[0].agent_count, 1);
     }
 }

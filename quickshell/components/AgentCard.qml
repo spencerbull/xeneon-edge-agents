@@ -63,6 +63,23 @@ Item {
         capability("interrupt") !== null
     readonly property bool hasGuardedActions:
         hasApproveAction || hasInterruptAction
+    readonly property string deviceLabel:
+        agent === null ? "" : String(agent.device || "").trim()
+    readonly property bool hasDevice: deviceLabel !== ""
+    readonly property bool isLocalDevice:
+        agent !== null && agent.device_local === true
+    readonly property color deviceBadgeAccent:
+        isLocalDevice ? theme.accent : theme.cyan
+    readonly property color deviceBadgeBackground: ThemePalette.mixColors(
+        String(cardBackground),
+        String(deviceBadgeAccent),
+        0.14
+    )
+    readonly property color readableDeviceBadgeColor: ThemePalette.ensureContrast(
+        String(deviceBadgeAccent),
+        String(deviceBadgeBackground),
+        4.5
+    )
 
     function stateLabel(state) {
         if (agent !== null && agent.launch_pending === true)
@@ -162,7 +179,9 @@ Item {
             + root.managerName
     Accessible.description: agent === null
         ? ""
-        : processLine() + ". " + spaceLine() + ". " + contextLine()
+        : processLine() + ". "
+            + (hasDevice ? "Host " + deviceLabel + ". " : "")
+            + spaceLine() + ". " + contextLine()
             + ". Tap to focus in " + root.managerName + "."
     Accessible.onPressAction: root.requestFocus()
 
@@ -412,23 +431,89 @@ Item {
             }
         }
 
-        Text {
-            objectName: "agentSpaceName"
+        Item {
+            id: spaceDeviceRow
+
             anchors {
                 left: parent.left
                 right: parent.right
                 top: processText.bottom
                 topMargin: 6
             }
-            text: root.spaceLine().toUpperCase()
-            textFormat: Text.PlainText
-            color: root.readableMuted
-            elide: Text.ElideRight
-            font {
-                family: "monospace"
-                pixelSize: 11
-                weight: Font.DemiBold
-                letterSpacing: 0.5
+            height: 20
+
+            Text {
+                objectName: "agentSpaceName"
+                anchors {
+                    left: parent.left
+                    right: root.hasDevice ? deviceBadge.left : parent.right
+                    rightMargin: root.hasDevice ? 8 : 0
+                    verticalCenter: parent.verticalCenter
+                }
+                text: root.spaceLine().toUpperCase()
+                textFormat: Text.PlainText
+                color: root.readableMuted
+                elide: Text.ElideRight
+                font {
+                    family: "monospace"
+                    pixelSize: 11
+                    weight: Font.DemiBold
+                    letterSpacing: 0.5
+                }
+            }
+
+            Rectangle {
+                id: deviceBadge
+
+                objectName: "agentDeviceBadge"
+                visible: root.hasDevice
+                anchors {
+                    right: parent.right
+                    verticalCenter: parent.verticalCenter
+                }
+                width: Math.min(138, deviceBadgeRow.implicitWidth + 14)
+                height: 20
+                radius: 10
+                color: root.deviceBadgeBackground
+                border.width: 1
+                border.color: Qt.alpha(root.deviceBadgeAccent, 0.56)
+
+                Row {
+                    id: deviceBadgeRow
+
+                    anchors {
+                        left: parent.left
+                        right: parent.right
+                        leftMargin: 7
+                        rightMargin: 7
+                        verticalCenter: parent.verticalCenter
+                    }
+                    spacing: 5
+
+                    Rectangle {
+                        width: 6
+                        height: 6
+                        radius: 3
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: root.deviceBadgeAccent
+                    }
+
+                    Text {
+                        objectName: "agentDeviceLabel"
+                        width: Math.min(implicitWidth, 110)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.deviceLabel.toUpperCase()
+                        textFormat: Text.PlainText
+                        color: root.readableDeviceBadgeColor
+                        elide: Text.ElideRight
+                        font {
+                            family: "monospace"
+                            pixelSize: 10
+                            weight: Font.Bold
+                            letterSpacing: 0.5
+                        }
+                    }
+                }
             }
         }
 

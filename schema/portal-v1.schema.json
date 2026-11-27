@@ -132,6 +132,8 @@
         "workspace": { "type": "string" },
         "repository": { "type": "string" },
         "worktree": { "type": "string" },
+        "device": { "type": "string", "maxLength": 64 },
+        "device_local": { "type": "boolean" },
         "session": { "type": "string" },
         "focused": { "type": "boolean" },
         "observed_for_seconds": { "type": "integer", "minimum": 0 },
@@ -146,6 +148,22 @@
             "interrupt": { "$ref": "#/$defs/capability" }
           }
         }
+      }
+    },
+    "deviceState": {
+      "enum": ["online", "offline", "unknown"]
+    },
+    "device": {
+      "type": "object",
+      "required": ["id", "label", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "state": { "$ref": "#/$defs/deviceState" },
+        "local": { "type": "boolean" },
+        "machine": { "type": "string", "maxLength": 32 },
+        "agent_count": { "type": "integer", "minimum": 0 },
+        "last_checked_ms": { "type": "integer", "minimum": 0 }
       }
     },
     "session": {
@@ -264,6 +282,11 @@
         "sessions": {
           "type": "array",
           "items": { "$ref": "#/$defs/session" }
+        },
+        "devices": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/device" }
         },
         "agents": {
           "type": "array",

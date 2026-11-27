@@ -1,39 +1,1549 @@
 #!/usr/bin/python3
-"""Publish T3-owned metadata outside the read-only hardware daemon sandbox."""
+"""Publish metadata-only T3 fleet and thread status outside the daemon sandbox.
+
+Reads only allowlisted scalar metadata from:
+  1. Local read-only T3 Code SQLite projections (never messages, prompts,
+     activities, checkpoints, or T3 secrets).
+  2. T3 Connect Relay fleet status & aggregate activity endpoints using this
+     helper's own OAuth token and ES256 DPoP key stored under
+     $XDG_STATE_HOME/xeneon-edge-agents/t3-connect/.
+  3. Approved remote T3 environments' /api/orchestration/shell endpoint,
+     strictly projecting only allowlisted scalar metadata fields.
+"""
 import argparse
+import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
-import signal
+import platform
 import selectors
+import shutil
+import signal
+import socket
+import sqlite3
 import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 
-FIELDS = ('thread_id', 'title', 'project_title', 'workspace_root', 'branch',
-          'worktree_path', 'provider', 'status', 'settled', 'snoozed',
-          'pending_input', 'background_work', 'updated_at',
-          'latest_run_completed_at', 'last_visited_at')
+DEFAULT_RELAY_URL = 'https://relay.t3.codes'
+DEFAULT_OAUTH_ISSUER = 'https://clerk.t3.codes'
+DEFAULT_OAUTH_CLIENT_ID = 'hzxSgY2cH10sDU2r'
+DEFAULT_OAUTH_SCOPE = 'openid profile email offline_access'
+MAX_FRAME_BYTES = 4_194_304
+MAX_DEVICES = 32
+MAX_THREADS = 64
+MAX_SQLITE_CANDIDATES = 512
+WRITE_INTERVAL_SEC = 2.0
+ENV_POLL_INTERVAL_SEC = 15.0
+ACTIVITY_POLL_INTERVAL_SEC = 5.0
+SHELL_POLL_INTERVAL_SEC = 10.0
+APPROVAL_BACKOFF_SEC = 300.0
+SHELL_FRESH_WINDOW_SEC = 60.0
+ACTIVITY_FRESH_WINDOW_SEC = 60.0
+ENV_FRESH_WINDOW_SEC = 90.0
+HTTP_TIMEOUT_SEC = 8.0
+
+THREAD_FIELDS = (
+    'environment_id',
+    'device_label',
+    'device_local',
+    'thread_id',
+    'title',
+    'project_title',
+    'workspace_root',
+    'branch',
+    'worktree_path',
+    'provider',
+    'status',
+    'settled',
+    'snoozed',
+    'pending_input',
+    'background_work',
+    'updated_at',
+    'latest_run_completed_at',
+    'last_visited_at',
+)
+
+DEVICE_FIELDS = (
+    'id',
+    'label',
+    'state',
+    'local',
+    'machine',
+    'checked_at_ms',
+)
+
+LIVE_SHELL_STATUSES = frozenset({'preparing', 'starting', 'running', 'waiting', 'queued'})
+ACTIVE_ACTIVITY_PHASES = frozenset({'starting', 'running'})
+BLOCKED_ACTIVITY_PHASES = frozenset({'waiting_for_approval', 'waiting_for_input'})
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--t3-bin', default='t3')
-    parser.add_argument('--t3-home', type=Path, default=Path(os.environ.get('T3CODE_HOME', str(Path.home()/'.t3'))))
-    parser.add_argument('--output', type=Path, default=Path(os.environ['XDG_RUNTIME_DIR'])/'xeneon-edge-agents/t3-status.json')
-    args = parser.parse_args()
+def b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def parse_rfc3339_ms(value) -> int | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def sanitize_text(value, limit: int = 120) -> str:
+    if not isinstance(value, str):
+        return ''
+    cleaned = ' '.join(
+        ''.join(ch for ch in value if not (ord(ch) < 32 or ord(ch) == 127)).split()
+    )
+    return cleaned[:limit]
+
+
+def default_state_dir() -> Path:
+    base = os.environ.get('XDG_STATE_HOME')
+    if base:
+        return Path(base) / 'xeneon-edge-agents' / 't3-connect'
+    return Path.home() / '.local' / 'state' / 'xeneon-edge-agents' / 't3-connect'
+
+
+def default_runtime_output() -> Path:
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime:
+        return Path(runtime) / 'xeneon-edge-agents' / 't3-status.json'
+    return Path(f'/run/user/{os.getuid()}') / 'xeneon-edge-agents' / 't3-status.json'
+
+
+def default_t3_home() -> Path:
+    env = os.environ.get('T3CODE_HOME')
+    if env:
+        return Path(env)
+    return Path.home() / '.t3'
+
+
+def local_hostname() -> str:
+    name = socket.gethostname().split('.', 1)[0].strip()
+    return sanitize_text(name, 64) or 'local'
+
+
+def atomic_write_json(path: Path, payload: dict, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    if len(data.encode('utf-8')) > MAX_FRAME_BYTES:
+        raise RuntimeError('metadata frame exceeded size limit')
+    fd, tmp_name = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(data)
+            handle.flush()
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def is_loopback_origin(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        return False
+    host = (parsed.hostname or '').lower()
+    return host in ('127.0.0.1', 'localhost', '::1')
+
+
+def is_allowed_remote_url(
+    url: str,
+    allow_insecure: bool = False,
+    allow_query: bool = False,
+) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.username or parsed.password or parsed.fragment:
+        return False
+    if not allow_query and parsed.query:
+        return False
+    if parsed.scheme == 'https' and parsed.hostname:
+        return True
+    if allow_insecure and parsed.scheme == 'http' and is_loopback_origin(url):
+        return True
+    return False
+
+
+def strip_htu(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or '/', '', '', ''))
+
+
+def der_ecdsa_to_p1363(der: bytes, coord_len: int = 32) -> bytes:
+    """Convert ASN.1 DER ECDSA signature to raw IEEE P1363 (r || s)."""
+    idx = 0
+    if len(der) < 8 or der[idx] != 0x30:
+        raise ValueError('invalid DER ECDSA sequence')
+    idx += 1
+    seq_len = der[idx]
+    idx += 1
+    if seq_len & 0x80:
+        num_bytes = seq_len & 0x7F
+        if num_bytes == 0 or idx + num_bytes > len(der):
+            raise ValueError('invalid DER sequence length')
+        seq_len = int.from_bytes(der[idx:idx + num_bytes], 'big')
+        idx += num_bytes
+    seq_end = idx + seq_len
+    if seq_end != len(der):
+        raise ValueError('DER sequence length mismatch')
+
+    def read_int(pos: int) -> tuple[bytes, int]:
+        if pos + 2 > seq_end or der[pos] != 0x02:
+            raise ValueError('invalid DER INTEGER tag')
+        pos += 1
+        length = der[pos]
+        pos += 1
+        if length & 0x80:
+            n = length & 0x7F
+            if n == 0 or pos + n > seq_end:
+                raise ValueError('invalid DER INTEGER length')
+            length = int.from_bytes(der[pos:pos + n], 'big')
+            pos += n
+        if length == 0 or pos + length > seq_end:
+            raise ValueError('DER INTEGER out of bounds')
+        raw = der[pos:pos + length]
+        pos += length
+        raw = raw.lstrip(b'\x00')
+        if len(raw) > coord_len:
+            raise ValueError('ECDSA coordinate too large')
+        return raw.rjust(coord_len, b'\x00'), pos
+
+    r_bytes, idx = read_int(idx)
+    s_bytes, idx = read_int(idx)
+    if idx != seq_end:
+        raise ValueError('unexpected trailing DER bytes')
+    return r_bytes + s_bytes
+
+
+class DpopKey:
+    """ES256 (P-256) DPoP keypair managed via /usr/bin/openssl."""
+
+    def __init__(self, key_path: Path, openssl_bin: str = 'openssl'):
+        self.key_path = key_path
+        self.openssl_bin = openssl_bin
+        self._lock = threading.Lock()
+        self._jwk: dict[str, str] | None = None
+        self._thumbprint: str | None = None
+
+    def ensure_key(self) -> None:
+        with self._lock:
+            if not self.key_path.exists():
+                self.key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                fd, tmp_name = tempfile.mkstemp(prefix='.dpop-', suffix='.pem', dir=str(self.key_path.parent))
+                os.close(fd)
+                tmp_path = Path(tmp_name)
+                try:
+                    tmp_path.chmod(0o600)
+                    subprocess.run(
+                        [self.openssl_bin, 'ecparam', '-name', 'prime256v1', '-genkey', '-noout', '-out', str(tmp_path)],
+                        check=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+                    tmp_path.chmod(0o600)
+                    tmp_path.replace(self.key_path)
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+                self._jwk = None
+                self._thumbprint = None
+
+    def jwk(self) -> dict[str, str]:
+        self.ensure_key()
+        with self._lock:
+            if self._jwk is not None:
+                return dict(self._jwk)
+            proc = subprocess.run(
+                [self.openssl_bin, 'ec', '-in', str(self.key_path), '-pubout', '-outform', 'DER'],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            pub_der = proc.stdout
+            # SubjectPublicKeyInfo for P-256 uncompressed point ends with 0x04 || x(32) || y(32)
+            if len(pub_der) < 65 or pub_der[-65] != 0x04:
+                raise RuntimeError('unexpected P-256 public key DER encoding')
+            x = pub_der[-64:-32]
+            y = pub_der[-32:]
+            self._jwk = {
+                'crv': 'P-256',
+                'kty': 'EC',
+                'x': b64url(x),
+                'y': b64url(y),
+            }
+            canonical = json.dumps(self._jwk, separators=(',', ':'), sort_keys=True).encode('ascii')
+            self._thumbprint = b64url(hashlib.sha256(canonical).digest())
+            return dict(self._jwk)
+
+    def thumbprint(self) -> str:
+        self.jwk()
+        assert self._thumbprint is not None
+        return self._thumbprint
+
+    def proof(self, htm: str, htu: str, access_token: str | None = None, nonce: str | None = None) -> str:
+        jwk = self.jwk()
+        header = {
+            'typ': 'dpop+jwt',
+            'alg': 'ES256',
+            'jwk': jwk,
+        }
+        payload: dict[str, object] = {
+            'htm': htm.upper(),
+            'htu': strip_htu(htu),
+            'jti': str(uuid.uuid4()),
+            'iat': int(time.time()),
+        }
+        if access_token:
+            payload['ath'] = b64url(hashlib.sha256(access_token.encode('ascii')).digest())
+        if nonce:
+            payload['nonce'] = nonce
+        signing_input = (
+            b64url(json.dumps(header, separators=(',', ':')).encode('utf-8'))
+            + '.'
+            + b64url(json.dumps(payload, separators=(',', ':')).encode('utf-8'))
+        )
+        proc = subprocess.run(
+            [self.openssl_bin, 'dgst', '-sha256', '-sign', str(self.key_path)],
+            input=signing_input.encode('ascii'),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        raw_sig = der_ecdsa_to_p1363(proc.stdout, coord_len=32)
+        return signing_input + '.' + b64url(raw_sig)
+
+
+class HttpError(Exception):
+    def __init__(self, status: int, body: str, headers: dict[str, str]):
+        super().__init__(f'HTTP {status}')
+        self.status = status
+        self.body = body
+        self.headers = {k.lower(): v for k, v in headers.items()}
+
+    def json_body(self) -> dict:
+        try:
+            parsed = json.loads(self.body)
+            return parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            return {}
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse 3xx redirects so Authorization/DPoP tokens never cross origins or downgrade HTTPS."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(NoRedirectHandler())
+
+
+def http_request(
+    method: str,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    json_body: dict | None = None,
+    form_body: dict[str, str] | None = None,
+    timeout: float = HTTP_TIMEOUT_SEC,
+) -> tuple[int, dict[str, str], bytes]:
+    req_headers = {'Accept': 'application/json', 'User-Agent': 'xeneon-t3-status/1'}
+    if headers:
+        req_headers.update(headers)
+    data: bytes | None = None
+    if json_body is not None:
+        data = json.dumps(json_body, separators=(',', ':')).encode('utf-8')
+        req_headers.setdefault('Content-Type', 'application/json')
+    elif form_body is not None:
+        data = urllib.parse.urlencode(form_body).encode('utf-8')
+        req_headers.setdefault('Content-Type', 'application/x-www-form-urlencoded')
+    req = urllib.request.Request(url, data=data, headers=req_headers, method=method.upper())
+    try:
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+            resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+            raw = resp.read(MAX_FRAME_BYTES + 1)
+            if len(raw) > MAX_FRAME_BYTES:
+                raise RuntimeError('HTTP response exceeded safety limit')
+            return resp.status, resp_headers, raw
+    except urllib.error.HTTPError as err:
+        resp_headers = {k.lower(): v for k, v in err.headers.items()} if err.headers else {}
+        body = ''
+        try:
+            body = err.read(65536).decode('utf-8', errors='replace')
+        except Exception:
+            pass
+        finally:
+            try:
+                err.close()
+            except Exception:
+                pass
+        raise HttpError(err.code, body, resp_headers) from None
+
+
+def http_json_dpop(
+    dpop_key: DpopKey,
+    method: str,
+    url: str,
+    *,
+    access_token: str | None = None,
+    token_type: str = 'DPoP',
+    extra_headers: dict[str, str] | None = None,
+    json_body: dict | None = None,
+    form_body: dict[str, str] | None = None,
+    timeout: float = HTTP_TIMEOUT_SEC,
+) -> dict:
+    nonce: str | None = None
+    for attempt in range(2):
+        headers = dict(extra_headers or {})
+        if token_type.lower() == 'bearer' and access_token:
+            headers['Authorization'] = f'Bearer {access_token}'
+        else:
+            headers['DPoP'] = dpop_key.proof(method, url, access_token=access_token, nonce=nonce)
+            if access_token:
+                headers['Authorization'] = f'DPoP {access_token}'
+        try:
+            _, _, raw = http_request(
+                method,
+                url,
+                headers=headers,
+                json_body=json_body,
+                form_body=form_body,
+                timeout=timeout,
+            )
+            return json.loads(raw.decode('utf-8')) if raw else {}
+        except HttpError as err:
+            next_nonce = err.headers.get('dpop-nonce')
+            if (
+                attempt == 0
+                and token_type.lower() != 'bearer'
+                and next_nonce
+                and err.status in (400, 401)
+            ):
+                nonce = next_nonce
+                continue
+            raise
+    return {}
+
+
+class OAuthStore:
+    """Manages xeneon-t3-status's own OAuth token under XDG_STATE_HOME."""
+
+    def __init__(
+        self,
+        state_dir: Path,
+        issuer: str = DEFAULT_OAUTH_ISSUER,
+        client_id: str = DEFAULT_OAUTH_CLIENT_ID,
+        scope: str = DEFAULT_OAUTH_SCOPE,
+        allow_insecure_issuer: bool = False,
+    ):
+        self.state_dir = state_dir
+        self.auth_path = state_dir / 'auth.json'
+        self.issuer = issuer.rstrip('/')
+        self.client_id = client_id
+        self.scope = scope
+        self.allow_insecure_issuer = allow_insecure_issuer
+        self._lock = threading.Lock()
+        self._cached: dict | None = None
+        self._cached_mtime: float = -1.0
+
+    def load(self) -> dict | None:
+        with self._lock:
+            try:
+                stat = self.auth_path.stat()
+            except FileNotFoundError:
+                self._cached = None
+                self._cached_mtime = -1.0
+                return None
+            if self._cached is not None and stat.st_mtime == self._cached_mtime:
+                return dict(self._cached)
+            try:
+                parsed = json.loads(self.auth_path.read_text(encoding='utf-8'))
+            except Exception:
+                return None
+            if not isinstance(parsed, dict) or not parsed.get('access_token'):
+                return None
+            self._cached = parsed
+            self._cached_mtime = stat.st_mtime
+            return dict(parsed)
+
+    def save(self, record: dict) -> None:
+        with self._lock:
+            atomic_write_json(self.auth_path, record, mode=0o600)
+            self._cached = dict(record)
+            try:
+                self._cached_mtime = self.auth_path.stat().st_mtime
+            except OSError:
+                self._cached_mtime = -1.0
+
+    def delete(self) -> None:
+        with self._lock:
+            self.auth_path.unlink(missing_ok=True)
+            self._cached = None
+            self._cached_mtime = -1.0
+
+    def get_valid_access_token(self) -> str | None:
+        record = self.load()
+        if not record:
+            return None
+        expires_at = float(record.get('expires_at', 0))
+        if expires_at > time.time() + 120:
+            return str(record['access_token'])
+        refresh_token = record.get('refresh_token')
+        if not refresh_token:
+            return str(record['access_token']) if expires_at > time.time() + 10 else None
+        refreshed = self.refresh(record)
+        return str(refreshed['access_token']) if refreshed else None
+
+    def refresh(self, record: dict) -> dict | None:
+        issuer = str(record.get('issuer') or self.issuer).rstrip('/')
+        if not is_allowed_remote_url(issuer, self.allow_insecure_issuer):
+            return None
+        client_id = str(record.get('client_id') or self.client_id)
+        refresh_token = str(record.get('refresh_token') or '')
+        if not refresh_token:
+            return None
+        try:
+            _, _, raw = http_request(
+                'POST',
+                f'{issuer}/oauth/token',
+                form_body={
+                    'grant_type': 'refresh_token',
+                    'client_id': client_id,
+                    'refresh_token': refresh_token,
+                },
+            )
+            payload = json.loads(raw.decode('utf-8'))
+        except Exception:
+            return None
+        access_token = payload.get('access_token')
+        if not isinstance(access_token, str) or not access_token:
+            return None
+        expires_in = float(payload.get('expires_in') or 3600)
+        updated = {
+            'schema_version': 1,
+            'issuer': issuer,
+            'client_id': client_id,
+            'access_token': access_token,
+            'refresh_token': payload.get('refresh_token') or refresh_token,
+            'expires_at': time.time() + max(60.0, expires_in),
+            'updated_at_ms': now_ms(),
+        }
+        self.save(updated)
+        return updated
+
+    def device_login(self, headless: bool = False) -> dict:
+        if not is_allowed_remote_url(self.issuer, self.allow_insecure_issuer):
+            raise RuntimeError('insecure OAuth issuer URL rejected')
+        _, _, raw = http_request(
+            'POST',
+            f'{self.issuer}/oauth/device_authorization',
+            form_body={
+                'client_id': self.client_id,
+                'scope': self.scope,
+            },
+        )
+        auth = json.loads(raw.decode('utf-8'))
+        device_code = auth['device_code']
+        user_code = auth.get('user_code', '')
+        verify_uri = str(auth.get('verification_uri_complete') or auth.get('verification_uri') or '')
+        if verify_uri and not is_allowed_remote_url(
+            verify_uri,
+            allow_insecure=self.allow_insecure_issuer,
+            allow_query=True,
+        ):
+            raise RuntimeError('insecure OAuth verification URI rejected')
+        interval = max(2, int(auth.get('interval') or 5))
+        expires_in = int(auth.get('expires_in') or 600)
+
+        print('Authorize XENEON T3 fleet status helper:', flush=True)
+        print(f'  URL:  {verify_uri}', flush=True)
+        if user_code:
+            print(f'  Code: {user_code}', flush=True)
+        if not headless and verify_uri and (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+            opener = shutil.which('xdg-open')
+            if opener:
+                subprocess.Popen(
+                    [opener, verify_uri],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+        deadline = time.time() + expires_in
+        while time.time() < deadline:
+            time.sleep(interval)
+            try:
+                _, _, tok_raw = http_request(
+                    'POST',
+                    f'{self.issuer}/oauth/token',
+                    form_body={
+                        'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+                        'client_id': self.client_id,
+                        'device_code': device_code,
+                    },
+                )
+                payload = json.loads(tok_raw.decode('utf-8'))
+                access_token = payload['access_token']
+                tok_expires = float(payload.get('expires_in') or 3600)
+                record = {
+                    'schema_version': 1,
+                    'issuer': self.issuer,
+                    'client_id': self.client_id,
+                    'access_token': access_token,
+                    'refresh_token': payload.get('refresh_token', ''),
+                    'expires_at': time.time() + max(60.0, tok_expires),
+                    'updated_at_ms': now_ms(),
+                }
+                self.save(record)
+                return record
+            except HttpError as err:
+                err_code = str(err.json_body().get('error') or '')
+                if err_code == 'authorization_pending':
+                    continue
+                if err_code == 'slow_down':
+                    interval += 5
+                    continue
+                if err_code in ('expired_token', 'access_denied'):
+                    raise RuntimeError(f'OAuth device authorization failed: {err_code}')
+                raise RuntimeError(f'OAuth token poll failed (HTTP {err.status}): {err_code}')
+        raise RuntimeError('OAuth device authorization timed out')
+
+
+def local_process_alive(pid: int, expected_comm: str | None = 't3code') -> bool:
+    if pid <= 0:
+        return False
+    proc_dir = Path('/proc') / str(pid)
+    if not proc_dir.is_dir():
+        return False
+    if expected_comm is not None:
+        try:
+            comm = (proc_dir / 'comm').read_text(encoding='utf-8').strip()
+        except OSError:
+            return False
+        return comm == expected_comm
+    return True
+
+
+def read_local_environment(
+    t3_home: Path,
+    expected_comm: str | None = 't3code',
+) -> tuple[str | None, str, bool, str | None]:
+    """Return (environment_id, label, running, local_origin)."""
+    userdata = t3_home / 'userdata'
+    env_path = userdata / 'environment-id'
+    env_id: str | None = None
+    try:
+        raw = sanitize_text(env_path.read_text(encoding='utf-8'), 128)
+        if raw:
+            env_id = raw
+    except OSError:
+        pass
+
+    running = False
+    origin: str | None = None
+    runtime_path = userdata / 'server-runtime.json'
+    try:
+        runtime = json.loads(runtime_path.read_text(encoding='utf-8'))
+        if isinstance(runtime, dict) and runtime.get('version') == 1:
+            pid = int(runtime.get('pid') or 0)
+            if local_process_alive(pid, expected_comm=expected_comm):
+                running = True
+                raw_origin = runtime.get('origin')
+                if isinstance(raw_origin, str) and is_loopback_origin(raw_origin):
+                    origin = raw_origin.rstrip('/')
+    except Exception:
+        pass
+
+    label = local_hostname()
+    if running and origin:
+        try:
+            _, _, raw = http_request('GET', f'{origin}/.well-known/t3/environment', timeout=1.5)
+            descriptor = json.loads(raw.decode('utf-8'))
+            if isinstance(descriptor, dict):
+                desc_label = sanitize_text(descriptor.get('label'), 64)
+                if desc_label:
+                    label = desc_label
+                if not env_id:
+                    desc_id = sanitize_text(descriptor.get('environmentId'), 128)
+                    if desc_id:
+                        env_id = desc_id
+        except Exception:
+            pass
+    return env_id, label, running, origin
+
+
+def read_local_v2_threads(
+    t3_home: Path,
+    environment_id: str,
+    device_label: str,
+) -> list[dict]:
+    """Read only allowlisted metadata scalars from local statev2.sqlite (read-only)."""
+    db_path = t3_home / 'userdata' / 'statev2.sqlite'
+    if not db_path.is_file():
+        return []
+    uri = f'file:{urllib.parse.quote(str(db_path))}?mode=ro'
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=0.25)
+        cur = conn.cursor()
+        exists = cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='orchestration_v2_projection_threads')"
+        ).fetchone()
+        if not exists or not exists[0]:
+            return []
+        schema_row = cur.execute(
+            "SELECT last_sequence FROM orchestration_v2_projection_metadata "
+            "WHERE projection_name = 'thread-projections' AND schema_version = 2"
+        ).fetchone()
+        if not schema_row or schema_row[0] is None:
+            return []
+        rows = cur.execute(
+            "SELECT t.thread_id, t.title, json_extract(t.payload_json,'$.branch'), "
+            "json_extract(t.payload_json,'$.worktreePath'), "
+            "EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q "
+            " WHERE q.thread_id=t.thread_id AND q.status='pending'), "
+            "json_extract(t.payload_json,'$.settledAt'), "
+            "json_extract(t.payload_json,'$.snoozedUntil'), "
+            "t.updated_at, COALESCE(t.provider_instance_id,t.default_provider), "
+            "p.title, p.workspace_root, "
+            "r.status, r.completed_at, "
+            "EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a "
+            " WHERE a.thread_id=t.thread_id AND (a.status IN ('preparing','starting','running','waiting') "
+            "  OR (a.status='queued' AND json_extract(a.payload_json,'$.queueHeld') IS NOT 1))) "
+            " OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a "
+            "  WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting')) AS active_work, "
+            "json_extract(t.payload_json,'$.lastVisitedAt'), "
+            "json_extract(t.payload_json,'$.settledOverride') "
+            "FROM orchestration_v2_projection_threads t "
+            "LEFT JOIN projection_projects p ON p.project_id=t.project_id "
+            "LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=("
+            " SELECT candidate.run_id FROM orchestration_v2_projection_runs candidate "
+            " WHERE candidate.thread_id=t.thread_id "
+            " AND NOT(candidate.status='queued' AND json_extract(candidate.payload_json,'$.queueHeld') IS 1) "
+            " ORDER BY candidate.ordinal DESC, candidate.run_id DESC LIMIT 1) "
+            "WHERE t.deleted_at IS NULL AND t.archived_at IS NULL "
+            "AND (p.project_id IS NULL OR p.deleted_at IS NULL) "
+            "AND (json_extract(t.payload_json,'$.settledOverride') IS NOT 'settled' "
+            " OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q "
+            "  WHERE q.thread_id=t.thread_id AND q.status='pending') "
+            " OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runs a "
+            "  WHERE a.thread_id=t.thread_id AND (a.status IN ('preparing','starting','running','waiting') "
+            "   OR (a.status='queued' AND json_extract(a.payload_json,'$.queueHeld') IS NOT 1))) "
+            " OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents a "
+            "  WHERE a.thread_id=t.thread_id AND a.status IN ('pending','running','waiting'))) "
+            "AND (json_extract(t.payload_json,'$.lineage.relationshipToParent') IS NOT 'subagent' "
+            " OR EXISTS(SELECT 1 FROM orchestration_v2_projection_runtime_requests q "
+            "  WHERE q.thread_id=t.thread_id AND q.status='pending')) "
+            "ORDER BY 5 DESC, active_work DESC, t.updated_at DESC, t.thread_id LIMIT ?",
+            (MAX_SQLITE_CANDIDATES,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+    current_ms = now_ms()
+    result: list[dict] = []
+    for row in rows:
+        (
+            thread_id,
+            title,
+            branch,
+            worktree_path,
+            pending_input,
+            settled_at,
+            snoozed_until,
+            updated_at,
+            provider,
+            project_title,
+            workspace_root,
+            run_status,
+            completed_at,
+            active_work,
+            last_visited_at,
+            settled_override,
+        ) = row
+        pending = bool(pending_input)
+        active = bool(active_work)
+        settled = settled_override == 'settled' or (bool(settled_at) and settled_override != 'active')
+        snoozed_ms = parse_rfc3339_ms(snoozed_until)
+        snoozed = snoozed_ms is not None and snoozed_ms > current_ms
+        if (settled or snoozed) and not pending and not active:
+            continue
+        if pending:
+            status = 'waiting_for_approval'
+        elif active:
+            status = 'working'
+        elif run_status == 'failed':
+            status = 'failed'
+        elif run_status == 'cancelled':
+            status = 'interrupted'
+        elif run_status == 'completed':
+            status = 'completed'
+        elif run_status in LIVE_SHELL_STATUSES:
+            status = 'working'
+        else:
+            status = 'idle'
+        result.append({
+            'environment_id': environment_id,
+            'device_label': device_label,
+            'device_local': True,
+            'thread_id': sanitize_text(thread_id, 128),
+            'title': sanitize_text(title, 120) or 'Untitled thread',
+            'project_title': sanitize_text(project_title, 96),
+            'workspace_root': sanitize_text(workspace_root, 256),
+            'branch': sanitize_text(branch, 96) or None,
+            'worktree_path': sanitize_text(worktree_path, 256) or None,
+            'provider': sanitize_text(provider, 48) or 't3code',
+            'status': status,
+            'settled': settled,
+            'snoozed': snoozed,
+            'pending_input': pending,
+            'background_work': active,
+            'updated_at': sanitize_text(updated_at, 64),
+            'latest_run_completed_at': sanitize_text(completed_at, 64) or None,
+            'last_visited_at': sanitize_text(last_visited_at, 64) or None,
+        })
+    return result
+
+
+def extract_shell_threads(
+    shell_payload: dict,
+    environment_id: str,
+    device_label: str,
+    device_local: bool,
+) -> list[dict]:
+    """Strictly project only allowlisted scalar metadata from /api/orchestration/shell."""
+    if not isinstance(shell_payload, dict):
+        return []
+    projects: dict[str, tuple[str, str]] = {}
+    raw_projects = shell_payload.get('projects')
+    if isinstance(raw_projects, list):
+        for proj in raw_projects[:256]:
+            if not isinstance(proj, dict) or proj.get('deletedAt'):
+                continue
+            pid = sanitize_text(proj.get('id'), 128)
+            if pid:
+                projects[pid] = (
+                    sanitize_text(proj.get('title'), 96),
+                    sanitize_text(proj.get('workspaceRoot'), 256),
+                )
+
+    raw_threads = shell_payload.get('threads')
+    if not isinstance(raw_threads, list):
+        return []
+    current_ms = now_ms()
+    threads: list[dict] = []
+    for item in raw_threads[:MAX_SQLITE_CANDIDATES]:
+        if not isinstance(item, dict):
+            continue
+        if item.get('deletedAt') or item.get('archivedAt'):
+            continue
+        thread_id = sanitize_text(item.get('id'), 128)
+        if not thread_id:
+            continue
+        pending_req = item.get('pendingRuntimeRequest')
+        pending_input = isinstance(pending_req, dict) and bool(pending_req.get('id'))
+        lineage = item.get('lineage')
+        is_subagent = (
+            isinstance(lineage, dict)
+            and lineage.get('relationshipToParent') == 'subagent'
+        )
+        if is_subagent and not pending_input:
+            continue
+        raw_status = sanitize_text(item.get('status'), 32).lower()
+        activity_status = sanitize_text(item.get('activityRunStatus'), 32).lower()
+        pending_bg = item.get('pendingBackgroundTasks')
+        has_bg = isinstance(pending_bg, list) and len(pending_bg) > 0
+        active_work = (
+            raw_status in LIVE_SHELL_STATUSES
+            or activity_status in LIVE_SHELL_STATUSES
+            or has_bg
+            or bool(item.get('blockedOnThreadWait'))
+        )
+        settled_override = item.get('settledOverride')
+        settled = settled_override == 'settled' or (
+            bool(item.get('settledAt')) and settled_override != 'active'
+        )
+        snoozed_ms = parse_rfc3339_ms(item.get('snoozedUntil'))
+        snoozed = snoozed_ms is not None and snoozed_ms > current_ms
+        if (settled or snoozed) and not pending_input and not active_work:
+            continue
+        if pending_input:
+            status = 'waiting_for_approval'
+        elif active_work:
+            status = 'working'
+        elif raw_status == 'failed':
+            status = 'failed'
+        elif raw_status == 'cancelled':
+            status = 'interrupted'
+        elif raw_status == 'completed':
+            status = 'completed'
+        elif item.get('latestRunCompletedAt'):
+            status = 'completed'
+        else:
+            status = 'idle'
+        proj_title, workspace_root = projects.get(sanitize_text(item.get('projectId'), 128), ('', ''))
+        provider = sanitize_text(item.get('providerInstanceId'), 48)
+        if not provider:
+            model_sel = item.get('modelSelection')
+            if isinstance(model_sel, dict):
+                provider = sanitize_text(model_sel.get('provider'), 48)
+        threads.append({
+            'environment_id': environment_id,
+            'device_label': device_label,
+            'device_local': device_local,
+            'thread_id': thread_id,
+            'title': sanitize_text(item.get('title'), 120) or 'Untitled thread',
+            'project_title': proj_title,
+            'workspace_root': workspace_root,
+            'branch': sanitize_text(item.get('branch'), 96) or None,
+            'worktree_path': sanitize_text(item.get('worktreePath'), 256) or None,
+            'provider': provider or 't3code',
+            'status': status,
+            'settled': settled,
+            'snoozed': snoozed,
+            'pending_input': pending_input,
+            'background_work': active_work,
+            'updated_at': sanitize_text(item.get('updatedAt'), 64),
+            'latest_run_completed_at': sanitize_text(item.get('latestRunCompletedAt'), 64) or None,
+            'last_visited_at': sanitize_text(item.get('lastVisitedAt'), 64) or None,
+        })
+    return threads
+
+
+def extract_relay_activity_threads(
+    activity_payload: dict,
+    device_labels: dict[str, str],
+    local_env_id: str | None,
+) -> list[dict]:
+    """Project /v1/mobile/agent-activity aggregate rows to StatusThread metadata."""
+    if not isinstance(activity_payload, dict):
+        return []
+    aggregate = activity_payload.get('aggregate')
+    if not isinstance(aggregate, dict):
+        return []
+    rows = aggregate.get('activities')
+    if not isinstance(rows, list):
+        return []
+    threads: list[dict] = []
+    for item in rows[:MAX_THREADS]:
+        if not isinstance(item, dict):
+            continue
+        env_id = sanitize_text(item.get('environmentId'), 128)
+        thread_id = sanitize_text(item.get('threadId'), 128)
+        if not env_id or not thread_id:
+            continue
+        phase = sanitize_text(item.get('phase'), 32).lower()
+        updated_at = sanitize_text(item.get('updatedAt'), 64)
+        pending_input = phase in BLOCKED_ACTIVITY_PHASES
+        background_work = phase in ACTIVE_ACTIVITY_PHASES
+        completed_at: str | None = None
+        if pending_input:
+            status = phase
+        elif background_work:
+            status = 'working'
+        elif phase == 'completed':
+            status = 'completed'
+            completed_at = updated_at or None
+        elif phase == 'failed':
+            status = 'failed'
+        else:
+            status = 'idle'
+        label = device_labels.get(env_id) or env_id[:12]
+        threads.append({
+            'environment_id': env_id,
+            'device_label': label,
+            'device_local': env_id == local_env_id,
+            'thread_id': thread_id,
+            'title': sanitize_text(item.get('threadTitle'), 120) or 'Untitled thread',
+            'project_title': sanitize_text(item.get('projectTitle'), 96),
+            'workspace_root': '',
+            'branch': None,
+            'worktree_path': None,
+            'provider': sanitize_text(item.get('modelTitle'), 48) or 't3code',
+            'status': status,
+            'settled': False,
+            'snoozed': False,
+            'pending_input': pending_input,
+            'background_work': background_work,
+            'updated_at': updated_at,
+            'latest_run_completed_at': completed_at,
+            'last_visited_at': None,
+        })
+    return threads
+
+
+def thread_sort_key(thread: dict) -> tuple:
+    status = str(thread.get('status') or '').lower()
+    pending = bool(thread.get('pending_input')) or status in BLOCKED_ACTIVITY_PHASES
+    active = bool(thread.get('background_work')) or status in ('working', 'running', 'starting', 'preparing', 'waiting')
+    completed_ms = parse_rfc3339_ms(thread.get('latest_run_completed_at')) or 0
+    visited_ms = parse_rfc3339_ms(thread.get('last_visited_at')) or 0
+    review_ready = (status in ('completed', 'done') and completed_ms > visited_ms)
+    updated_ms = parse_rfc3339_ms(thread.get('updated_at')) or 0
+    if pending:
+        rank = 0
+    elif review_ready:
+        rank = 1
+    elif active:
+        rank = 2
+    elif status in ('failed', 'error'):
+        rank = 3
+    else:
+        rank = 4
+    return (rank, -updated_ms, str(thread.get('environment_id') or ''), str(thread.get('thread_id') or ''))
+
+
+def device_sort_key(device: dict) -> tuple:
+    state = str(device.get('state') or 'unknown').lower()
+    rank = 0 if state == 'online' else (1 if state == 'offline' else 2)
+    return (rank, 0 if device.get('local') else 1, str(device.get('label') or '').lower(), str(device.get('id') or ''))
+
+
+class FleetCollector:
+    """Polls local SQLite + T3 Connect Relay + approved remote environments."""
+
+    def __init__(
+        self,
+        t3_home: Path,
+        oauth_store: OAuthStore,
+        dpop_key: DpopKey,
+        relay_url: str = DEFAULT_RELAY_URL,
+        allow_insecure_relay: bool = False,
+        expected_local_comm: str | None = 't3code',
+    ):
+        self.t3_home = t3_home
+        self.oauth = oauth_store
+        self.dpop = dpop_key
+        self.relay_url = relay_url.rstrip('/')
+        self.allow_insecure_relay = allow_insecure_relay
+        self.expected_local_comm = expected_local_comm
+
+        self._lock = threading.Lock()
+        self._relay_tokens: dict[str, tuple[str, float]] = {}
+        self._env_tokens: dict[str, tuple[str, str, float]] = {}
+        self._env_approval_backoff: dict[str, tuple[float, str]] = {}
+        self._remote_devices: dict[str, dict] = {}
+        self._remote_endpoints: dict[str, str] = {}
+        self._remote_shell_threads: dict[str, tuple[float, list[dict]]] = {}
+        self._relay_activity_threads: list[dict] = []
+        self._last_relay_error: str | None = None
+        self._last_env_poll = 0.0
+        self._last_env_success = 0.0
+        self._last_activity_poll = 0.0
+        self._last_activity_success = 0.0
+        self._last_shell_poll = 0.0
+
+    def _clear_remote_state(self) -> None:
+        with self._lock:
+            self._relay_tokens.clear()
+            self._env_tokens.clear()
+            self._env_approval_backoff.clear()
+            self._remote_devices.clear()
+            self._remote_endpoints.clear()
+            self._remote_shell_threads.clear()
+            self._relay_activity_threads.clear()
+            self._last_env_success = 0.0
+            self._last_activity_success = 0.0
+
+    def _relay_dpop_token(self, clerk_token: str, client_id: str, scope: str) -> str:
+        cache_key = f'{client_id}:{scope}'
+        cached = self._relay_tokens.get(cache_key)
+        if cached and cached[1] > time.time() + 30:
+            return cached[0]
+        url = f'{self.relay_url}/v1/client/dpop-token'
+        resp = http_json_dpop(
+            self.dpop,
+            'POST',
+            url,
+            form_body={
+                'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                'subject_token': clerk_token,
+                'subject_token_type': 'urn:ietf:params:oauth:token-type:jwt',
+                'requested_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+                'resource': self.relay_url,
+                'scope': scope,
+                'client_id': client_id,
+            },
+        )
+        token = resp.get('access_token')
+        if not isinstance(token, str) or not token:
+            raise RuntimeError('relay did not return DPoP access token')
+        expires_in = float(resp.get('expires_in') or 300)
+        self._relay_tokens[cache_key] = (token, time.time() + max(30.0, expires_in))
+        return token
+
+    def poll_remote_once(self, force: bool = False) -> None:
+        clerk_token = self.oauth.get_valid_access_token()
+        if not clerk_token:
+            self._clear_remote_state()
+            with self._lock:
+                self._last_relay_error = 'not logged in'
+            return
+        if not is_allowed_remote_url(self.relay_url, self.allow_insecure_relay):
+            self._clear_remote_state()
+            with self._lock:
+                self._last_relay_error = 'insecure relay URL rejected'
+            return
+
+        now = time.monotonic()
+        local_env_id, _, _, _ = read_local_environment(
+            self.t3_home,
+            expected_comm=self.expected_local_comm,
+        )
+
+        # 1. Discover environments & online/offline status
+        if force or now - self._last_env_poll >= ENV_POLL_INTERVAL_SEC:
+            self._last_env_poll = now
+            try:
+                self._poll_environments(clerk_token, local_env_id)
+                with self._lock:
+                    self._last_env_success = time.monotonic()
+                    self._last_relay_error = None
+            except HttpError as err:
+                if err.status == 401:
+                    self._relay_tokens.clear()
+                with self._lock:
+                    self._last_relay_error = f'environments: {err}'
+            except Exception as exc:
+                with self._lock:
+                    self._last_relay_error = f'environments: {exc}'
+
+        # 2. Fetch Tier 2 relay aggregate agent activity (works without per-device approval)
+        if force or now - self._last_activity_poll >= ACTIVITY_POLL_INTERVAL_SEC:
+            self._last_activity_poll = now
+            try:
+                self._poll_relay_activity(clerk_token, local_env_id)
+                with self._lock:
+                    self._last_activity_success = time.monotonic()
+            except HttpError as err:
+                if err.status == 401:
+                    self._relay_tokens.clear()
+                with self._lock:
+                    if not self._last_relay_error:
+                        self._last_relay_error = f'activity: {err}'
+            except Exception as exc:
+                with self._lock:
+                    if not self._last_relay_error:
+                        self._last_relay_error = f'activity: {exc}'
+
+        # 3. Fetch Tier 1 full shell metadata from approved online remote environments
+        if force or now - self._last_shell_poll >= SHELL_POLL_INTERVAL_SEC:
+            self._last_shell_poll = now
+            try:
+                self._poll_remote_shells(clerk_token, local_env_id)
+            except Exception:
+                pass
+
+    def _poll_environments(self, clerk_token: str, local_env_id: str | None) -> None:
+        _, _, raw = http_request(
+            'GET',
+            f'{self.relay_url}/v1/environments',
+            headers={'Authorization': f'Bearer {clerk_token}'},
+        )
+        payload = json.loads(raw.decode('utf-8'))
+        envs = payload.get('environments')
+        if not isinstance(envs, list):
+            return
+        web_token = self._relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
+
+        probed_devices: dict[str, dict] = {}
+        probed_endpoints: dict[str, str] = {}
+
+        def probe_one(env: dict) -> tuple[str, dict, str | None] | None:
+            env_id = sanitize_text(env.get('environmentId'), 128)
+            if not env_id:
+                return None
+            label = sanitize_text(env.get('label'), 64) or env_id[:12]
+            endpoint = env.get('endpoint')
+            http_base = (
+                sanitize_text(endpoint.get('httpBaseUrl'), 256).rstrip('/')
+                if isinstance(endpoint, dict)
+                else ''
+            )
+            checked_ms = now_ms()
+            if env_id == local_env_id:
+                return (
+                    env_id,
+                    {
+                        'id': env_id,
+                        'label': label,
+                        'state': 'unknown',
+                        'local': True,
+                        'machine': sanitize_text(platform.machine(), 32) or None,
+                        'checked_at_ms': checked_ms,
+                    },
+                    http_base or None,
+                )
+            status_url = f'{self.relay_url}/v1/environments/{urllib.parse.quote(env_id, safe="")}/status'
+            state = 'unknown'
+            machine: str | None = None
+            try:
+                resp = http_json_dpop(self.dpop, 'POST', status_url, access_token=web_token)
+                raw_state = sanitize_text(resp.get('status'), 24).lower()
+                state = raw_state if raw_state in ('online', 'offline') else 'unknown'
+                checked_ms = parse_rfc3339_ms(resp.get('checkedAt')) or checked_ms
+                desc = resp.get('descriptor')
+                if isinstance(desc, dict):
+                    desc_label = sanitize_text(desc.get('label'), 64)
+                    if desc_label:
+                        label = desc_label
+                    plat = desc.get('platform')
+                    if isinstance(plat, dict):
+                        machine = sanitize_text(plat.get('machine'), 32) or None
+                resp_ep = resp.get('endpoint')
+                if isinstance(resp_ep, dict):
+                    ep_base = sanitize_text(resp_ep.get('httpBaseUrl'), 256).rstrip('/')
+                    if ep_base:
+                        http_base = ep_base
+            except Exception:
+                state = 'offline'
+            return (
+                env_id,
+                {
+                    'id': env_id,
+                    'label': label,
+                    'state': state,
+                    'local': False,
+                    'machine': machine,
+                    'checked_at_ms': checked_ms,
+                },
+                http_base or None,
+            )
+
+        candidates = [e for e in envs if isinstance(e, dict)][:MAX_DEVICES]
+        with ThreadPoolExecutor(max_workers=min(6, max(1, len(candidates)))) as pool:
+            futures = [pool.submit(probe_one, env) for env in candidates]
+            for fut in as_completed(futures):
+                outcome = fut.result()
+                if outcome is None:
+                    continue
+                env_id, dev, http_base = outcome
+                probed_devices[env_id] = dev
+                if http_base:
+                    probed_endpoints[env_id] = http_base
+
+        with self._lock:
+            self._remote_devices = probed_devices
+            self._remote_endpoints = probed_endpoints
+            # Drop stale shell cache for offline devices
+            for env_id, dev in probed_devices.items():
+                if dev['state'] != 'online':
+                    self._remote_shell_threads.pop(env_id, None)
+
+    def _poll_relay_activity(self, clerk_token: str, local_env_id: str | None) -> None:
+        mobile_token = self._relay_dpop_token(clerk_token, 't3-mobile', 'mobile:registration')
+        resp = http_json_dpop(
+            self.dpop,
+            'GET',
+            f'{self.relay_url}/v1/mobile/agent-activity',
+            access_token=mobile_token,
+        )
+        with self._lock:
+            labels = {eid: dev['label'] for eid, dev in self._remote_devices.items()}
+        threads = extract_relay_activity_threads(resp, labels, local_env_id)
+        with self._lock:
+            self._relay_activity_threads = threads
+
+    def _poll_remote_shells(self, clerk_token: str, local_env_id: str | None) -> None:
+        with self._lock:
+            targets = [
+                (eid, dev['label'], self._remote_endpoints.get(eid, ''))
+                for eid, dev in self._remote_devices.items()
+                if eid != local_env_id and dev.get('state') == 'online'
+            ]
+        if not targets:
+            return
+        web_token = self._relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
+        now = time.monotonic()
+
+        for env_id, label, _ in targets:
+            with self._lock:
+                backoff = self._env_approval_backoff.get(env_id)
+            if backoff and backoff[0] > now:
+                continue
+            try:
+                shell = self._fetch_remote_shell(env_id, web_token)
+            except HttpError as err:
+                if err.status == 401:
+                    self._env_tokens.pop(env_id, None)
+                    try:
+                        shell = self._fetch_remote_shell(env_id, web_token)
+                    except HttpError as retry_err:
+                        if retry_err.status == 403:
+                            info = retry_err.json_body()
+                            code = sanitize_text(
+                                info.get('approvalCode') or info.get('code') or info.get('error'),
+                                64,
+                            )
+                            with self._lock:
+                                self._env_approval_backoff[env_id] = (
+                                    time.monotonic() + APPROVAL_BACKOFF_SEC,
+                                    code or 'approval_required',
+                                )
+                        continue
+                    except Exception:
+                        continue
+                elif err.status == 403:
+                    info = err.json_body()
+                    code = sanitize_text(
+                        info.get('approvalCode') or info.get('code') or info.get('error'),
+                        64,
+                    )
+                    self._env_tokens.pop(env_id, None)
+                    with self._lock:
+                        self._env_approval_backoff[env_id] = (
+                            time.monotonic() + APPROVAL_BACKOFF_SEC,
+                            code or 'approval_required',
+                        )
+                    continue
+                else:
+                    continue
+            except Exception:
+                continue
+            threads = extract_shell_threads(shell, env_id, label, device_local=False)
+            with self._lock:
+                self._remote_shell_threads[env_id] = (time.monotonic(), threads)
+                self._env_approval_backoff.pop(env_id, None)
+
+    def _fetch_remote_shell(self, env_id: str, web_token: str) -> dict:
+        cached = self._env_tokens.get(env_id)
+        http_base = self._remote_endpoints.get(env_id, '')
+        env_token: str | None = None
+        token_type = 'DPoP'
+        if cached and cached[2] > time.time() + 60 and http_base:
+            env_token, token_type, _ = cached
+        if not env_token:
+            connect_url = f'{self.relay_url}/v1/environments/{urllib.parse.quote(env_id, safe="")}/connect'
+            connect_resp = http_json_dpop(
+                self.dpop,
+                'POST',
+                connect_url,
+                access_token=web_token,
+                json_body={'clientProofKeyThumbprint': self.dpop.thumbprint()},
+            )
+            credential = connect_resp.get('credential')
+            ep = connect_resp.get('endpoint')
+            if isinstance(ep, dict) and ep.get('httpBaseUrl'):
+                http_base = sanitize_text(ep.get('httpBaseUrl'), 256).rstrip('/')
+                with self._lock:
+                    self._remote_endpoints[env_id] = http_base
+            if not isinstance(credential, str) or not credential or not http_base:
+                raise RuntimeError('connect response missing credential or endpoint')
+            if not is_allowed_remote_url(http_base, self.allow_insecure_relay):
+                raise RuntimeError('insecure remote environment URL rejected')
+            token_resp = http_json_dpop(
+                self.dpop,
+                'POST',
+                f'{http_base}/oauth/token',
+                form_body={
+                    'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                    'subject_token': credential,
+                    'subject_token_type': 'urn:t3:params:oauth:token-type:environment-bootstrap',
+                    'requested_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+                    'scope': 'orchestration:read',
+                    'client_label': 'XENEON EDGE',
+                    'client_device_type': 'desktop',
+                    'client_os': 'linux',
+                },
+            )
+            env_token = token_resp.get('access_token')
+            if not isinstance(env_token, str) or not env_token:
+                raise RuntimeError('remote environment did not issue access token')
+            token_type = str(token_resp.get('token_type') or 'DPoP')
+            expires_in = float(token_resp.get('expires_in') or 900)
+            self._env_tokens[env_id] = (env_token, token_type, time.time() + max(60.0, expires_in))
+
+        if not is_allowed_remote_url(http_base, self.allow_insecure_relay):
+            raise RuntimeError('insecure remote environment URL rejected')
+        shell_url = f'{http_base}/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1'
+        return http_json_dpop(
+            self.dpop,
+            'GET',
+            shell_url,
+            access_token=env_token,
+            token_type=token_type,
+            extra_headers={'x-t3-orchestration-protocol': '2'},
+        )
+
+    def build_snapshot(self) -> dict | None:
+        local_env_id, local_label, local_running, _ = read_local_environment(
+            self.t3_home,
+            expected_comm=self.expected_local_comm,
+        )
+        if not local_env_id:
+            return None
+
+        local_threads = (
+            read_local_v2_threads(self.t3_home, local_env_id, local_label)
+            if local_running
+            else []
+        )
+        current_ms = now_ms()
+        now_mono = time.monotonic()
+
+        with self._lock:
+            env_stale = (
+                self._last_env_success > 0.0
+                and now_mono - self._last_env_success > ENV_FRESH_WINDOW_SEC
+            )
+            activity_fresh = (
+                self._last_activity_success > 0.0
+                and now_mono - self._last_activity_success <= ACTIVITY_FRESH_WINDOW_SEC
+            )
+            devices_map: dict[str, dict] = {}
+            for eid, dev in self._remote_devices.items():
+                copy = dict(dev)
+                if env_stale and eid != local_env_id:
+                    copy['state'] = 'unknown'
+                devices_map[eid] = copy
+            shell_cache = {
+                eid: (ts, list(rows))
+                for eid, (ts, rows) in self._remote_shell_threads.items()
+            }
+            relay_activities = list(self._relay_activity_threads) if activity_fresh else []
+
+        # Always represent local host accurately from live local liveness
+        existing_local = devices_map.get(local_env_id, {})
+        devices_map[local_env_id] = {
+            'id': local_env_id,
+            'label': existing_local.get('label') or local_label,
+            'state': 'online' if local_running else 'offline',
+            'local': True,
+            'machine': existing_local.get('machine') or (sanitize_text(platform.machine(), 32) or None),
+            'checked_at_ms': current_ms,
+        }
+
+        merged: dict[tuple[str, str], dict] = {}
+        for row in local_threads:
+            row['device_label'] = devices_map[local_env_id]['label']
+            merged[(local_env_id, row['thread_id'])] = row
+
+        fresh_shell_envs: set[str] = set()
+        for env_id, (ts, rows) in shell_cache.items():
+            if env_id == local_env_id:
+                continue
+            dev = devices_map.get(env_id)
+            if not dev or dev.get('state') != 'online':
+                continue
+            if now_mono - ts > SHELL_FRESH_WINDOW_SEC:
+                continue
+            fresh_shell_envs.add(env_id)
+            for row in rows:
+                copy = dict(row)
+                copy['device_label'] = dev['label']
+                copy['device_local'] = False
+                merged[(env_id, copy['thread_id'])] = copy
+
+        for row in relay_activities:
+            env_id = row['environment_id']
+            if env_id == local_env_id:
+                continue
+            dev = devices_map.get(env_id)
+            if dev is None:
+                devices_map[env_id] = {
+                    'id': env_id,
+                    'label': row.get('device_label') or env_id[:12],
+                    'state': 'online',
+                    'local': False,
+                    'machine': None,
+                    'checked_at_ms': current_ms,
+                }
+                dev = devices_map[env_id]
+            elif dev.get('state') == 'offline':
+                continue
+            key = (env_id, row['thread_id'])
+            if env_id in fresh_shell_envs and key in merged:
+                continue
+            copy = dict(row)
+            copy['device_label'] = dev['label']
+            copy['device_local'] = False
+            merged[key] = copy
+
+        devices = sorted(devices_map.values(), key=device_sort_key)[:MAX_DEVICES]
+        threads = sorted(merged.values(), key=thread_sort_key)[:MAX_THREADS]
+        return {
+            'schema_version': 1,
+            'environment_id': local_env_id,
+            'generated_at_ms': current_ms,
+            'devices': [{k: d.get(k) for k in DEVICE_FIELDS} for d in devices],
+            'threads': [{k: t.get(k) for k in THREAD_FIELDS} for t in threads],
+        }
+
+    def diagnostics(self) -> dict:
+        auth = self.oauth.load()
+        with self._lock:
+            devices = sorted(self._remote_devices.values(), key=device_sort_key)
+            shell_envs = sorted(self._remote_shell_threads.keys())
+            approval_needed = {
+                eid: code for eid, (_, code) in self._env_approval_backoff.items()
+            }
+            relay_error = self._last_relay_error
+            activity_count = len(self._relay_activity_threads)
+        return {
+            'authenticated': auth is not None,
+            'auth_expires_at': auth.get('expires_at') if auth else None,
+            'dpop_thumbprint': self.dpop.thumbprint() if self.dpop.key_path.exists() else None,
+            'relay_url': self.relay_url,
+            'relay_error': relay_error,
+            'devices': devices,
+            'tier1_shell_environments': shell_envs,
+            'tier1_approval_pending': approval_needed,
+            'tier2_activity_count': activity_count,
+        }
+
+
+def run_cli_watch(t3_bin: str, t3_home: Path, output: Path) -> int:
+    """Legacy `t3 thread status --json --watch` pipe mode."""
     os.umask(0o077)
-    args.output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with args.output.with_suffix('.lock').open('a') as lock:
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with output.with_suffix('.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        process = None
         stopping = False
+
         def stop(*_):
             nonlocal stopping
             stopping = True
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, stop)
-        process = subprocess.Popen([args.t3_bin, 'thread', 'status', '--json', '--watch', '--base-dir', str(args.t3_home)],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        process = subprocess.Popen(
+            [t3_bin, 'thread', 'status', '--json', '--watch', '--base-dir', str(t3_home)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+        )
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
@@ -47,18 +1557,30 @@ def main():
                     buffer += data
                     while b'\n' in buffer:
                         line, buffer = buffer.split(b'\n', 1)
-                        if len(line) + 1 > 4_194_304:
+                        if len(line) + 1 > MAX_FRAME_BYTES:
                             raise RuntimeError('T3 metadata feed exceeded its frame limit')
                         frame = json.loads(line)
-                        if frame['schema_version'] != 1 or len(frame['threads']) > 64:
+                        if frame['schema_version'] != 1 or len(frame['threads']) > MAX_THREADS:
                             raise RuntimeError('unsupported T3 metadata feed')
-                        result = {key: frame[key] for key in ('schema_version', 'environment_id', 'generated_at_ms')}
-                        result['threads'] = [{key: thread.get(key) for key in FIELDS} for thread in frame['threads']]
-                        temporary = args.output.with_suffix('.tmp')
+                        result = {
+                            key: frame[key]
+                            for key in ('schema_version', 'environment_id', 'generated_at_ms')
+                        }
+                        if isinstance(frame.get('devices'), list):
+                            result['devices'] = [
+                                {key: device.get(key) for key in DEVICE_FIELDS}
+                                for device in frame['devices'][:MAX_DEVICES]
+                                if isinstance(device, dict)
+                            ]
+                        result['threads'] = [
+                            {key: thread.get(key) for key in THREAD_FIELDS}
+                            for thread in frame['threads']
+                        ]
+                        temporary = output.with_suffix('.tmp')
                         temporary.write_text(json.dumps(result, ensure_ascii=False))
                         temporary.chmod(0o600)
-                        temporary.replace(args.output)
-                    if len(buffer) > 4_194_304:
+                        temporary.replace(output)
+                    if len(buffer) > MAX_FRAME_BYTES:
                         raise RuntimeError('T3 metadata feed exceeded its frame limit')
         finally:
             try:
@@ -73,10 +1595,181 @@ def main():
                     process.kill()
                     process.wait()
             finally:
-                process.stdout.close()
-                args.output.unlink(missing_ok=True)
-                args.output.with_suffix('.tmp').unlink(missing_ok=True)
+                if process.stdout:
+                    process.stdout.close()
+                output.unlink(missing_ok=True)
+                output.with_suffix('.tmp').unlink(missing_ok=True)
+    return 0
+
+
+def run_fleet_daemon(
+    t3_home: Path,
+    output: Path,
+    state_dir: Path,
+    relay_url: str,
+    issuer: str,
+    client_id: str,
+    allow_insecure_relay: bool = False,
+) -> int:
+    os.umask(0o077)
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with output.with_suffix('.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stop_event = threading.Event()
+
+        def stop(*_):
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, stop)
+
+        oauth = OAuthStore(
+            state_dir,
+            issuer=issuer,
+            client_id=client_id,
+            allow_insecure_issuer=allow_insecure_relay,
+        )
+        dpop = DpopKey(state_dir / 'dpop-key.pem')
+        collector = FleetCollector(
+            t3_home=t3_home,
+            oauth_store=oauth,
+            dpop_key=dpop,
+            relay_url=relay_url,
+            allow_insecure_relay=allow_insecure_relay,
+        )
+
+        def remote_loop() -> None:
+            while not stop_event.is_set():
+                try:
+                    collector.poll_remote_once()
+                except Exception:
+                    pass
+                stop_event.wait(2.0)
+
+        worker = threading.Thread(target=remote_loop, name='t3-fleet-poller', daemon=True)
+        worker.start()
+        try:
+            while not stop_event.is_set():
+                snapshot = collector.build_snapshot()
+                if snapshot is not None:
+                    atomic_write_json(output, snapshot, mode=0o600)
+                else:
+                    output.unlink(missing_ok=True)
+                stop_event.wait(WRITE_INTERVAL_SEC)
+        finally:
+            stop_event.set()
+            worker.join(timeout=3.0)
+            output.unlink(missing_ok=True)
+            output.with_suffix('.tmp').unlink(missing_ok=True)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        'command',
+        nargs='?',
+        choices=('run', 'login', 'logout', 'status'),
+        default='run',
+        help='Subcommand (default: run daemon).',
+    )
+    parser.add_argument('--mode', choices=('auto', 'fleet', 'cli'), default='auto')
+    parser.add_argument('--t3-bin', default=None, help='Legacy T3 CLI binary for watch-pipe mode.')
+    parser.add_argument('--t3-home', type=Path, default=default_t3_home())
+    parser.add_argument('--output', type=Path, default=None)
+    parser.add_argument('--state-dir', type=Path, default=default_state_dir())
+    parser.add_argument('--relay-url', default=os.environ.get('XENEON_T3_RELAY_URL', DEFAULT_RELAY_URL))
+    parser.add_argument('--oauth-issuer', default=os.environ.get('XENEON_T3_OAUTH_ISSUER', DEFAULT_OAUTH_ISSUER))
+    parser.add_argument('--oauth-client-id', default=os.environ.get('XENEON_T3_OAUTH_CLIENT_ID', DEFAULT_OAUTH_CLIENT_ID))
+    parser.add_argument('--headless', action='store_true', help='Do not launch a browser during login.')
+    parser.add_argument('--reset-key', action='store_true', help='Also remove the ES256 DPoP key on logout.')
+    parser.add_argument('--json', action='store_true', help='Emit JSON diagnostics for status.')
+    parser.add_argument('--allow-insecure-local-relay', action='store_true', help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == 'login':
+        os.umask(0o077)
+        oauth = OAuthStore(
+            args.state_dir,
+            issuer=args.oauth_issuer,
+            client_id=args.oauth_client_id,
+            allow_insecure_issuer=args.allow_insecure_local_relay,
+        )
+        dpop = DpopKey(args.state_dir / 'dpop-key.pem')
+        dpop.ensure_key()
+        oauth.device_login(headless=args.headless)
+        print(f'T3 Connect login saved to {oauth.auth_path}', flush=True)
+        print(f'DPoP thumbprint: {dpop.thumbprint()}', flush=True)
+        return 0
+
+    if args.command == 'logout':
+        oauth = OAuthStore(args.state_dir, issuer=args.oauth_issuer, client_id=args.oauth_client_id)
+        oauth.delete()
+        if args.reset_key:
+            (args.state_dir / 'dpop-key.pem').unlink(missing_ok=True)
+        print('T3 Connect credentials removed.', flush=True)
+        return 0
+
+    if args.command == 'status':
+        oauth = OAuthStore(
+            args.state_dir,
+            issuer=args.oauth_issuer,
+            client_id=args.oauth_client_id,
+            allow_insecure_issuer=args.allow_insecure_local_relay,
+        )
+        dpop = DpopKey(args.state_dir / 'dpop-key.pem')
+        collector = FleetCollector(
+            t3_home=args.t3_home,
+            oauth_store=oauth,
+            dpop_key=dpop,
+            relay_url=args.relay_url,
+            allow_insecure_relay=args.allow_insecure_local_relay,
+        )
+        collector.poll_remote_once(force=True)
+        snapshot = collector.build_snapshot()
+        diag = collector.diagnostics()
+        diag['snapshot_devices'] = snapshot['devices'] if snapshot else []
+        diag['snapshot_thread_count'] = len(snapshot['threads']) if snapshot else 0
+        if args.json:
+            print(json.dumps(diag, indent=2, ensure_ascii=False))
+        else:
+            print(f"Authenticated: {diag['authenticated']}")
+            print(f"Relay:         {diag['relay_url']}")
+            if diag['relay_error']:
+                print(f"Relay status:  {diag['relay_error']}")
+            print(f"Devices ({len(diag['snapshot_devices'])}):")
+            for dev in diag['snapshot_devices']:
+                tag = ' (local)' if dev.get('local') else ''
+                mach = f" [{dev['machine']}]" if dev.get('machine') else ''
+                print(f"  - {dev['label']}{tag}: {dev['state']}{mach}")
+            if diag['tier1_approval_pending']:
+                print('Remote environments using Tier 2 relay activity (approve device for full Tier 1 shell):')
+                for eid, code in diag['tier1_approval_pending'].items():
+                    print(f'  - {eid}: {code}')
+            print(f"Active threads: {diag['snapshot_thread_count']}")
+        return 0
+
+    output = args.output or default_runtime_output()
+    mode = args.mode
+    if mode == 'auto':
+        mode = 'cli' if args.t3_bin is not None else 'fleet'
+    if mode == 'cli':
+        return run_cli_watch(args.t3_bin or 't3', args.t3_home, output)
+    return run_fleet_daemon(
+        t3_home=args.t3_home,
+        output=output,
+        state_dir=args.state_dir,
+        relay_url=args.relay_url,
+        issuer=args.oauth_issuer,
+        client_id=args.oauth_client_id,
+        allow_insecure_relay=args.allow_insecure_local_relay,
+    )
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

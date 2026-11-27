@@ -144,8 +144,19 @@ Item {
             else if (agent.status === "working")
                 working += 1
         }
-        return working + " WORKING  ·  " + review + " REVIEW  ·  "
+        var summary = working + " WORKING  ·  " + review + " REVIEW  ·  "
             + waiting + " WAITING"
+        var fleetDevices = Array.isArray(store.devices) ? store.devices : []
+        if (fleetDevices.length > 1) {
+            var onlineDevices = 0
+            for (var devIdx = 0; devIdx < fleetDevices.length; devIdx += 1) {
+                if (String(fleetDevices[devIdx].state || "") === "online")
+                    onlineDevices += 1
+            }
+            summary += "  ·  " + onlineDevices + "/" + fleetDevices.length
+                + " DEVICES"
+        }
+        return summary
     }
 
     function notePassiveInteraction() {
@@ -1060,6 +1071,7 @@ Item {
         theme: root.theme
         agents: root.store.agents
         sessions: root.store.sessions
+        devices: root.store.devices || []
         managerLabel: root.managerLabel
         reducedMotion: root.effectiveReducedMotion
         enabled: root.controlCenterInteractive
@@ -1291,6 +1303,7 @@ Item {
         active: root.activity.ambientMode
         reducedMotion: root.effectiveReducedMotion
         agents: root.store.agents
+        devices: root.store.devices || []
         health: root.store.health
         voice: root.store.voice
         connectionState: root.store.connection.state

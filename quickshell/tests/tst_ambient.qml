@@ -83,6 +83,7 @@ TestCase {
         ambient.frozenBoostPhase = 0
         ambient.exitCoastPhase = 0
         ambient.agents = sevenAgents()
+        ambient.devices = []
         ambient.health = {"status": "healthy"}
         ambient.voice = {
             "available": true,
@@ -389,6 +390,47 @@ TestCase {
     function test_trailsStayBounded() {
         compare(boundedTrail.segmentCount, 8)
         verify(boundedTrail.sweepDegrees <= 90)
+    }
+
+    function test_fleetDevicesPanelShowsOnlineOfflineWithoutConstellationOverlap() {
+        ambient.devices = [
+            {"id": "env-saber", "label": "saber", "state": "online", "local": true, "machine": "x86_64", "agent_count": 2},
+            {"id": "env-taker", "label": "taker", "state": "online", "local": false, "machine": "x86_64", "agent_count": 3},
+            {"id": "env-mini", "label": "mac-mini", "state": "offline", "local": false, "machine": "arm64", "agent_count": 0}
+        ]
+        ambient.agents = [
+            {"id": "a1", "display_name": "Agent One", "status": "idle", "review_ready": false, "device": "taker"}
+        ]
+        ambient.active = true
+        tryCompare(ambient, "revealProgress", 1)
+
+        var panel = findChild(ambient, "ambientFleetDevices")
+        var constellation = findChild(ambient, "ambientConstellation")
+        var summary = findChild(ambient, "ambientFleetOnlineSummary")
+        var row0 = findChild(ambient, "ambientDeviceRow-0")
+        var row2 = findChild(ambient, "ambientDeviceRow-2")
+        var state0 = findChild(ambient, "ambientDeviceState-0")
+        var state2 = findChild(ambient, "ambientDeviceState-2")
+        var node = findChild(ambient, "ambientAgentNode-0")
+        var nodeDevice = findChild(node, "ambientAgentDeviceLabel")
+
+        verify(panel !== null)
+        compare(ambient.visibleDevices.length, 3)
+        verify(panel.height > 100)
+        verify(panel.x >= 0)
+        verify(panel.x + panel.width < constellation.x)
+        compare(summary.text, "2/3 ONLINE")
+        compare(summary.textFormat, Text.PlainText)
+        verify(row0 !== null)
+        verify(row2 !== null)
+        compare(state0.text, "2 ACTIVE")
+        compare(state2.text, "OFFLINE")
+        verify(node !== null)
+        compare(node.hasDevice, true)
+        verify(nodeDevice !== null)
+        compare(nodeDevice.text, "TAKER")
+        compare(nodeDevice.textFormat, Text.PlainText)
+        compare(ambient.centerDetail(), "1 AGENTS // 2/3 ONLINE")
     }
 
     function normalizedAngle(angle) {

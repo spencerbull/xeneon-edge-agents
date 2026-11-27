@@ -124,7 +124,18 @@ TestCase {
     }
 
     function test_fleetSummaryUsesAuthoritativeCollections() {
+        dock.devices = []
         compare(dock.fleetSummary(), "2 AGENTS · 2 SESSIONS")
         compare(dock.focusedSummary(), "1 FOCUSED")
+    }
+
+    function test_fleetSummaryShowsDeviceOnlineOfflineCountsWhenPresent() {
+        dock.devices = [
+            {"id": "a", "label": "saber", "state": "online", "local": true},
+            {"id": "b", "label": "taker", "state": "online", "local": false},
+            {"id": "c", "label": "mini", "state": "offline", "local": false}
+        ]
+        compare(dock.fleetSummary(), "2 AGENTS · 2/3 DEVICES ONLINE")
+        compare(dock.focusedSummary(), "2 ONLINE · 1 OFFLINE")
     }
 }

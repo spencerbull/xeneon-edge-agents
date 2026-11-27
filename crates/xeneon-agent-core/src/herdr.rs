@@ -282,6 +282,8 @@ impl HerdrClient {
                 workspace: workspace_label,
                 repository,
                 worktree,
+                device: None,
+                device_local: None,
                 session: descriptor.name.clone(),
                 focused: raw.focused,
                 observed_for_seconds: 0,
