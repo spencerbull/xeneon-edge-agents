@@ -7,9 +7,13 @@ PartOf=graphical-session.target
 Type=simple
 Environment="PATH=@BIN_HOME@:/usr/local/bin:/usr/bin"
 Environment="XDG_RUNTIME_DIR=%t"
+Environment="XDG_CONFIG_HOME=@CONFIG_HOME@"
+Environment="XDG_STATE_HOME=@STATE_HOME@"
 ExecStart="@BIN_HOME@/xeneon-t3-status"
 Restart=on-failure
 RestartSec=5s
+StateDirectory=xeneon-edge-agents
+StateDirectoryMode=0700
 RuntimeDirectory=xeneon-edge-agents
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
@@ -18,7 +22,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.t3/userdata %t/xeneon-edge-agents
+ReadWritePaths="@STATE_HOME@/xeneon-edge-agents" %t/xeneon-edge-agents
 
 [Install]
 WantedBy=graphical-session.target

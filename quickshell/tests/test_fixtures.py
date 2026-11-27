@@ -18,6 +18,7 @@ REQUIRED_SNAPSHOT_KEYS = {
     "health",
 }
 SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {
+    "devices",
     "voice",
     "usage",
     "micro",
@@ -25,6 +26,10 @@ SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {
     "backend",
 }
 AGENT_BACKENDS = {"herdr", "t3code"}
+DEVICE_STATES = {"online", "offline", "unknown"}
+REQUIRED_DEVICE_KEYS = {"id", "label", "state", "local"}
+DEVICE_KEYS = REQUIRED_DEVICE_KEYS | {"machine", "feed_state", "agent_count", "last_checked_ms"}
+USAGE_PROVIDER_ORDER = ["claude", "codex", "gemini", "grok", "cursor", "opencode"]
 REQUIRED_AGENT_KEYS = {
     "id",
     "display_name",
@@ -42,6 +47,8 @@ AGENT_KEYS = REQUIRED_AGENT_KEYS | {
     "launch_pending",
     "repository",
     "worktree",
+    "device",
+    "device_local",
     "state_change_seq",
 }
 HEALTH_KEYS = {
@@ -139,10 +146,11 @@ class FixtureContractTests(unittest.TestCase):
                         )
                     if "usage" in envelope:
                         providers = envelope["usage"]["providers"]
-                        self.assertLessEqual(len(providers), 3)
+                        self.assertLessEqual(len(providers), len(USAGE_PROVIDER_ORDER))
+                        provider_ids = [provider["id"] for provider in providers]
                         self.assertEqual(
-                            [provider["id"] for provider in providers],
-                            ["claude", "codex", "opencode"][: len(providers)],
+                            provider_ids,
+                            [pid for pid in USAGE_PROVIDER_ORDER if pid in provider_ids],
                         )
                         for provider in providers:
                             self.assertIn(
@@ -193,6 +201,20 @@ class FixtureContractTests(unittest.TestCase):
                     for session in envelope["sessions"]:
                         self.assertTrue(session["name"])
                         self.assertIn(session["state"], SESSION_STATES)
+
+                    if "devices" in envelope:
+                        self.assertIsInstance(envelope["devices"], list)
+                        self.assertLessEqual(len(envelope["devices"]), 32)
+                        for device in envelope["devices"]:
+                            self.assertLessEqual(
+                                REQUIRED_DEVICE_KEYS,
+                                set(device),
+                            )
+                            self.assertLessEqual(set(device), DEVICE_KEYS)
+                            self.assertTrue(device["id"])
+                            self.assertTrue(device["label"])
+                            self.assertIn(device["state"], DEVICE_STATES)
+                            self.assertIsInstance(device["local"], bool)
 
                     for agent in envelope["agents"]:
                         self.assertLessEqual(
@@ -294,11 +316,18 @@ class FixtureContractTests(unittest.TestCase):
         self.assertEqual(home["backend"], {"mode": "herdr", "switchable": True})
         self.assertEqual(t3code["backend"], {"mode": "t3code", "switchable": True})
         self.assertEqual([s["name"] for s in t3code["sessions"]], ["t3code"])
+        self.assertEqual(
+            {d["state"] for d in t3code["devices"]},
+            {"online", "offline"},
+        )
+        self.assertTrue(any(d["local"] for d in t3code["devices"]))
         self.assertTrue(t3code["agents"])
         for agent in t3code["agents"]:
             # T3 Code threads expose only window focus: no zoom, and no
             # approval or interrupt capabilities until a grounded API exists.
             self.assertEqual(agent["session"], "t3code")
+            self.assertTrue(agent["device"])
+            self.assertIsInstance(agent["device_local"], bool)
             self.assertTrue(agent["actions"]["open"])
             self.assertFalse(agent["actions"]["zoom"])
             self.assertIsNone(agent["actions"]["approve"])

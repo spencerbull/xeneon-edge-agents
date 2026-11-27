@@ -492,3 +492,45 @@ Goal: current metadata-only T3 status, exact thread navigation, shared six-slot 
 - Review gates: independent Codex xhigh reviews in progress. Full Xeneon checks pass, including an idle-stream heartbeat regression proven to fail without the heartbeat; T3 affected checks pass and fork-compatible CI runners are configured. Exact-head CI and final review resolution remain pending.
 
 - Independent Codex GPT-6.1 Sol xhigh reviews completed: Micro reported stable-lock identity/lifetime and custom-path sandbox issues; T3 reported activation readiness/cache, remote-only desktop, guest priority and stale child questions; Xeneon reported slow-action transport, helper shutdown, runnable queues and ring scope. Verified fixes are in progress with focused regressions and mutation proof; merges remain gated. Review reports are in the external publication ledger.
+
+## T3 Connect fleet status PR (`t3/t3-fleet-agent-status`)
+
+Goal: Track T3 Code agent statuses across the entire T3 Connect device fleet, add host device context to cards and ambient nodes, and showcase online/offline fleet devices on the Ambient screen while preserving strict read-only and secret-isolation boundaries.
+
+- Branch: `t3/t3-fleet-agent-status` (from `origin/main` `be0474b`).
+- Protocol & Rust adapter:
+  - Additive v1 protocol fields: `DeviceState`, `DeviceView`, `PortalSnapshot.devices`, and `AgentView.{device,device_local}` (`schema/portal-v1.schema.json`, `docs/protocol.md`).
+  - `T3codeTarget.environment_id` and environment-scoped `opaque_agent_id(epoch, environment_id, thread_id)` prevent cross-device thread ID collisions and route card open actions to the exact remote `{environment_id}/{thread_id}` URL or `t3 app --thread --environment`.
+  - Strict target component validation rejects dot-segments, whitespace, control chars, and leading-dash CLI flags; duplicate feed threads are deduplicated before device `agent_count` tallying.
+- Metadata-only fleet helper (`config/bin/xeneon-t3-status` + `xeneon-t3-status.service.in`):
+  - Manages its own OAuth device-flow token and ES256 DPoP keypair under `$XDG_STATE_HOME/xeneon-edge-agents/t3-connect/` (`0700`/`0600`); never reads `~/.t3/userdata/secrets/` or `~/.t3/userdata/clerk/`.
+  - Merges local read-only `statev2.sqlite` (schema v2 gated, PID `comm` verified), T3 Connect Relay fleet device discovery/status (`/v1/environments`, `/v1/environments/:id/status`), Tier 1 approved remote `/api/orchestration/shell` (strict allowlisted scalar projection, dropping `latestVisibleMessage`/`lastError`), and Tier 2 `/v1/mobile/agent-activity` fallback when device approval is pending.
+  - Preserves legacy `--t3-bin` CLI watch-pipe mode (`--mode auto|fleet|cli`).
+- Quickshell UI:
+  - `PortalStore.qml` normalizes/bounds/sorts `devices` (max 32) and `agent.{device,device_local}` without waking Ambient on connectivity refreshes.
+  - `AgentCard.qml` shows an inline high-contrast host device badge (`agentDeviceBadge`), `PortalView.qml` and `AiUsageDock.qml` surface online/offline fleet counts, `AmbientAgentNode.qml` shows the host label under each node name, and `AmbientView.qml` renders the left-wing `T3 FLEET` online/offline device panel clear of the constellation.
+- Independent review: Completed full security/correctness/architecture audit across Rust, Python helper, systemd/installer, and QML. Fixed all 5 P1, 5 P2, and Nit findings (no-redirect HTTP opener, OAuth issuer/URI HTTPS validation, remote state expiration on logout/outage, accurate local offline status, Rust target injection/dot-segment rejection, duplicate feed deduplication, opaque 6-digit contrast colors for offline Ambient rows, 401 retry vs 403 approval backoff, and SQLite v2 metadata / PID comm checks).
+- Validation gates (all passing after review fixes):
+  - `cargo fmt --all -- --check`
+  - `TMPDIR=/tmp cargo test --workspace` (119 core + 1 CLI = 120 passed)
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `just python` (19 tests passed)
+  - `just shell` (`shellcheck` + `luac -p` passed)
+  - `just qml` (`qmllint` + 28 contract/fixture tests + 121 Qt QML tests passed)
+  - `TMPDIR=/tmp just integration` (31/31 installer integration tests passed)
+  - `git diff --check` clean
+- Live installation & visual validation on `saber`:
+  - Installed release binaries and ran `scripts/install.sh --apply-production --activate` against live `DP-2` (`XENEON EDGE`, `066626215698`, `wch.cn-touchscreen-1`), enabled `xeneon-t3-status.service` and `t3code.status_file`, verified `hyprctl configerrors` empty and `scripts/check.sh` passed.
+  - Visually inspected live `DP-2` screenshots (control center + Ambient) and multi-device fixture preview screenshots (`t3code.ndjson` control center + Ambient).
+- Follow-up (CLIProxyAPI + Omarchy usage collector, cleaned-up bottom dock, clickable `FleetDetailModal`):
+  - Extended `config/bin/xeneon-t3-status` (`XDG_CONFIG_HOME` wired in `xeneon-t3-status.service.in`) to poll `~/.config/omarchy/plugins/spencerbull.cliproxyapi/backend.py` (`allowKeyIssue: false`, zero secrets/emails) and publish `$XDG_RUNTIME_DIR/xeneon-edge-agents/cliproxy-usage.json` (`0600`).
+  - Extended `crates/xeneon-agent-core/src/usage.rs` to merge CLIProxyAPI multi-account quotas/tokens with all Omarchy agents menu providers (`claude`, `codex`, `agy`->`gemini`, `grok`, `cursor`, `opencode`), plus additive `ProviderUsage.account_count` and `DeviceView.feed_state` (`schema/portal-v1.schema.json`, `docs/protocol.md`).
+  - Upgraded `AiUsageDock.qml` (clickable `fleetDetailsButton` with live device preview strip + `DETAILS ▸` pill; up to 4 dynamic live provider cards with `2X · PROXY` and `+N` overflow badge, hiding dead slots) and added presentation-only `FleetDetailModal.qml` (`T3 CODE DEVICES` + `AI CAPACITY` tabs).
+  - Revalidated full suite (`120` core + `1` CLI Rust tests, `clippy`, `fmt`, `just python`, `just shell`, `just qml` with `22` contract + `6` fixture + `123` Qt tests, `31/31` installer integration tests), reinstalled live on `saber` (`scripts/check.sh` passed, `hyprctl configerrors` empty), and visually validated live `DP-2` command center plus offscreen `FleetDetailModal` renders with the live `saber` snapshot (7 online devices, 5 live providers: Claude 2x Max via CLIProxyAPI, Codex, Gemini, Grok, Cursor).
+- PR #15 CI + Codex review resolution:
+  - Fixed `AiUsageDock.qml` window label width cap (`136` → `176`) so `"SESSION (5-HOUR)"` never truncates under Arch CI container monospace fonts (`tst_ai_usage.qml:105`).
+  - Hardened `/api/orchestration/shell` JSON decoding (`http_shell_dpop` + `parse_shell_json_metadata`) with an allowlist-only `object_pairs_hook` that drops non-metadata keys (`latestVisibleMessage`, `lastError`, message/task payloads) at parse time.
+  - Made fresh remote shell snapshots authoritative over relay fallback activity so settled/snoozed/archived/deleted threads cannot be resurrected.
+  - Parallelized `_poll_remote_shells` with bounded concurrency (`ThreadPoolExecutor`, max 6 workers) and thread-safe `_env_tokens` locking.
+  - Distinguished local SQLite read/lock failures (`None`) from empty rosters (`[]`), preserving the last local observation during transient locks and failing closed once expired.
+  - Added 4 focused regression tests in `tests/test_t3_status_helper.py` (25/25 Python tests passing).

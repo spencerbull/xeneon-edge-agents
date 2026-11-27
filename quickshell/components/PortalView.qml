@@ -62,6 +62,7 @@ Item {
         && ambientView.controlCenterProgress >= 0.999
         && !ambientView.exitShield
         && !paletteSettingsOpen
+        && !fleetDetailOpen
     property int currentPage: 0
     property bool userPaging: false
     property string toastTitle: ""
@@ -74,6 +75,8 @@ Item {
     property string pendingAgentBackendRequest: ""
     property bool microDrawerOpen: false
     property bool paletteSettingsOpen: false
+    property bool fleetDetailOpen: false
+    property string fleetDetailTab: "fleet"
     readonly property bool agentOrderAvailable:
         store.agentOrder !== undefined
         && store.agentOrder.available === true
@@ -144,8 +147,19 @@ Item {
             else if (agent.status === "working")
                 working += 1
         }
-        return working + " WORKING  ·  " + review + " REVIEW  ·  "
+        var summary = working + " WORKING  ·  " + review + " REVIEW  ·  "
             + waiting + " WAITING"
+        var fleetDevices = Array.isArray(store.devices) ? store.devices : []
+        if (fleetDevices.length > 1) {
+            var onlineDevices = 0
+            for (var devIdx = 0; devIdx < fleetDevices.length; devIdx += 1) {
+                if (String(fleetDevices[devIdx].state || "") === "online")
+                    onlineDevices += 1
+            }
+            summary += "  ·  " + onlineDevices + "/" + fleetDevices.length
+                + " DEVICES"
+        }
+        return summary
     }
 
     function notePassiveInteraction() {
@@ -241,8 +255,25 @@ Item {
     function togglePaletteSettings() {
         activity.noteUserActivity()
         paletteSettingsOpen = !paletteSettingsOpen
-        if (paletteSettingsOpen)
+        if (paletteSettingsOpen) {
             microDrawerOpen = false
+            fleetDetailOpen = false
+        }
+        return true
+    }
+
+    function openFleetDetail(tab) {
+        activity.noteUserActivity()
+        fleetDetailTab = tab === "usage" ? "usage" : "fleet"
+        fleetDetailOpen = true
+        paletteSettingsOpen = false
+        microDrawerOpen = false
+        return true
+    }
+
+    function closeFleetDetail() {
+        activity.noteUserActivity()
+        fleetDetailOpen = false
         return true
     }
 
@@ -260,8 +291,10 @@ Item {
         target: root.activity
 
         function onAmbientModeChanged() {
-            if (root.activity.ambientMode)
+            if (root.activity.ambientMode) {
                 root.paletteSettingsOpen = false
+                root.fleetDetailOpen = false
+            }
         }
     }
 
@@ -366,6 +399,42 @@ Item {
         z: 69
         onCloseRequested: root.paletteSettingsOpen = false
         onInteractionOccurred: root.activity.noteUserActivity()
+    }
+
+    Rectangle {
+        objectName: "fleetModalScrim"
+        anchors.fill: parent
+        visible: root.fleetDetailOpen
+        color: "#000000"
+        opacity: 0.54
+        z: 68
+
+        Accessible.ignored: true
+
+        TapHandler {
+            gesturePolicy: TapHandler.ReleaseWithinBounds
+            onTapped: root.closeFleetDetail()
+        }
+    }
+
+    FleetDetailModal {
+        id: fleetDetailModal
+
+        anchors.centerIn: parent
+        open: root.fleetDetailOpen
+        activeTab: root.fleetDetailTab
+        devices: root.store.devices || []
+        agents: root.store.agents
+        usage: root.store.usage
+        managerLabel: root.managerLabel
+        theme: root.theme
+        reducedMotion: root.effectiveReducedMotion
+        z: 69
+        onCloseRequested: root.closeFleetDetail()
+        onInteractionOccurred: root.activity.noteUserActivity()
+        onTabSelected: function(tab) {
+            root.fleetDetailTab = tab
+        }
     }
 
     Item {
@@ -1060,10 +1129,15 @@ Item {
         theme: root.theme
         agents: root.store.agents
         sessions: root.store.sessions
+        devices: root.store.devices || []
         managerLabel: root.managerLabel
         reducedMotion: root.effectiveReducedMotion
         enabled: root.controlCenterInteractive
         opacity: ambientView.controlCenterProgress
+        onFleetDetailsRequested: root.openFleetDetail("fleet")
+        onUsageDetailsRequested: function() {
+            root.openFleetDetail("usage")
+        }
         transform: Translate {
             y: (1 - ambientView.controlCenterProgress) * 14
         }
@@ -1291,6 +1365,7 @@ Item {
         active: root.activity.ambientMode
         reducedMotion: root.effectiveReducedMotion
         agents: root.store.agents
+        devices: root.store.devices || []
         health: root.store.health
         voice: root.store.voice
         connectionState: root.store.connection.state

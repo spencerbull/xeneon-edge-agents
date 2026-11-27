@@ -124,7 +124,37 @@ TestCase {
     }
 
     function test_fleetSummaryUsesAuthoritativeCollections() {
+        dock.devices = []
         compare(dock.fleetSummary(), "2 AGENTS · 2 SESSIONS")
         compare(dock.focusedSummary(), "1 FOCUSED")
+    }
+
+    function test_fleetSummaryShowsDeviceOnlineOfflineCountsWhenPresent() {
+        dock.devices = [
+            {"id": "a", "label": "saber", "state": "online", "local": true},
+            {"id": "b", "label": "taker", "state": "online", "local": false},
+            {"id": "c", "label": "mini", "state": "offline", "local": false}
+        ]
+        compare(dock.fleetSummary(), "2 AGENTS · 2/3 DEVICES ONLINE")
+        compare(dock.focusedSummary(), "2 ONLINE · 1 OFFLINE")
+    }
+
+    function test_dynamicLiveProvidersShowCliproxyAndOmarchyWithoutDeadSlots() {
+        dock.usage = {
+            "providers": [
+                {"id": "claude", "label": "Claude", "kind": "quota", "available": true, "stale": false, "source": "cliproxy", "status": "allowed", "plan": "Max", "account_count": 2, "primary": {"label": "Weekly", "utilization": 0.09}},
+                {"id": "codex", "label": "Codex", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "Pro 500", "primary": {"label": "Weekly", "utilization": 0.02}},
+                {"id": "gemini", "label": "Gemini", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "Ultra", "primary": {"label": "Session", "utilization": 0.14}},
+                {"id": "grok", "label": "Grok", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "SuperGrok Heavy", "primary": {"label": "Weekly", "utilization": 0.0}},
+                {"id": "cursor", "label": "Cursor", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "Ultra", "primary": {"label": "Included", "utilization": 0.0}}
+            ]
+        }
+        wait(0)
+        compare(dock.providerIds.length, 4)
+        compare(dock.hiddenProviderCount, 1)
+        verify(findChild(dock, "usageCard_claude") !== null)
+        verify(findChild(dock, "usageCard_gemini") !== null)
+        verify(findChild(dock, "usageCard_grok") !== null)
+        compare(dock.providerDetail(dock.provider("claude")), "MAX · 2X · PROXY")
     }
 }

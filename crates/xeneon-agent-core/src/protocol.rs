@@ -193,6 +193,8 @@ mod tests {
             workspace: "workspace".into(),
             repository: None,
             worktree: None,
+            device: None,
+            device_local: None,
             session: "default".into(),
             focused: false,
             observed_for_seconds: 0,

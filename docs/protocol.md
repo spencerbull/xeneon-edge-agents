@@ -65,12 +65,15 @@ dictation marker; snapshots never carry transcripts, tooltips, command output,
 or voice errors from stderr.
 
 `usage` exposes only normalized provider capacity and coarse aggregate
-activity. Utilization is a fraction from 0 through 1; reset timestamps, plan,
-model, `today_tokens`, and `tokens_per_hour` are optional bounded metadata.
+activity (`claude`, `codex`, `gemini`, `grok`, `cursor`, `opencode`, up to 6
+providers). Utilization is a fraction from 0 through 1; reset timestamps, plan,
+model, `account_count`, `today_tokens`, and `tokens_per_hour` are optional
+bounded metadata collected from Omarchy local agent state and optional
+CLIProxyAPI aggregate quota snapshots (`source: "cliproxy"`).
 The aggregate token fields are provider-wide local activity totals, not
-per-request records. Usage never includes credentials, prompts, message
-contents, per-model history, cache/database contents, or provider response
-bodies. `micro` is a
+per-request records. Usage never includes credentials, account identifiers,
+prompts, message contents, per-model history, cache/database contents, or
+provider response bodies. `micro` is a
 read-only normalized view of the local Codex Micro connection and optional
 device status. It never exposes the Micro socket protocol to QML.
 
@@ -81,8 +84,14 @@ server runtime descriptor version (currently 1) and whose `version` is
 omitted. T3 Code cards always have `zoom: false`, no capabilities, and
 `focused: false`; `display_name` is the T3 Code thread title, `workspace` is
 the project title plus branch, `repository` and `worktree` are checkout leaf
-names, and `state_change_seq` is the millisecond timestamp of the classifying
-turn or settle event.
+names, optional `device` and `device_local` identify which T3 Connect fleet
+host owns the thread, and `state_change_seq` is the millisecond timestamp of
+the classifying turn or settle event. Optional `devices` lists bounded fleet
+host metadata (`id`, `label`, `state`: `online`/`offline`/`unknown`, `local`,
+optional `machine`, `agent_count`, `last_checked_ms`, and `feed_state`:
+`local`/`live`/`unpaired`/`offline`) so the command center, detail modal,
+and Ambient screen can show online and offline T3 Connect devices without
+exposing endpoints, tokens, or remote credentials.
 
 These additive v1 fields are optional for compatibility with older recorded
 fixtures. Clients default voice to unavailable, review-ready and launch-pending
@@ -163,10 +172,11 @@ The only actions are:
   clears every card, private target, latch, and subscription, publishes a
   reconnecting snapshot with the new `backend.mode`, and persists the choice.
 
-In T3 Code mode `open` activates the exact `t3code` desktop window and
-acknowledges the card's review badge; it never launches T3 Code or navigates
-threads, because T3 Code has no public thread-focus API. `zoom`, `approve`,
-and `interrupt` fail with `target_unavailable` or `capability_expired`.
+In T3 Code mode `open` activates the exact `{environment_id}/{thread_id}` local
+web URL (or `t3 app --thread --environment` when `t3code.app_bin` is configured)
+and focuses the exact `t3code` desktop window; it never substitutes project
+activation or creates a thread. `zoom`, `approve`, and `interrupt` fail with
+`target_unavailable` or `capability_expired`.
 
 There is no method, key, text, shell-command, prompt, close, or server-control
 passthrough. Desktop actions do not accept a desktop ID, executable, title,

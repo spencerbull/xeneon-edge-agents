@@ -696,4 +696,74 @@ TestCase {
         )))
         compare(store.surfaceState(), "empty")
     }
+
+    function test_devicesAreNormalizedSortedAndHostileValuesSanitized() {
+        var fleet = snapshot(
+            18,
+            "epoch-fleet",
+            [
+                Object.assign(agent("remote-1", 0, "working"), {
+                    "device": "xps-grace",
+                    "device_local": false
+                }),
+                Object.assign(agent("local-1", 1, "idle"), {
+                    "device": "saber",
+                    "device_local": true
+                })
+            ]
+        )
+        fleet.devices = [
+            {
+                "id": "env-offline",
+                "label": "workstation",
+                "state": "offline",
+                "local": false,
+                "machine": "x86_64",
+                "agent_count": 0
+            },
+            {
+                "id": "env-remote",
+                "label": "xps-grace",
+                "state": "online",
+                "local": false,
+                "machine": "aarch64",
+                "agent_count": 2,
+                "secret_token": "discard"
+            },
+            {
+                "id": "env-local",
+                "label": "saber",
+                "state": "online",
+                "local": true,
+                "machine": "x86_64",
+                "agent_count": 1
+            },
+            {
+                "id": "env-hostile",
+                "label": "",
+                "state": "bogus",
+                "local": "yes",
+                "agent_count": -4
+            }
+        ]
+        verify(store.ingestEnvelope(fleet))
+        compare(store.devices.length, 4)
+        compare(store.devices[0].id, "env-local")
+        compare(store.devices[0].local, true)
+        compare(store.devices[1].id, "env-remote")
+        compare(store.devices[1].secret_token, undefined)
+        compare(store.devices[2].id, "env-offline")
+        compare(store.devices[2].state, "offline")
+        compare(store.devices[3].id, "env-hostile")
+        compare(store.devices[3].state, "unknown")
+        compare(store.devices[3].local, false)
+        compare(store.devices[3].agent_count, 0)
+        compare(store.agents[0].device, "xps-grace")
+        compare(store.agents[0].device_local, false)
+        compare(store.agents[1].device, "saber")
+        compare(store.agents[1].device_local, true)
+
+        store.reset()
+        compare(store.devices.length, 0)
+    }
 }

@@ -21,6 +21,7 @@ QtObject {
         "detail": "Waiting for xeneon-agentd"
     })
     property var sessions: []
+    property var devices: []
     property var agents: []
     property var agentOrder: ({
         "available": false,
@@ -82,6 +83,12 @@ QtObject {
         "offline"
     ]
 
+    readonly property var allowedDeviceStates: [
+        "online",
+        "offline",
+        "unknown"
+    ]
+
     readonly property var allowedVoiceStates: [
         "unavailable",
         "idle",
@@ -106,6 +113,7 @@ QtObject {
             "detail": "Waiting for xeneon-agentd"
         }
         sessions = []
+        devices = []
         agents = []
         agentOrder = {"available": false, "mode": "grouped"}
         backend = {"mode": "herdr", "switchable": false}
@@ -214,6 +222,8 @@ QtObject {
             "repository": safeString(value.repository, "", 96),
             "worktree": safeString(value.worktree, "", 128),
             "session": safeString(value.session, "", 64),
+            "device": safeString(value.device, "", 64).trim(),
+            "device_local": value.device_local === true,
             "focused": value.focused === true,
             "launch_pending": value.launch_pending === true,
             "review_ready": value.review_ready === true
@@ -351,6 +361,71 @@ QtObject {
                 "message": safeString(session.message, "", 160)
             })
         }
+        return normalized
+    }
+
+    function deviceStateRank(state) {
+        if (state === "online")
+            return 0
+        if (state === "offline")
+            return 1
+        return 2
+    }
+
+    function normalizeDevices(values) {
+        if (!Array.isArray(values))
+            return []
+        var normalized = []
+        var seen = Object.create(null)
+        for (var index = 0; index < values.length && normalized.length < 32; index += 1) {
+            var device = values[index]
+            if (device === null || device === undefined
+                    || typeof device !== "object")
+                continue
+            var id = safeString(device.id, "", 128).trim()
+            if (id === "" || seen[id] === true)
+                continue
+            seen[id] = true
+            var state = safeString(device.state, "unknown", 24).toLowerCase()
+            if (allowedDeviceStates.indexOf(state) === -1)
+                state = "unknown"
+            var label = safeString(device.label, "", 64).trim()
+            if (label === "")
+                label = id.slice(0, 12)
+            var feedState = safeString(device.feed_state, "", 24).toLowerCase()
+            if (feedState !== "local" && feedState !== "live"
+                    && feedState !== "unpaired" && feedState !== "offline")
+                feedState = ""
+            normalized.push({
+                "id": id,
+                "label": label,
+                "state": state,
+                "local": device.local === true,
+                "machine": safeString(device.machine, "", 32).trim(),
+                "feed_state": feedState,
+                "agent_count": Math.max(
+                    0,
+                    Math.floor(finiteNumber(device.agent_count, 0))
+                ),
+                "last_checked_ms": Math.max(
+                    0,
+                    finiteNumber(device.last_checked_ms, 0)
+                )
+            })
+        }
+        normalized.sort(function(left, right) {
+            var rankDiff = deviceStateRank(left.state) - deviceStateRank(right.state)
+            if (rankDiff !== 0)
+                return rankDiff
+            if (left.local !== right.local)
+                return left.local ? -1 : 1
+            var labelDiff = left.label.toLowerCase().localeCompare(
+                right.label.toLowerCase()
+            )
+            if (labelDiff !== 0)
+                return labelDiff
+            return left.id.localeCompare(right.id)
+        })
         return normalized
     }
 
@@ -499,7 +574,14 @@ QtObject {
             ? source.providers
             : []
         var normalized = []
-        var allowedIds = ["claude", "codex", "opencode"]
+        var allowedIds = [
+            "claude",
+            "codex",
+            "gemini",
+            "grok",
+            "cursor",
+            "opencode"
+        ]
         for (var index = 0; index < providers.length; index += 1) {
             var provider = providers[index]
             if (provider === null || provider === undefined
@@ -508,6 +590,10 @@ QtObject {
             var id = safeString(provider.id, "", 24).toLowerCase()
             if (allowedIds.indexOf(id) === -1)
                 continue
+            var accountCount = Math.max(
+                0,
+                Math.floor(finiteNumber(provider.account_count, 0))
+            )
             normalized.push({
                 "id": id,
                 "label": safeString(provider.label, id, 24),
@@ -520,6 +606,7 @@ QtObject {
                 "status": safeString(provider.status, "unknown", 24),
                 "plan": safeString(provider.plan, "", 32),
                 "model": safeString(provider.model, "", 80),
+                "account_count": accountCount,
                 "primary": normalizeUsageWindow(provider.primary),
                 "secondary": normalizeUsageWindow(provider.secondary),
                 "today_tokens": normalizeAggregateTokens(
@@ -695,6 +782,8 @@ QtObject {
                     voice = nextVoice
                     usage = nextUsage
                     micro = nextMicro
+                    if (Array.isArray(snapshot.devices))
+                        devices = normalizeDevices(snapshot.devices)
                     activitySignature = semanticSignature(
                         connection,
                         agents,
@@ -716,6 +805,7 @@ QtObject {
         var previousSignature = activitySignature
         var nextBackend = normalizeBackend(snapshot.backend)
         var nextSessions = normalizeSessions(snapshot.sessions)
+        var nextDevices = normalizeDevices(snapshot.devices)
         var nextConnection = normalizeConnection(
             snapshot.connection,
             nextSessions,
@@ -740,6 +830,7 @@ QtObject {
         generatedAtMs = nextGeneratedAtMs
         connection = nextConnection
         sessions = nextSessions
+        devices = nextDevices
         agents = nextAgents
         agentOrder = nextAgentOrder
         health = normalizeHealth(snapshot.health)

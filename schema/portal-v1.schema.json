@@ -132,6 +132,8 @@
         "workspace": { "type": "string" },
         "repository": { "type": "string" },
         "worktree": { "type": "string" },
+        "device": { "type": "string", "maxLength": 64 },
+        "device_local": { "type": "boolean" },
         "session": { "type": "string" },
         "focused": { "type": "boolean" },
         "observed_for_seconds": { "type": "integer", "minimum": 0 },
@@ -146,6 +148,23 @@
             "interrupt": { "$ref": "#/$defs/capability" }
           }
         }
+      }
+    },
+    "deviceState": {
+      "enum": ["online", "offline", "unknown"]
+    },
+    "device": {
+      "type": "object",
+      "required": ["id", "label", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "state": { "$ref": "#/$defs/deviceState" },
+        "local": { "type": "boolean" },
+        "machine": { "type": "string", "maxLength": 32 },
+        "feed_state": { "enum": ["local", "live", "unpaired", "offline"] },
+        "agent_count": { "type": "integer", "minimum": 0 },
+        "last_checked_ms": { "type": "integer", "minimum": 0 }
       }
     },
     "session": {
@@ -191,7 +210,9 @@
         "status"
       ],
       "properties": {
-        "id": { "enum": ["claude", "codex", "opencode"] },
+        "id": {
+          "enum": ["claude", "codex", "gemini", "grok", "cursor", "opencode"]
+        },
         "label": { "type": "string", "maxLength": 24 },
         "kind": { "enum": ["quota", "local_budget"] },
         "available": { "type": "boolean" },
@@ -200,6 +221,7 @@
         "status": { "type": "string", "maxLength": 24 },
         "plan": { "type": "string", "maxLength": 32 },
         "model": { "type": "string", "maxLength": 80 },
+        "account_count": { "type": "integer", "minimum": 0 },
         "primary": { "$ref": "#/$defs/usageWindow" },
         "secondary": { "$ref": "#/$defs/usageWindow" },
         "today_tokens": {
@@ -221,7 +243,7 @@
       "properties": {
         "providers": {
           "type": "array",
-          "maxItems": 3,
+          "maxItems": 6,
           "items": { "$ref": "#/$defs/providerUsage" }
         }
       }
@@ -264,6 +286,11 @@
         "sessions": {
           "type": "array",
           "items": { "$ref": "#/$defs/session" }
+        },
+        "devices": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/device" }
         },
         "agents": {
           "type": "array",
