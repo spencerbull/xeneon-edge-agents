@@ -300,15 +300,20 @@ app_bin = "/path/to/patched/t3"
 
 Enable the staged `xeneon-t3-status.service` (adjust the UID in `status_file`
 to your runtime directory) and run `xeneon-t3-status login` once to authorize
-T3 Connect fleet polling. Its separate helper stores its own OAuth token and
-ES256 DPoP keypair under `$XDG_STATE_HOME/xeneon-edge-agents/t3-connect/`
-without reading T3 secrets or giving the hardware daemon write access to T3
-state. It merges local read-only SQLite metadata with T3 Connect fleet online/offline
-devices and remote thread statuses (falling back to the legacy
-`t3 thread status --json --watch` pipe when invoked with `--t3-bin`). The daemon
-stops exposing actions if the metadata file expires or the helper exits. Native
-activation uses `t3 app --thread ID --environment ENV`; it never falls back to
-project activation or creates a thread.
+T3 Connect fleet discovery (all online and offline fleet devices). Because T3
+Relay's DPoP token exchange requires a Clerk session JWT rather than a CLI OAuth
+token, `xeneon-t3-status` probes each discovered environment's
+`/.well-known/t3/environment` endpoint directly for live online/offline status,
+and supports pairing individual remote devices with a read-only
+`orchestration:read` token (`xeneon-t3-status pair <device>`) to stream their
+remote threads onto the portal. Its separate helper stores its own OAuth token,
+paired read-only tokens, and ES256 DPoP keypair under
+`$XDG_STATE_HOME/xeneon-edge-agents/t3-connect/` without reading T3 secrets or
+giving the hardware daemon write access to T3 state (and falls back to the
+legacy `t3 thread status --json --watch` pipe when invoked with `--t3-bin`). The
+daemon stops exposing actions if the metadata file expires or the helper exits.
+Native activation uses `t3 app --thread ID --environment ENV`; it never falls
+back to project activation or creates a thread.
 
 The installer stages `xeneon-micro-bridge.service` without enabling it. Before
 opting in, install the companion Herdr bridge ownership-lock update. Both

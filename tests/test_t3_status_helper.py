@@ -531,3 +531,132 @@ class FleetCollectorTests(unittest.TestCase):
         self.assertFalse(self.mod.is_allowed_remote_url('https://user:pass@relay.t3.codes'))
         self.assertFalse(self.mod.is_allowed_remote_url('https://relay.t3.codes?q=1'))
         self.assertTrue(self.mod.is_allowed_remote_url('https://relay.t3.codes/oauth?user_code=1234', allow_query=True))
+
+    def test_oauth_token_fallback_probes_well_known_and_uses_paired_remote_tokens(self):
+        class OAuthRelayHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def send_json(self, code: int, body: dict):
+                raw = json.dumps(body).encode('utf-8')
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                parsed = urllib.parse.urlparse(self.path)
+                if parsed.path == '/v1/environments':
+                    self.send_json(200, {
+                        'environments': [
+                            {'environmentId': 'env-saber', 'label': 'saber', 'endpoint': {'httpBaseUrl': base_url + '/saber'}},
+                            {'environmentId': 'env-taker', 'label': 'taker', 'endpoint': {'httpBaseUrl': base_url + '/taker'}},
+                            {'environmentId': 'env-xps16', 'label': 'xps16', 'endpoint': {'httpBaseUrl': base_url + '/xps16'}},
+                        ]
+                    })
+                    return
+                if parsed.path == '/taker/.well-known/t3/environment':
+                    self.send_json(200, {'environmentId': 'env-taker', 'label': 'taker', 'platform': {'machine': 'laptop'}})
+                    return
+                if parsed.path == '/xps16/.well-known/t3/environment':
+                    self.send_json(530, {'error': 'tunnel_offline'})
+                    return
+                if parsed.path == '/taker/api/orchestration/shell':
+                    if self.headers.get('Authorization') != 'Bearer ro-taker-tok':
+                        self.send_json(401, {'error': 'unauthorized'})
+                        return
+                    self.send_json(200, {
+                        'projects': [{'id': 'p1', 'title': 'omarchy', 'workspaceRoot': '/home/sbull/omarchy', 'deletedAt': None}],
+                        'threads': [{
+                            'id': 'thr-taker-live',
+                            'projectId': 'p1',
+                            'title': 'Remote Wizard Thread',
+                            'providerInstanceId': 'codex',
+                            'branch': 'main',
+                            'worktreePath': None,
+                            'status': 'running',
+                            'activityRunStatus': 'running',
+                            'pendingRuntimeRequest': None,
+                            'pendingBackgroundTasks': [],
+                            'updatedAt': '2026-11-27T19:30:00Z',
+                            'latestRunCompletedAt': None,
+                            'lastVisitedAt': None,
+                            'settledAt': None,
+                            'settledOverride': None,
+                            'deletedAt': None,
+                            'archivedAt': None,
+                        }],
+                    })
+                    return
+                self.send_json(404, {'error': 'not_found'})
+
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length') or 0)
+                _ = self.rfile.read(length) if length else b''
+                if self.path == '/v1/client/dpop-token':
+                    self.send_json(401, {'code': 'auth_invalid', 'reason': 'invalid_bearer'})
+                    return
+                self.send_json(404, {'error': 'not_found'})
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), OAuthRelayHandler)
+        port = server.server_address[1]
+        base_url = f'http://127.0.0.1:{port}'
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            t3_home = root / 't3'
+            userdata = t3_home / 'userdata'
+            userdata.mkdir(parents=True)
+            (userdata / 'environment-id').write_text('env-saber\n')
+            (userdata / 'server-runtime.json').write_text(
+                json.dumps({'version': 1, 'pid': os.getpid(), 'origin': f'http://127.0.0.1:{port}'})
+            )
+            state_dir = root / 'state'
+            oauth = self.mod.OAuthStore(state_dir, issuer=base_url, allow_insecure_issuer=True)
+            oauth.save({
+                'schema_version': 1,
+                'issuer': base_url,
+                'client_id': 'test',
+                'access_token': 'clerk-oauth-tok',
+                'refresh_token': 'ref',
+                'expires_at': time.time() + 3600,
+                'updated_at_ms': self.mod.now_ms(),
+            })
+            token_file = root / 'tok.txt'
+            token_file.write_text('ro-taker-tok\n')
+            env_id, label, count = self.mod.pair_remote_environment(
+                'taker',
+                state_dir=state_dir,
+                relay_url=base_url,
+                issuer=base_url,
+                client_id='test',
+                token_file=token_file,
+                allow_insecure=True,
+            )
+            self.assertEqual((env_id, label, count), ('env-taker', 'taker', 1))
+
+            dpop = self.mod.DpopKey(state_dir / 'dpop-key.pem')
+            collector = self.mod.FleetCollector(
+                t3_home=t3_home,
+                oauth_store=oauth,
+                dpop_key=dpop,
+                relay_url=base_url,
+                allow_insecure_relay=True,
+                expected_local_comm=None,
+            )
+            collector.poll_remote_once(force=True)
+            snapshot = collector.build_snapshot()
+            devices = {d['id']: d for d in snapshot['devices']}
+            self.assertEqual(devices['env-saber']['state'], 'online')
+            self.assertEqual(devices['env-taker']['state'], 'online')
+            self.assertEqual(devices['env-taker']['machine'], 'laptop')
+            self.assertEqual(devices['env-xps16']['state'], 'offline')
+            threads = {t['thread_id']: t for t in snapshot['threads']}
+            self.assertIn('thr-taker-live', threads)
+            self.assertEqual(threads['thr-taker-live']['device_label'], 'taker')
+            self.assertFalse(threads['thr-taker-live']['device_local'])

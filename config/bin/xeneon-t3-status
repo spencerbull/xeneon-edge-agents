@@ -15,6 +15,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import fcntl
+import getpass
 import hashlib
 import json
 import os
@@ -638,6 +639,97 @@ class OAuthStore:
         raise RuntimeError('OAuth device authorization timed out')
 
 
+class RemoteTokenStore:
+    """Stores per-environment read-only orchestration:read tokens under XDG_STATE_HOME."""
+
+    def __init__(self, state_dir: Path):
+        self.state_dir = state_dir
+        self.path = state_dir / 'remote-tokens.json'
+        self._lock = threading.Lock()
+        self._cached: dict[str, dict] = {}
+        self._cached_mtime: float = -1.0
+
+    def load_all(self) -> dict[str, dict]:
+        with self._lock:
+            try:
+                stat = self.path.stat()
+            except FileNotFoundError:
+                self._cached = {}
+                self._cached_mtime = -1.0
+                return {}
+            if stat.st_mtime == self._cached_mtime:
+                return {k: dict(v) for k, v in self._cached.items()}
+            try:
+                parsed = json.loads(self.path.read_text(encoding='utf-8'))
+            except Exception:
+                return {}
+            entries = parsed.get('environments') if isinstance(parsed, dict) else None
+            if not isinstance(entries, dict):
+                return {}
+            cleaned: dict[str, dict] = {}
+            for eid, rec in entries.items():
+                if not isinstance(eid, str) or not isinstance(rec, dict):
+                    continue
+                token = rec.get('access_token')
+                if not isinstance(token, str) or not token:
+                    continue
+                cleaned[eid] = {
+                    'access_token': token,
+                    'token_type': str(rec.get('token_type') or 'Bearer'),
+                    'http_base_url': sanitize_text(rec.get('http_base_url'), 256).rstrip('/'),
+                    'label': sanitize_text(rec.get('label'), 64),
+                    'expires_at': float(rec.get('expires_at') or 0.0),
+                }
+            self._cached = cleaned
+            self._cached_mtime = stat.st_mtime
+            return {k: dict(v) for k, v in cleaned.items()}
+
+    def get(self, env_id: str) -> dict | None:
+        return self.load_all().get(env_id)
+
+    def put(self, env_id: str, record: dict) -> None:
+        entries = self.load_all()
+        entries[env_id] = record
+        with self._lock:
+            atomic_write_json(
+                self.path,
+                {'schema_version': 1, 'environments': entries, 'updated_at_ms': now_ms()},
+                mode=0o600,
+            )
+            self._cached = entries
+            try:
+                self._cached_mtime = self.path.stat().st_mtime
+            except OSError:
+                self._cached_mtime = -1.0
+
+    def remove(self, key: str) -> bool:
+        entries = self.load_all()
+        target_id = None
+        if key in entries:
+            target_id = key
+        else:
+            needle = key.strip().lower()
+            for eid, rec in entries.items():
+                if str(rec.get('label') or '').lower() == needle:
+                    target_id = eid
+                    break
+        if target_id is None:
+            return False
+        entries.pop(target_id, None)
+        with self._lock:
+            atomic_write_json(
+                self.path,
+                {'schema_version': 1, 'environments': entries, 'updated_at_ms': now_ms()},
+                mode=0o600,
+            )
+            self._cached = entries
+            try:
+                self._cached_mtime = self.path.stat().st_mtime
+            except OSError:
+                self._cached_mtime = -1.0
+        return True
+
+
 def local_process_alive(pid: int, expected_comm: str | None = 't3code') -> bool:
     if pid <= 0:
         return False
@@ -1043,16 +1135,19 @@ class FleetCollector:
         relay_url: str = DEFAULT_RELAY_URL,
         allow_insecure_relay: bool = False,
         expected_local_comm: str | None = 't3code',
+        remote_tokens: RemoteTokenStore | None = None,
     ):
         self.t3_home = t3_home
         self.oauth = oauth_store
         self.dpop = dpop_key
+        self.remote_tokens = remote_tokens or RemoteTokenStore(oauth_store.state_dir)
         self.relay_url = relay_url.rstrip('/')
         self.allow_insecure_relay = allow_insecure_relay
         self.expected_local_comm = expected_local_comm
 
         self._lock = threading.Lock()
         self._relay_tokens: dict[str, tuple[str, float]] = {}
+        self._relay_dpop_backoff_until = 0.0
         self._env_tokens: dict[str, tuple[str, str, float]] = {}
         self._env_approval_backoff: dict[str, tuple[float, str]] = {}
         self._remote_devices: dict[str, dict] = {}
@@ -1069,6 +1164,7 @@ class FleetCollector:
     def _clear_remote_state(self) -> None:
         with self._lock:
             self._relay_tokens.clear()
+            self._relay_dpop_backoff_until = 0.0
             self._env_tokens.clear()
             self._env_approval_backoff.clear()
             self._remote_devices.clear()
@@ -1077,6 +1173,20 @@ class FleetCollector:
             self._relay_activity_threads.clear()
             self._last_env_success = 0.0
             self._last_activity_success = 0.0
+
+    def _try_relay_dpop_token(self, clerk_token: str, client_id: str, scope: str) -> str | None:
+        if time.monotonic() < self._relay_dpop_backoff_until:
+            return None
+        try:
+            return self._relay_dpop_token(clerk_token, client_id, scope)
+        except HttpError as err:
+            if err.status == 401:
+                self._relay_tokens.clear()
+                # Clerk CLI OAuth tokens work on /v1/environments but not /v1/client/dpop-token
+                # (which expects a Clerk session JWT). Back off and use direct probing + paired tokens.
+                self._relay_dpop_backoff_until = time.monotonic() + 60.0
+                return None
+            raise
 
     def _relay_dpop_token(self, clerk_token: str, client_id: str, scope: str) -> str:
         cache_key = f'{client_id}:{scope}'
@@ -1177,7 +1287,7 @@ class FleetCollector:
         envs = payload.get('environments')
         if not isinstance(envs, list):
             return
-        web_token = self._relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
+        web_token = self._try_relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
 
         probed_devices: dict[str, dict] = {}
         probed_endpoints: dict[str, str] = {}
@@ -1207,28 +1317,49 @@ class FleetCollector:
                     },
                     http_base or None,
                 )
-            status_url = f'{self.relay_url}/v1/environments/{urllib.parse.quote(env_id, safe="")}/status'
             state = 'unknown'
             machine: str | None = None
-            try:
-                resp = http_json_dpop(self.dpop, 'POST', status_url, access_token=web_token)
-                raw_state = sanitize_text(resp.get('status'), 24).lower()
-                state = raw_state if raw_state in ('online', 'offline') else 'unknown'
-                checked_ms = parse_rfc3339_ms(resp.get('checkedAt')) or checked_ms
-                desc = resp.get('descriptor')
-                if isinstance(desc, dict):
-                    desc_label = sanitize_text(desc.get('label'), 64)
-                    if desc_label:
-                        label = desc_label
-                    plat = desc.get('platform')
-                    if isinstance(plat, dict):
-                        machine = sanitize_text(plat.get('machine'), 32) or None
-                resp_ep = resp.get('endpoint')
-                if isinstance(resp_ep, dict):
-                    ep_base = sanitize_text(resp_ep.get('httpBaseUrl'), 256).rstrip('/')
-                    if ep_base:
-                        http_base = ep_base
-            except Exception:
+            if web_token:
+                status_url = f'{self.relay_url}/v1/environments/{urllib.parse.quote(env_id, safe="")}/status'
+                try:
+                    resp = http_json_dpop(self.dpop, 'POST', status_url, access_token=web_token)
+                    raw_state = sanitize_text(resp.get('status'), 24).lower()
+                    state = raw_state if raw_state in ('online', 'offline') else 'unknown'
+                    checked_ms = parse_rfc3339_ms(resp.get('checkedAt')) or checked_ms
+                    desc = resp.get('descriptor')
+                    if isinstance(desc, dict):
+                        desc_label = sanitize_text(desc.get('label'), 64)
+                        if desc_label:
+                            label = desc_label
+                        plat = desc.get('platform')
+                        if isinstance(plat, dict):
+                            machine = sanitize_text(plat.get('machine'), 32) or None
+                    resp_ep = resp.get('endpoint')
+                    if isinstance(resp_ep, dict):
+                        ep_base = sanitize_text(resp_ep.get('httpBaseUrl'), 256).rstrip('/')
+                        if ep_base:
+                            http_base = ep_base
+                except Exception:
+                    state = 'offline'
+            elif http_base and is_allowed_remote_url(http_base, self.allow_insecure_relay):
+                try:
+                    _, _, raw_desc = http_request(
+                        'GET',
+                        f'{http_base}/.well-known/t3/environment',
+                        timeout=4.0,
+                    )
+                    desc = json.loads(raw_desc.decode('utf-8')) if raw_desc else {}
+                    state = 'online'
+                    if isinstance(desc, dict):
+                        desc_label = sanitize_text(desc.get('label'), 64)
+                        if desc_label:
+                            label = desc_label
+                        plat = desc.get('platform')
+                        if isinstance(plat, dict):
+                            machine = sanitize_text(plat.get('machine'), 32) or None
+                except Exception:
+                    state = 'offline'
+            else:
                 state = 'offline'
             return (
                 env_id,
@@ -1264,7 +1395,9 @@ class FleetCollector:
                     self._remote_shell_threads.pop(env_id, None)
 
     def _poll_relay_activity(self, clerk_token: str, local_env_id: str | None) -> None:
-        mobile_token = self._relay_dpop_token(clerk_token, 't3-mobile', 'mobile:registration')
+        mobile_token = self._try_relay_dpop_token(clerk_token, 't3-mobile', 'mobile:registration')
+        if not mobile_token:
+            return
         resp = http_json_dpop(
             self.dpop,
             'GET',
@@ -1278,6 +1411,7 @@ class FleetCollector:
             self._relay_activity_threads = threads
 
     def _poll_remote_shells(self, clerk_token: str, local_env_id: str | None) -> None:
+        paired_tokens = self.remote_tokens.load_all()
         with self._lock:
             targets = [
                 (eid, dev['label'], self._remote_endpoints.get(eid, ''))
@@ -1286,10 +1420,41 @@ class FleetCollector:
             ]
         if not targets:
             return
-        web_token = self._relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
+        web_token = self._try_relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
         now = time.monotonic()
 
-        for env_id, label, _ in targets:
+        for env_id, label, discovered_base in targets:
+            paired = paired_tokens.get(env_id)
+            if paired:
+                http_base = discovered_base or paired.get('http_base_url', '')
+                if http_base and is_allowed_remote_url(http_base, self.allow_insecure_relay):
+                    try:
+                        shell_url = f'{http_base}/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1'
+                        shell = http_json_dpop(
+                            self.dpop,
+                            'GET',
+                            shell_url,
+                            access_token=paired['access_token'],
+                            token_type=paired.get('token_type') or 'Bearer',
+                            extra_headers={'x-t3-orchestration-protocol': '2'},
+                        )
+                        threads = extract_shell_threads(shell, env_id, label, device_local=False)
+                        with self._lock:
+                            self._remote_shell_threads[env_id] = (time.monotonic(), threads)
+                            self._env_approval_backoff.pop(env_id, None)
+                        continue
+                    except HttpError as err:
+                        if err.status in (401, 403):
+                            with self._lock:
+                                self._env_approval_backoff[env_id] = (
+                                    time.monotonic() + APPROVAL_BACKOFF_SEC,
+                                    'paired_token_rejected',
+                                )
+                        continue
+                    except Exception:
+                        continue
+            if not web_token:
+                continue
             with self._lock:
                 backoff = self._env_approval_backoff.get(env_id)
             if backoff and backoff[0] > now:
@@ -1518,6 +1683,8 @@ class FleetCollector:
             'dpop_thumbprint': self.dpop.thumbprint() if self.dpop.key_path.exists() else None,
             'relay_url': self.relay_url,
             'relay_error': relay_error,
+            'relay_dpop_available': time.monotonic() >= self._relay_dpop_backoff_until,
+            'paired_environments': sorted(self.remote_tokens.load_all().keys()),
             'devices': devices,
             'tier1_shell_environments': shell_envs,
             'tier1_approval_pending': approval_needed,
@@ -1669,9 +1836,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         'command',
         nargs='?',
-        choices=('run', 'login', 'logout', 'status'),
+        choices=('run', 'login', 'logout', 'status', 'pair', 'unpair'),
         default='run',
         help='Subcommand (default: run daemon).',
+    )
+    parser.add_argument(
+        'target',
+        nargs='?',
+        default=None,
+        help='Target device label or environment ID for pair/unpair.',
     )
     parser.add_argument('--mode', choices=('auto', 'fleet', 'cli'), default='auto')
     parser.add_argument('--t3-bin', default=None, help='Legacy T3 CLI binary for watch-pipe mode.')
@@ -1681,11 +1854,156 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--relay-url', default=os.environ.get('XENEON_T3_RELAY_URL', DEFAULT_RELAY_URL))
     parser.add_argument('--oauth-issuer', default=os.environ.get('XENEON_T3_OAUTH_ISSUER', DEFAULT_OAUTH_ISSUER))
     parser.add_argument('--oauth-client-id', default=os.environ.get('XENEON_T3_OAUTH_CLIENT_ID', DEFAULT_OAUTH_CLIENT_ID))
+    parser.add_argument('--url', default=None, help='Explicit remote environment HTTPS URL for pair.')
+    parser.add_argument('--token-file', type=Path, default=None, help='Read remote token from file instead of stdin/prompt.')
     parser.add_argument('--headless', action='store_true', help='Do not launch a browser during login.')
     parser.add_argument('--reset-key', action='store_true', help='Also remove the ES256 DPoP key on logout.')
     parser.add_argument('--json', action='store_true', help='Emit JSON diagnostics for status.')
     parser.add_argument('--allow-insecure-local-relay', action='store_true', help=argparse.SUPPRESS)
     return parser
+
+
+def pair_remote_environment(
+    target: str,
+    *,
+    state_dir: Path,
+    relay_url: str,
+    issuer: str,
+    client_id: str,
+    explicit_url: str | None = None,
+    token_file: Path | None = None,
+    allow_insecure: bool = False,
+) -> tuple[str, str, int]:
+    """Pair one remote T3 environment with a read-only orchestration:read token."""
+    os.umask(0o077)
+    oauth = OAuthStore(
+        state_dir,
+        issuer=issuer,
+        client_id=client_id,
+        allow_insecure_issuer=allow_insecure,
+    )
+    dpop = DpopKey(state_dir / 'dpop-key.pem')
+    dpop.ensure_key()
+    remote_tokens = RemoteTokenStore(state_dir)
+
+    env_id = ''
+    label = sanitize_text(target, 64)
+    http_base = sanitize_text(explicit_url, 256).rstrip('/') if explicit_url else ''
+    if not http_base:
+        clerk_token = oauth.get_valid_access_token()
+        if not clerk_token:
+            raise RuntimeError('run `xeneon-t3-status login` first or pass --url')
+        if not is_allowed_remote_url(relay_url, allow_insecure):
+            raise RuntimeError('insecure relay URL rejected')
+        _, _, raw = http_request(
+            'GET',
+            f'{relay_url.rstrip("/")}/v1/environments',
+            headers={'Authorization': f'Bearer {clerk_token}'},
+        )
+        envs = json.loads(raw.decode('utf-8')).get('environments') or []
+        needle = target.strip().lower()
+        for env in envs:
+            if not isinstance(env, dict):
+                continue
+            eid = sanitize_text(env.get('environmentId'), 128)
+            elabel = sanitize_text(env.get('label'), 64)
+            if eid.lower() == needle or elabel.lower() == needle:
+                env_id = eid
+                label = elabel or label
+                ep = env.get('endpoint')
+                if isinstance(ep, dict):
+                    http_base = sanitize_text(ep.get('httpBaseUrl'), 256).rstrip('/')
+                break
+        if not env_id or not http_base:
+            raise RuntimeError(f'device {target!r} not found in T3 Connect environments')
+
+    if not is_allowed_remote_url(http_base, allow_insecure):
+        raise RuntimeError('insecure remote environment URL rejected')
+    if not env_id:
+        _, _, raw_desc = http_request('GET', f'{http_base}/.well-known/t3/environment', timeout=5.0)
+        desc = json.loads(raw_desc.decode('utf-8'))
+        env_id = sanitize_text(desc.get('environmentId'), 128)
+        label = sanitize_text(desc.get('label'), 64) or label
+        if not env_id:
+            raise RuntimeError('remote environment descriptor missing environmentId')
+
+    if token_file is not None:
+        raw_secret = token_file.read_text(encoding='utf-8').strip()
+    elif sys.stdin.isatty():
+        print(
+            f'On {label}, run:\n'
+            '  t3 auth session issue --scope orchestration:read --ttl 365d --label "XENEON EDGE" --token-only\n'
+            '(or `t3 pair` for a one-time pairing token)',
+            flush=True,
+        )
+        raw_secret = getpass.getpass(f'Paste token for {label}: ').strip()
+    else:
+        raw_secret = sys.stdin.read().strip()
+    if not raw_secret:
+        raise RuntimeError('no token provided')
+
+    shell_url = f'{http_base}/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1'
+    access_token = raw_secret
+    token_type = 'Bearer'
+    expires_at = 0.0
+    shell: dict | None = None
+    # 1. Try as a direct scoped Bearer access token (`t3 auth session issue --scope orchestration:read`)
+    try:
+        shell = http_json_dpop(
+            dpop,
+            'GET',
+            shell_url,
+            access_token=access_token,
+            token_type='Bearer',
+            extra_headers={'x-t3-orchestration-protocol': '2'},
+        )
+    except HttpError as err:
+        if err.status not in (401, 403):
+            raise
+        # 2. Fall back to exchanging a one-time bootstrap pairing credential (`t3 pair`)
+        token_resp = http_json_dpop(
+            dpop,
+            'POST',
+            f'{http_base}/oauth/token',
+            form_body={
+                'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+                'subject_token': raw_secret,
+                'subject_token_type': 'urn:t3:params:oauth:token-type:environment-bootstrap',
+                'requested_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+                'scope': 'orchestration:read',
+                'client_label': 'XENEON EDGE',
+                'client_device_type': 'desktop',
+                'client_os': 'linux',
+            },
+        )
+        exchanged = token_resp.get('access_token')
+        if not isinstance(exchanged, str) or not exchanged:
+            raise RuntimeError('remote environment did not issue a read-only access token')
+        access_token = exchanged
+        token_type = str(token_resp.get('token_type') or 'DPoP')
+        expires_in = float(token_resp.get('expires_in') or 0)
+        expires_at = time.time() + expires_in if expires_in > 0 else 0.0
+        shell = http_json_dpop(
+            dpop,
+            'GET',
+            shell_url,
+            access_token=access_token,
+            token_type=token_type,
+            extra_headers={'x-t3-orchestration-protocol': '2'},
+        )
+
+    threads = extract_shell_threads(shell or {}, env_id, label, device_local=False)
+    remote_tokens.put(
+        env_id,
+        {
+            'access_token': access_token,
+            'token_type': token_type,
+            'http_base_url': http_base,
+            'label': label,
+            'expires_at': expires_at,
+        },
+    )
+    return env_id, label, len(threads)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1715,6 +2033,29 @@ def main(argv: list[str] | None = None) -> int:
         print('T3 Connect credentials removed.', flush=True)
         return 0
 
+    if args.command == 'pair':
+        if not args.target:
+            parser.error('pair requires a device label or environment ID')
+        env_id, label, count = pair_remote_environment(
+            args.target,
+            state_dir=args.state_dir,
+            relay_url=args.relay_url,
+            issuer=args.oauth_issuer,
+            client_id=args.oauth_client_id,
+            explicit_url=args.url,
+            token_file=args.token_file,
+            allow_insecure=args.allow_insecure_local_relay,
+        )
+        print(f'Paired {label} ({env_id}) for read-only metadata polling ({count} active threads).', flush=True)
+        return 0
+
+    if args.command == 'unpair':
+        if not args.target:
+            parser.error('unpair requires a device label or environment ID')
+        removed = RemoteTokenStore(args.state_dir).remove(args.target)
+        print(f'Unpaired {args.target}.' if removed else f'{args.target} was not paired.', flush=True)
+        return 0
+
     if args.command == 'status':
         oauth = OAuthStore(
             args.state_dir,
@@ -1742,13 +2083,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Relay:         {diag['relay_url']}")
             if diag['relay_error']:
                 print(f"Relay status:  {diag['relay_error']}")
+            shell_set = set(diag['tier1_shell_environments'])
+            paired_set = set(diag['paired_environments'])
             print(f"Devices ({len(diag['snapshot_devices'])}):")
+            unpaired_online = []
             for dev in diag['snapshot_devices']:
                 tag = ' (local)' if dev.get('local') else ''
                 mach = f" [{dev['machine']}]" if dev.get('machine') else ''
-                print(f"  - {dev['label']}{tag}: {dev['state']}{mach}")
+                extra = ''
+                if not dev.get('local') and dev.get('state') == 'online':
+                    if dev['id'] in shell_set:
+                        extra = ' [agents: live]'
+                    elif dev['id'] in paired_set:
+                        extra = ' [agents: paired]'
+                    else:
+                        extra = ' [agents: unpaired]'
+                        unpaired_online.append(dev['label'])
+                print(f"  - {dev['label']}{tag}: {dev['state']}{mach}{extra}")
+            if unpaired_online and not diag['relay_dpop_available']:
+                print(
+                    'To also show remote threads for online devices, pair each with a read-only token:\n'
+                    '  Remote host: t3 auth session issue --scope orchestration:read --ttl 365d --label "XENEON EDGE" --token-only\n'
+                    f'  This host:   xeneon-t3-status pair {unpaired_online[0]}'
+                )
             if diag['tier1_approval_pending']:
-                print('Remote environments using Tier 2 relay activity (approve device for full Tier 1 shell):')
+                print('Remote environments needing approval/re-pairing:')
                 for eid, code in diag['tier1_approval_pending'].items():
                     print(f'  - {eid}: {code}')
             print(f"Active threads: {diag['snapshot_thread_count']}")
