@@ -162,6 +162,7 @@
         "state": { "$ref": "#/$defs/deviceState" },
         "local": { "type": "boolean" },
         "machine": { "type": "string", "maxLength": 32 },
+        "feed_state": { "enum": ["local", "live", "unpaired", "offline"] },
         "agent_count": { "type": "integer", "minimum": 0 },
         "last_checked_ms": { "type": "integer", "minimum": 0 }
       }
@@ -209,7 +210,9 @@
         "status"
       ],
       "properties": {
-        "id": { "enum": ["claude", "codex", "opencode"] },
+        "id": {
+          "enum": ["claude", "codex", "gemini", "grok", "cursor", "opencode"]
+        },
         "label": { "type": "string", "maxLength": 24 },
         "kind": { "enum": ["quota", "local_budget"] },
         "available": { "type": "boolean" },
@@ -218,6 +221,7 @@
         "status": { "type": "string", "maxLength": 24 },
         "plan": { "type": "string", "maxLength": 32 },
         "model": { "type": "string", "maxLength": 80 },
+        "account_count": { "type": "integer", "minimum": 0 },
         "primary": { "$ref": "#/$defs/usageWindow" },
         "secondary": { "$ref": "#/$defs/usageWindow" },
         "today_tokens": {
@@ -239,7 +243,7 @@
       "properties": {
         "providers": {
           "type": "array",
-          "maxItems": 3,
+          "maxItems": 6,
           "items": { "$ref": "#/$defs/providerUsage" }
         }
       }

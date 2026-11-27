@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env, fs,
     io::Read,
     path::{Path, PathBuf},
@@ -27,6 +28,7 @@ const ONE_HOUR_MS: u64 = 60 * 60 * 1_000;
 pub struct UsageCollector {
     legacy_cache_dir: PathBuf,
     state_usage_dir: PathBuf,
+    cliproxy_usage_path: PathBuf,
     opencode_db: PathBuf,
 }
 
@@ -42,6 +44,10 @@ impl Default for UsageCollector {
             .or_else(|| home.as_ref().map(|home| home.join(".local/state")))
             .unwrap_or_else(|| PathBuf::from(".local/state"))
             .join("omarchy/agents/usage");
+        let cliproxy_usage_path = env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/run/user/1000"))
+            .join("xeneon-edge-agents/cliproxy-usage.json");
         let opencode_db = env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|home| home.join(".local/share")))
@@ -50,6 +56,7 @@ impl Default for UsageCollector {
         Self {
             legacy_cache_dir,
             state_usage_dir,
+            cliproxy_usage_path,
             opencode_db,
         }
     }
@@ -61,27 +68,69 @@ impl UsageCollector {
         let legacy_cache_dir = cache_dir.into();
         Self {
             state_usage_dir: legacy_cache_dir.join("missing-state-records"),
+            cliproxy_usage_path: legacy_cache_dir.join("missing-cliproxy-usage.json"),
             opencode_db: legacy_cache_dir.join("missing-opencode.db"),
             legacy_cache_dir,
         }
     }
 
     pub fn sample(&self) -> AiUsageSnapshot {
-        AiUsageSnapshot {
-            providers: vec![
-                self.read_quota_provider("claude", "Claude"),
-                self.read_quota_provider("codex", "Codex"),
-                self.read_opencode(),
-            ],
+        let cliproxy = read_cliproxy_usage(&self.cliproxy_usage_path);
+        let claude = merge_provider(
+            self.read_quota_provider("claude", "claude", "Claude"),
+            cliproxy.get("claude").cloned(),
+        );
+        let codex = merge_provider(
+            self.read_quota_provider("codex", "codex", "Codex"),
+            cliproxy.get("codex").cloned(),
+        );
+        let gemini = merge_provider(
+            self.read_omarchy_optional("agy", "gemini", "Gemini"),
+            cliproxy.get("gemini").cloned(),
+        );
+        let grok = merge_provider(
+            self.read_omarchy_optional("grok", "grok", "Grok"),
+            cliproxy.get("grok").cloned(),
+        );
+        let cursor = merge_provider(
+            self.read_omarchy_optional("cursor", "cursor", "Cursor"),
+            cliproxy.get("cursor").cloned(),
+        );
+        let opencode = self.read_opencode();
+
+        let mut providers = vec![claude, codex];
+        let mut extras = 0usize;
+        for extra in [gemini, grok, cursor] {
+            if extra.available {
+                providers.push(extra);
+                extras += 1;
+            }
         }
+        if opencode.available || extras == 0 {
+            providers.push(opencode);
+        }
+        AiUsageSnapshot { providers }
     }
 
-    fn read_quota_provider(&self, id: &str, label: &str) -> ProviderUsage {
-        let normalized_path = self.state_usage_dir.join(format!("{id}.json"));
+    fn read_quota_provider(&self, file_id: &str, canonical_id: &str, label: &str) -> ProviderUsage {
+        let normalized_path = self.state_usage_dir.join(format!("{file_id}.json"));
         if normalized_path.exists() {
-            return read_omarchy_provider(&normalized_path, id, label);
+            return read_omarchy_provider(&normalized_path, file_id, canonical_id, label);
         }
-        self.read_legacy_provider(id, label, UsageKind::Quota)
+        self.read_legacy_provider(canonical_id, label, UsageKind::Quota)
+    }
+
+    fn read_omarchy_optional(
+        &self,
+        file_id: &str,
+        canonical_id: &str,
+        label: &str,
+    ) -> ProviderUsage {
+        let normalized_path = self.state_usage_dir.join(format!("{file_id}.json"));
+        if normalized_path.exists() {
+            return read_omarchy_provider(&normalized_path, file_id, canonical_id, label);
+        }
+        unavailable_provider(canonical_id, label, UsageKind::Quota, None)
     }
 
     fn read_opencode(&self) -> ProviderUsage {
@@ -119,6 +168,7 @@ impl UsageCollector {
             status,
             plan: bounded(value.get("_plan").and_then(Value::as_str), 32),
             model: bounded(value.get("_model").and_then(Value::as_str), 80),
+            account_count: None,
             primary: None,
             secondary: None,
             today_tokens: aggregate_tokens(value.get("_today_tokens")),
@@ -148,22 +198,164 @@ impl UsageCollector {
     }
 }
 
-fn read_omarchy_provider(path: &Path, id: &str, label: &str) -> ProviderUsage {
+fn merge_provider(omarchy: ProviderUsage, cliproxy: Option<ProviderUsage>) -> ProviderUsage {
+    let Some(proxy) = cliproxy else {
+        return omarchy;
+    };
+    if !proxy.available {
+        return omarchy;
+    }
+    if !omarchy.available {
+        return proxy;
+    }
+    // Both Omarchy and CLIProxyAPI have live data: prefer CLIProxyAPI when it
+    // covers a multi-account pool or fresher limits, and merge today_tokens.
+    let prefer_proxy = proxy.account_count.unwrap_or(0) > 1
+        || (proxy.primary.is_some() && omarchy.primary.is_none())
+        || (omarchy.stale && !proxy.stale);
+    let (mut chosen, other) = if prefer_proxy {
+        (proxy, omarchy)
+    } else {
+        (omarchy, proxy)
+    };
+    if chosen.plan.is_none() {
+        chosen.plan = other.plan;
+    }
+    if chosen.account_count.is_none() {
+        chosen.account_count = other.account_count;
+    }
+    if chosen.secondary.is_none() {
+        chosen.secondary = other.secondary;
+    }
+    chosen.today_tokens = match (chosen.today_tokens, other.today_tokens) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    chosen
+}
+
+fn read_cliproxy_usage(path: &Path) -> HashMap<String, ProviderUsage> {
+    let mut out = HashMap::new();
+    let file_updated_ms = modified_ms(path);
+    let Some(value) = read_bounded_json(path) else {
+        return out;
+    };
+    if value.get("schema_version").and_then(Value::as_u64) != Some(1) {
+        return out;
+    }
+    let Some(providers) = value.get("providers").and_then(Value::as_array) else {
+        return out;
+    };
+    let generated_ms = value
+        .get("generated_at_ms")
+        .and_then(Value::as_u64)
+        .or(file_updated_ms);
+    let file_stale = stale_by_age(generated_ms);
+
+    for item in providers.iter().take(6) {
+        let Some(id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| {
+                matches!(
+                    s.as_str(),
+                    "claude" | "codex" | "gemini" | "grok" | "cursor"
+                )
+            })
+        else {
+            continue;
+        };
+        let label = bounded(item.get("label").and_then(Value::as_str), 24).unwrap_or_else(|| {
+            match id.as_str() {
+                "claude" => "Claude",
+                "codex" => "Codex",
+                "gemini" => "Gemini",
+                "grok" => "Grok",
+                "cursor" => "Cursor",
+                _ => "Agent",
+            }
+            .into()
+        });
+        let primary = item.get("primary").and_then(cliproxy_window);
+        let secondary = item.get("secondary").and_then(cliproxy_window);
+        let today_tokens = aggregate_tokens(item.get("today_tokens"));
+        if primary.is_none() && secondary.is_none() && today_tokens.is_none() {
+            continue;
+        }
+        let status = safe_status(item.get("status").and_then(Value::as_str));
+        let status = if status == "unknown" {
+            "allowed".into()
+        } else {
+            status
+        };
+        let account_count = item
+            .get("account_count")
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+            .filter(|count| *count > 0);
+        let last_updated_ms = item
+            .get("last_updated_ms")
+            .and_then(Value::as_u64)
+            .or(generated_ms);
+        out.insert(
+            id.clone(),
+            ProviderUsage {
+                id,
+                label,
+                kind: UsageKind::Quota,
+                available: status_is_usable(&status),
+                stale: file_stale || stale_by_age(last_updated_ms),
+                source: "cliproxy".into(),
+                status,
+                plan: bounded(item.get("plan").and_then(Value::as_str), 32),
+                model: bounded(item.get("model").and_then(Value::as_str), 80),
+                account_count,
+                primary,
+                secondary,
+                today_tokens,
+                tokens_per_hour: None,
+                last_updated_ms,
+            },
+        );
+    }
+    out
+}
+
+fn cliproxy_window(value: &Value) -> Option<UsageWindow> {
+    let utilization = numeric(value.get("utilization"))?.clamp(0.0, 1.0);
+    let label = bounded(value.get("label").and_then(Value::as_str), 24)?;
+    let reset_at_ms = value.get("reset_at_ms").and_then(Value::as_u64);
+    Some(UsageWindow {
+        label,
+        utilization,
+        reset_at_ms,
+    })
+}
+
+fn read_omarchy_provider(
+    path: &Path,
+    expected_id: &str,
+    canonical_id: &str,
+    label: &str,
+) -> ProviderUsage {
     let last_updated_ms = modified_ms(path);
     let stale = stale_by_age(last_updated_ms);
     let value = read_bounded_json(path);
     let Some(value) = value else {
-        return unavailable_provider(id, label, UsageKind::Quota, last_updated_ms);
+        return unavailable_provider(canonical_id, label, UsageKind::Quota, last_updated_ms);
     };
     let trusted_record = value.get("schemaVersion").and_then(Value::as_u64) == Some(1)
-        && value.get("id").and_then(Value::as_str) == Some(id)
+        && value.get("id").and_then(Value::as_str) == Some(expected_id)
         && value.get("ready").and_then(Value::as_bool) == Some(true)
         && value
             .get("usageStatusText")
             .and_then(Value::as_str)
             .is_some_and(|status| status.trim().is_empty());
     if !trusted_record {
-        return unavailable_provider(id, label, UsageKind::Quota, last_updated_ms);
+        return unavailable_provider(canonical_id, label, UsageKind::Quota, last_updated_ms);
     }
 
     let windows = value
@@ -180,11 +372,11 @@ fn read_omarchy_provider(path: &Path, id: &str, label: &str) -> ProviderUsage {
     let primary = windows.first().cloned();
     let secondary = windows.get(1).cloned();
     if primary.is_none() && secondary.is_none() {
-        return unavailable_provider(id, label, UsageKind::Quota, last_updated_ms);
+        return unavailable_provider(canonical_id, label, UsageKind::Quota, last_updated_ms);
     }
 
     ProviderUsage {
-        id: id.into(),
+        id: canonical_id.into(),
         label: label.into(),
         kind: UsageKind::Quota,
         available: true,
@@ -193,6 +385,7 @@ fn read_omarchy_provider(path: &Path, id: &str, label: &str) -> ProviderUsage {
         status: "allowed".into(),
         plan: bounded(value.get("tierLabel").and_then(Value::as_str), 32),
         model: None,
+        account_count: None,
         primary,
         secondary,
         today_tokens: aggregate_tokens(value.get("todayTotalTokens")),
@@ -271,6 +464,7 @@ fn read_opencode_db(path: &Path) -> ProviderUsage {
         status: status.into(),
         plan: Some("local messages".into()),
         model: latest.model,
+        account_count: None,
         primary: Some(UsageWindow {
             label: "5h".into(),
             utilization: (tokens_5h as f64 / OPENCODE_5H_LIMIT as f64).clamp(0.0, 1.0),
@@ -587,6 +781,7 @@ fn unavailable_provider(
         status: "unavailable".into(),
         plan: None,
         model: None,
+        account_count: None,
         primary: None,
         secondary: None,
         today_tokens: None,
@@ -620,6 +815,7 @@ mod tests {
         UsageCollector {
             legacy_cache_dir: root.join("legacy"),
             state_usage_dir: root.join("state"),
+            cliproxy_usage_path: root.join("cliproxy-usage.json"),
             opencode_db: root.join("opencode.db"),
         }
     }
@@ -827,7 +1023,7 @@ mod tests {
             r#"{"schemaVersion":1,"id":"claude","ready":true,"usageStatusText":{},"limits":[{"label":"5h","percent":0.1}]}"#,
         ] {
             fs::write(&path, record).unwrap();
-            let provider = read_omarchy_provider(&path, "claude", "Claude");
+            let provider = read_omarchy_provider(&path, "claude", "claude", "Claude");
             assert!(!provider.available);
             assert!(provider.primary.is_none());
         }
@@ -1045,5 +1241,65 @@ mod tests {
         assert_eq!(claude.today_tokens, None);
         assert_eq!(claude.tokens_per_hour, None);
         assert_eq!(aggregate_tokens(Some(&Value::String("NaN".into()))), None);
+    }
+
+    #[test]
+    fn collector_merges_cliproxy_and_additional_omarchy_agents() {
+        let temp = tempfile::tempdir().unwrap();
+        let collector = collector_with_sources(temp.path());
+        fs::create_dir_all(&collector.state_usage_dir).unwrap();
+        // Local Claude is waiting for auth while CLIProxyAPI has 2 active Max accounts.
+        fs::write(
+            collector.state_usage_dir.join("claude.json"),
+            r#"{"schemaVersion":1,"id":"claude","ready":true,"usageStatusText":"Waiting for auth","limits":[]}"#,
+        )
+        .unwrap();
+        fs::write(
+            collector.state_usage_dir.join("codex.json"),
+            r#"{"schemaVersion":1,"id":"codex","ready":true,"tierLabel":"Pro 500","usageStatusText":"","limits":[{"label":"Weekly (7-day)","percent":0.02}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            collector.state_usage_dir.join("agy.json"),
+            r#"{"schemaVersion":1,"id":"agy","ready":true,"tierLabel":"Ultra","usageStatusText":"","limits":[{"label":"Session (5-hour)","percent":0.14}],"todayTotalTokens":186629}"#,
+        )
+        .unwrap();
+        fs::write(
+            collector.state_usage_dir.join("grok.json"),
+            r#"{"schemaVersion":1,"id":"grok","ready":true,"tierLabel":"SuperGrok Heavy","usageStatusText":"","limits":[{"label":"Weekly","percent":0.0}],"todayTotalTokens":374451}"#,
+        )
+        .unwrap();
+        fs::write(
+            &collector.cliproxy_usage_path,
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "generated_at_ms": now_ms(),
+                "providers": [
+                    {
+                        "id": "claude",
+                        "label": "Claude",
+                        "plan": "Max",
+                        "account_count": 2,
+                        "status": "allowed",
+                        "primary": {"label": "Weekly", "utilization": 0.09, "reset_at_ms": 1800000000000u64},
+                        "secondary": {"label": "Fable 5 weekly", "utilization": 0.165, "reset_at_ms": 1800000000000u64},
+                        "today_tokens": 2500000
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let snapshot = collector.sample();
+        let ids: Vec<&str> = snapshot.providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude", "codex", "gemini", "grok"]);
+        assert_eq!(snapshot.providers[0].source, "cliproxy");
+        assert_eq!(snapshot.providers[0].account_count, Some(2));
+        assert_eq!(snapshot.providers[0].plan.as_deref(), Some("Max"));
+        assert_eq!(snapshot.providers[0].today_tokens, Some(2_500_000));
+        assert_eq!(snapshot.providers[2].source, "omarchy");
+        assert_eq!(snapshot.providers[2].plan.as_deref(), Some("Ultra"));
+        assert_eq!(snapshot.providers[3].today_tokens, Some(374_451));
     }
 }

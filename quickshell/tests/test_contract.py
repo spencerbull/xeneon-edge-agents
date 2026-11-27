@@ -341,6 +341,7 @@ class QmlSafetyContractTests(unittest.TestCase):
         for component in (
             "AgentCard.qml",
             "DesktopAppButton.qml",
+            "FleetDetailModal.qml",
             "HoldControl.qml",
             "MicroDrawer.qml",
             "VoiceControl.qml",
@@ -407,8 +408,10 @@ class QmlSafetyContractTests(unittest.TestCase):
         self.assertIn("property string hostName:", panel)
         self.assertIn("hostName: root.hostName", panel)
         self.assertIn("MicroDrawer", portal)
+        self.assertIn("FleetDetailModal", portal)
         self.assertNotIn("Process {", usage)
         self.assertNotIn("Process {", micro)
+        self.assertNotIn("Process {", source("components/FleetDetailModal.qml"))
         self.assertNotIn("terminal_text", portal)
         self.assertNotIn("prompt_text", portal)
 

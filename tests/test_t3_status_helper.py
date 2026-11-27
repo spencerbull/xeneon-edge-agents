@@ -660,3 +660,36 @@ class FleetCollectorTests(unittest.TestCase):
             self.assertIn('thr-taker-live', threads)
             self.assertEqual(threads['thr-taker-live']['device_label'], 'taker')
             self.assertFalse(threads['thr-taker-live']['device_local'])
+
+    def test_collect_cliproxy_usage_aggregates_multi_account_quotas_without_secrets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backend = Path(tmp) / 'backend.py'
+            today_utc = time.strftime('%Y-%m-%d', time.gmtime())
+            backend.write_text(
+                '#!/usr/bin/python3\n'
+                'import json, sys\n'
+                'print(json.dumps({"type":"state","configured":True,"url":"https://proxy.example"}), flush=True)\n'
+                'for line in sys.stdin:\n'
+                '    msg = json.loads(line)\n'
+                '    if msg["op"] == "refresh":\n'
+                '        print(json.dumps({"type":"snapshot","accounts":[\n'
+                '            {"id":"a1","provider":"claude","status":"active","quotaSupported":True,"email":"secret@example.com"},\n'
+                '            {"id":"a2","provider":"claude","status":"active","quotaSupported":True,"email":"secret2@example.com"},\n'
+                '            {"id":"m1","provider":"meta","status":"active","quotaSupported":True}\n'
+                f'        ],"usageHistory":{{"buckets":[{{"date":"{today_utc}","provider":"claude","tokenMetrics":{{"total":{{"value":420000}}}}}}]}}}}), flush=True)\n'
+                '    elif msg["op"] == "quota":\n'
+                '        assert msg.get("allowKeyIssue") is False\n'
+                '        used = 10.0 if msg["id"] == "a1" else 20.0\n'
+                '        print(json.dumps({"type":"quota","plan":"max","windows":[{"label":"Weekly","usedPercent":used,"resetAt":"2026-12-01T14:00:00Z"}]}), flush=True)\n'
+            )
+            result = self.mod.collect_cliproxy_usage(backend_path=backend)
+            self.assertIsNotNone(result)
+            self.assertEqual(result['schema_version'], 1)
+            self.assertEqual(len(result['providers']), 1)
+            claude = result['providers'][0]
+            self.assertEqual(claude['id'], 'claude')
+            self.assertEqual(claude['plan'], 'Max')
+            self.assertEqual(claude['account_count'], 2)
+            self.assertAlmostEqual(claude['primary']['utilization'], 0.15, places=3)
+            self.assertEqual(claude['today_tokens'], 420000)
+            self.assertNotIn('secret@example.com', json.dumps(result))

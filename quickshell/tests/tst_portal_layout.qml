@@ -524,4 +524,51 @@ TestCase {
         compare(badgeLabel.textFormat, Text.PlainText)
         verify(portal.attentionSummary().indexOf("2/3 DEVICES") !== -1)
     }
+
+    function test_fleetDetailsModalOpensFromDockSwitchesTabsAndClosesCleanly() {
+        mockStore.backend = {"mode": "t3code", "switchable": true}
+        mockStore.devices = [
+            {"id": "env-saber", "label": "saber", "state": "online", "local": true, "machine": "x86_64", "feed_state": "local", "agent_count": 2},
+            {"id": "env-taker", "label": "taker", "state": "online", "local": false, "machine": "laptop", "feed_state": "unpaired", "agent_count": 0},
+            {"id": "env-mini", "label": "joffrey", "state": "offline", "local": false, "feed_state": "offline", "agent_count": 0}
+        ]
+        mockStore.usage = {
+            "providers": [
+                {"id": "claude", "label": "Claude", "kind": "quota", "available": true, "stale": false, "source": "cliproxy", "status": "allowed", "plan": "Max", "account_count": 2, "primary": {"label": "Weekly", "utilization": 0.09}},
+                {"id": "codex", "label": "Codex", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "Pro 500", "primary": {"label": "Weekly", "utilization": 0.02}},
+                {"id": "gemini", "label": "Gemini", "kind": "quota", "available": true, "stale": false, "source": "omarchy", "status": "allowed", "plan": "Ultra", "primary": {"label": "Session", "utilization": 0.14}}
+            ]
+        }
+        wait(0)
+
+        var fleetButton = findChild(portal, "fleetDetailsButton")
+        var modal = findChild(portal, "fleetDetailModal")
+        var usageTab = findChild(modal, "detailTabUsage")
+        var closeBtn = findChild(modal, "detailModalCloseButton")
+        verify(fleetButton !== null)
+        verify(modal !== null)
+        verify(usageTab !== null)
+        verify(closeBtn !== null)
+
+        verify(fleetButton.activate())
+        compare(portal.fleetDetailOpen, true)
+        compare(portal.fleetDetailTab, "fleet")
+        compare(modal.open, true)
+        compare(portal.controlCenterInteractive, false)
+        verify(findChild(modal, "fleetDetailDevice-0") !== null)
+        verify(findChild(modal, "fleetDetailDevice-2") !== null)
+
+        verify(usageTab.activate())
+        compare(portal.fleetDetailTab, "usage")
+        verify(findChild(modal, "usageDetailCard_claude") !== null)
+        verify(findChild(modal, "usageDetailCard_gemini") !== null)
+
+        verify(closeBtn.activate())
+        compare(portal.fleetDetailOpen, false)
+        compare(portal.controlCenterInteractive, true)
+
+        verify(portal.openFleetDetail("fleet"))
+        mockActivity.ambientMode = true
+        tryCompare(portal, "fleetDetailOpen", false)
+    }
 }

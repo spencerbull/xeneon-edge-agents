@@ -254,7 +254,7 @@ feed_unit=$temp_dir/xeneon-t3-status.service
 feed_helper=$repo_root/config/bin/xeneon-t3-status
 render_template \
   "$repo_root/config/systemd/user/xeneon-t3-status.service.in" "$feed_unit" \
-  BIN_HOME "$bin_home" STATE_HOME "$state_home"
+  BIN_HOME "$bin_home" CONFIG_HOME "$config_home" STATE_HOME "$state_home"
 feed_target=$systemd_dir/xeneon-t3-status.service
 feed_helper_target=$bin_home/xeneon-t3-status
 micro_unit=$temp_dir/xeneon-micro-bridge.service

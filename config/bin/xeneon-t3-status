@@ -81,8 +81,18 @@ DEVICE_FIELDS = (
     'state',
     'local',
     'machine',
+    'feed_state',
     'checked_at_ms',
 )
+
+CLIPROXY_POLL_INTERVAL_SEC = 120.0
+CLIPROXY_PLUGIN_SUBPATH = Path('omarchy/plugins/spencerbull.cliproxyapi/backend.py')
+CLIPROXY_PROVIDER_MAP = {
+    'claude': ('claude', 'Claude'),
+    'codex': ('codex', 'Codex'),
+    'xai': ('grok', 'Grok'),
+    'gemini': ('gemini', 'Gemini'),
+}
 
 LIVE_SHELL_STATUSES = frozenset({'preparing', 'starting', 'running', 'waiting', 'queued'})
 ACTIVE_ACTIVITY_PHASES = frozenset({'starting', 'running'})
@@ -1658,6 +1668,17 @@ class FleetCollector:
             merged[key] = copy
 
         devices = sorted(devices_map.values(), key=device_sort_key)[:MAX_DEVICES]
+        paired_ids = set(self.remote_tokens.load_all().keys())
+        for dev in devices:
+            eid = dev['id']
+            if dev.get('local'):
+                dev['feed_state'] = 'local' if dev.get('state') == 'online' else 'offline'
+            elif dev.get('state') != 'online':
+                dev['feed_state'] = 'offline'
+            elif eid in fresh_shell_envs or eid in paired_ids:
+                dev['feed_state'] = 'live'
+            else:
+                dev['feed_state'] = 'unpaired'
         threads = sorted(merged.values(), key=thread_sort_key)[:MAX_THREADS]
         return {
             'schema_version': 1,
@@ -1769,6 +1790,204 @@ def run_cli_watch(t3_bin: str, t3_home: Path, output: Path) -> int:
     return 0
 
 
+def default_cliproxy_backend() -> Path:
+    cfg = os.environ.get('XDG_CONFIG_HOME')
+    base = Path(cfg) if cfg else Path.home() / '.config'
+    return base / CLIPROXY_PLUGIN_SUBPATH
+
+
+def normalize_cliproxy_plan(raw_plan: str | None) -> str | None:
+    text = sanitize_text(raw_plan, 32)
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered == 'max':
+        return 'Max'
+    if lowered == 'promax':
+        return 'Pro Max'
+    if lowered == 'pro':
+        return 'Pro'
+    return text
+
+
+def collect_cliproxy_usage(backend_path: Path | None = None, timeout_sec: float = 20.0) -> dict | None:
+    """Query the user-owned spencerbull.cliproxyapi plugin for non-secret quota & token totals."""
+    script = backend_path or default_cliproxy_backend()
+    if not script.is_file():
+        return None
+    env = dict(os.environ)
+    env['PYTHONDONTWRITEBYTECODE'] = '1'
+    proc = subprocess.Popen(
+        [sys.executable, '-u', str(script)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    deadline = time.monotonic() + timeout_sec
+
+    def read_msg() -> dict | None:
+        if proc.stdout is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        sel = selectors.DefaultSelector()
+        try:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+            if not sel.select(remaining):
+                return None
+            line = proc.stdout.readline()
+        finally:
+            sel.close()
+        if not line:
+            return None
+        parsed = json.loads(line)
+        return parsed if isinstance(parsed, dict) else None
+
+    def send_msg(payload: dict) -> None:
+        if proc.stdin is None:
+            return
+        proc.stdin.write(json.dumps(payload, separators=(',', ':')) + '\n')
+        proc.stdin.flush()
+
+    try:
+        state = read_msg()
+        if not state or state.get('configured') is not True:
+            return None
+        send_msg({'op': 'refresh'})
+        snap = read_msg()
+        if not snap or snap.get('type') != 'snapshot':
+            return None
+
+        today_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        today_tokens_by_provider: dict[str, int] = {}
+        usage_history = snap.get('usageHistory')
+        if isinstance(usage_history, dict) and isinstance(usage_history.get('buckets'), list):
+            for bucket in usage_history['buckets']:
+                if not isinstance(bucket, dict) or bucket.get('date') != today_utc:
+                    continue
+                raw_prov = str(bucket.get('provider') or '').strip().lower()
+                mapped = CLIPROXY_PROVIDER_MAP.get(raw_prov)
+                if not mapped:
+                    continue
+                canonical_id = mapped[0]
+                metrics = bucket.get('tokenMetrics')
+                total_obj = metrics.get('total') if isinstance(metrics, dict) else None
+                val = total_obj.get('value') if isinstance(total_obj, dict) else None
+                if isinstance(val, (int, float)) and val > 0:
+                    today_tokens_by_provider[canonical_id] = (
+                        today_tokens_by_provider.get(canonical_id, 0) + int(val)
+                    )
+
+        accounts = snap.get('accounts') if isinstance(snap.get('accounts'), list) else []
+        grouped: dict[str, list[dict]] = {}
+        for acct in accounts[:32]:
+            if not isinstance(acct, dict):
+                continue
+            if acct.get('disabled') or acct.get('unavailable'):
+                continue
+            if str(acct.get('status') or '').lower() not in ('active', 'ready', ''):
+                continue
+            raw_prov = str(acct.get('provider') or acct.get('type') or '').strip().lower()
+            mapped = CLIPROXY_PROVIDER_MAP.get(raw_prov)
+            if not mapped:
+                continue
+            canonical_id = mapped[0]
+            grouped.setdefault(canonical_id, []).append(acct)
+
+        providers_out: list[dict] = []
+        current_ms = now_ms()
+        for raw_prov, (canonical_id, label) in CLIPROXY_PROVIDER_MAP.items():
+            accts = grouped.get(canonical_id, [])
+            if not accts and canonical_id not in today_tokens_by_provider:
+                continue
+            plans: list[str] = []
+            window_slots: dict[str, list[tuple[float, int | None]]] = {}
+            window_order: list[str] = []
+            limit_reached = False
+            for acct in accts:
+                plan = normalize_cliproxy_plan(acct.get('plan'))
+                if plan:
+                    plans.append(plan)
+                if not acct.get('quotaSupported') or not acct.get('id'):
+                    continue
+                send_msg({'op': 'quota', 'id': acct['id'], 'allowKeyIssue': False})
+                q = read_msg()
+                if not q or q.get('type') != 'quota':
+                    continue
+                q_plan = normalize_cliproxy_plan(q.get('plan'))
+                if q_plan:
+                    plans.append(q_plan)
+                for win in (q.get('windows') or [])[:4]:
+                    if not isinstance(win, dict):
+                        continue
+                    used = win.get('usedPercent')
+                    if not isinstance(used, (int, float)):
+                        continue
+                    wlabel = sanitize_text(win.get('label'), 24)
+                    if not wlabel:
+                        continue
+                    if win.get('limitReached') is True:
+                        limit_reached = True
+                    util = max(0.0, min(1.0, float(used) / 100.0))
+                    reset_ms = parse_rfc3339_ms(win.get('resetAt'))
+                    if wlabel not in window_slots:
+                        window_slots[wlabel] = []
+                        window_order.append(wlabel)
+                    window_slots[wlabel].append((util, reset_ms))
+
+            built_windows: list[dict] = []
+            for wlabel in window_order[:2]:
+                samples = window_slots[wlabel]
+                avg_util = sum(u for u, _ in samples) / len(samples)
+                resets = [r for _, r in samples if r is not None]
+                built_windows.append({
+                    'label': wlabel,
+                    'utilization': round(avg_util, 4),
+                    'reset_at_ms': min(resets) if resets else None,
+                })
+            today_toks = today_tokens_by_provider.get(canonical_id)
+            if not built_windows and today_toks is None:
+                continue
+            plan_label = plans[0] if plans else None
+            providers_out.append({
+                'id': canonical_id,
+                'label': label,
+                'plan': plan_label,
+                'account_count': len(accts) if accts else None,
+                'status': 'rejected' if limit_reached else 'allowed',
+                'primary': built_windows[0] if len(built_windows) >= 1 else None,
+                'secondary': built_windows[1] if len(built_windows) >= 2 else None,
+                'today_tokens': today_toks,
+                'last_updated_ms': current_ms,
+            })
+
+        return {
+            'schema_version': 1,
+            'generated_at_ms': current_ms,
+            'providers': providers_out,
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        if proc.stdin:
+            proc.stdin.close()
+        if proc.stdout:
+            proc.stdout.close()
+
+
 def run_fleet_daemon(
     t3_home: Path,
     output: Path,
@@ -1805,12 +2024,25 @@ def run_fleet_daemon(
             allow_insecure_relay=allow_insecure_relay,
         )
 
+        cliproxy_output = output.parent / 'cliproxy-usage.json'
+        last_cliproxy_poll = 0.0
+
         def remote_loop() -> None:
+            nonlocal last_cliproxy_poll
             while not stop_event.is_set():
                 try:
                     collector.poll_remote_once()
                 except Exception:
                     pass
+                now_mono = time.monotonic()
+                if now_mono - last_cliproxy_poll >= CLIPROXY_POLL_INTERVAL_SEC:
+                    last_cliproxy_poll = now_mono
+                    try:
+                        cliproxy_snap = collect_cliproxy_usage()
+                        if cliproxy_snap is not None:
+                            atomic_write_json(cliproxy_output, cliproxy_snap, mode=0o600)
+                    except Exception:
+                        pass
                 stop_event.wait(2.0)
 
         worker = threading.Thread(target=remote_loop, name='t3-fleet-poller', daemon=True)
@@ -1828,6 +2060,7 @@ def run_fleet_daemon(
             worker.join(timeout=3.0)
             output.unlink(missing_ok=True)
             output.with_suffix('.tmp').unlink(missing_ok=True)
+            cliproxy_output.unlink(missing_ok=True)
     return 0
 
 

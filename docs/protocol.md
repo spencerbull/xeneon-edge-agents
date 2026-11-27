@@ -65,12 +65,15 @@ dictation marker; snapshots never carry transcripts, tooltips, command output,
 or voice errors from stderr.
 
 `usage` exposes only normalized provider capacity and coarse aggregate
-activity. Utilization is a fraction from 0 through 1; reset timestamps, plan,
-model, `today_tokens`, and `tokens_per_hour` are optional bounded metadata.
+activity (`claude`, `codex`, `gemini`, `grok`, `cursor`, `opencode`, up to 6
+providers). Utilization is a fraction from 0 through 1; reset timestamps, plan,
+model, `account_count`, `today_tokens`, and `tokens_per_hour` are optional
+bounded metadata collected from Omarchy local agent state and optional
+CLIProxyAPI aggregate quota snapshots (`source: "cliproxy"`).
 The aggregate token fields are provider-wide local activity totals, not
-per-request records. Usage never includes credentials, prompts, message
-contents, per-model history, cache/database contents, or provider response
-bodies. `micro` is a
+per-request records. Usage never includes credentials, account identifiers,
+prompts, message contents, per-model history, cache/database contents, or
+provider response bodies. `micro` is a
 read-only normalized view of the local Codex Micro connection and optional
 device status. It never exposes the Micro socket protocol to QML.
 
@@ -85,7 +88,8 @@ names, optional `device` and `device_local` identify which T3 Connect fleet
 host owns the thread, and `state_change_seq` is the millisecond timestamp of
 the classifying turn or settle event. Optional `devices` lists bounded fleet
 host metadata (`id`, `label`, `state`: `online`/`offline`/`unknown`, `local`,
-optional `machine`, `agent_count`, and `last_checked_ms`) so the command center
+optional `machine`, `agent_count`, `last_checked_ms`, and `feed_state`:
+`local`/`live`/`unpaired`/`offline`) so the command center, detail modal,
 and Ambient screen can show online and offline T3 Connect devices without
 exposing endpoints, tokens, or remote credentials.
 

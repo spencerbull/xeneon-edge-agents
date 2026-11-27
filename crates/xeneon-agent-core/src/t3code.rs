@@ -136,6 +136,8 @@ struct StatusDevice {
     #[serde(default)]
     machine: Option<String>,
     #[serde(default)]
+    feed_state: Option<String>,
+    #[serde(default)]
     checked_at_ms: Option<u64>,
 }
 
@@ -187,6 +189,7 @@ impl StatusSnapshot {
                 state: DeviceState::Online,
                 local: true,
                 machine: None,
+                feed_state: Some("local".into()),
                 agent_count: 0,
                 last_checked_ms: Some(self.generated_at_ms),
             }];
@@ -217,12 +220,20 @@ impl StatusSnapshot {
                 .as_deref()
                 .map(|value| sanitize(value, 32))
                 .filter(|value| !value.is_empty());
+            let feed_state = device
+                .feed_state
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| {
+                    matches!(value.as_str(), "local" | "live" | "unpaired" | "offline")
+                });
             devices.push(DeviceView {
                 local: device.local || id == self.environment_id,
                 id,
                 label,
                 state,
                 machine,
+                feed_state,
                 agent_count: 0,
                 last_checked_ms: device.checked_at_ms.or(Some(self.generated_at_ms)),
             });
@@ -551,6 +562,7 @@ impl T3codeClient {
                         state: DeviceState::Offline,
                         local: true,
                         machine: None,
+                        feed_state: Some("offline".into()),
                         agent_count: 0,
                         last_checked_ms: Some(now_ms),
                     }]
@@ -634,6 +646,7 @@ impl T3codeClient {
                     state: DeviceState::Online,
                     local: true,
                     machine: None,
+                    feed_state: Some("local".into()),
                     agent_count: 0,
                     last_checked_ms: Some(now_ms),
                 }]

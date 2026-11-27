@@ -172,6 +172,8 @@ pub struct DeviceView {
     pub local: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_state: Option<String>,
     #[serde(default)]
     pub agent_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +237,8 @@ pub struct ProviderUsage {
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary: Option<UsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

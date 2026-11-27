@@ -28,7 +28,8 @@ SNAPSHOT_KEYS = REQUIRED_SNAPSHOT_KEYS | {
 AGENT_BACKENDS = {"herdr", "t3code"}
 DEVICE_STATES = {"online", "offline", "unknown"}
 REQUIRED_DEVICE_KEYS = {"id", "label", "state", "local"}
-DEVICE_KEYS = REQUIRED_DEVICE_KEYS | {"machine", "agent_count", "last_checked_ms"}
+DEVICE_KEYS = REQUIRED_DEVICE_KEYS | {"machine", "feed_state", "agent_count", "last_checked_ms"}
+USAGE_PROVIDER_ORDER = ["claude", "codex", "gemini", "grok", "cursor", "opencode"]
 REQUIRED_AGENT_KEYS = {
     "id",
     "display_name",
@@ -145,10 +146,11 @@ class FixtureContractTests(unittest.TestCase):
                         )
                     if "usage" in envelope:
                         providers = envelope["usage"]["providers"]
-                        self.assertLessEqual(len(providers), 3)
+                        self.assertLessEqual(len(providers), len(USAGE_PROVIDER_ORDER))
+                        provider_ids = [provider["id"] for provider in providers]
                         self.assertEqual(
-                            [provider["id"] for provider in providers],
-                            ["claude", "codex", "opencode"][: len(providers)],
+                            provider_ids,
+                            [pid for pid in USAGE_PROVIDER_ORDER if pid in provider_ids],
                         )
                         for provider in providers:
                             self.assertIn(

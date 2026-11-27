@@ -392,12 +392,17 @@ QtObject {
             var label = safeString(device.label, "", 64).trim()
             if (label === "")
                 label = id.slice(0, 12)
+            var feedState = safeString(device.feed_state, "", 24).toLowerCase()
+            if (feedState !== "local" && feedState !== "live"
+                    && feedState !== "unpaired" && feedState !== "offline")
+                feedState = ""
             normalized.push({
                 "id": id,
                 "label": label,
                 "state": state,
                 "local": device.local === true,
                 "machine": safeString(device.machine, "", 32).trim(),
+                "feed_state": feedState,
                 "agent_count": Math.max(
                     0,
                     Math.floor(finiteNumber(device.agent_count, 0))
@@ -569,7 +574,14 @@ QtObject {
             ? source.providers
             : []
         var normalized = []
-        var allowedIds = ["claude", "codex", "opencode"]
+        var allowedIds = [
+            "claude",
+            "codex",
+            "gemini",
+            "grok",
+            "cursor",
+            "opencode"
+        ]
         for (var index = 0; index < providers.length; index += 1) {
             var provider = providers[index]
             if (provider === null || provider === undefined
@@ -578,6 +590,10 @@ QtObject {
             var id = safeString(provider.id, "", 24).toLowerCase()
             if (allowedIds.indexOf(id) === -1)
                 continue
+            var accountCount = Math.max(
+                0,
+                Math.floor(finiteNumber(provider.account_count, 0))
+            )
             normalized.push({
                 "id": id,
                 "label": safeString(provider.label, id, 24),
@@ -590,6 +606,7 @@ QtObject {
                 "status": safeString(provider.status, "unknown", 24),
                 "plan": safeString(provider.plan, "", 32),
                 "model": safeString(provider.model, "", 80),
+                "account_count": accountCount,
                 "primary": normalizeUsageWindow(provider.primary),
                 "secondary": normalizeUsageWindow(provider.secondary),
                 "today_tokens": normalizeAggregateTokens(
