@@ -420,6 +420,61 @@ def http_request(
         raise HttpError(err.code, body, resp_headers) from None
 
 
+SHELL_ALLOWLIST_KEYS = frozenset({
+    'projects',
+    'threads',
+    'id',
+    'title',
+    'workspaceRoot',
+    'projectId',
+    'branch',
+    'worktreePath',
+    'providerInstanceId',
+    'modelSelection',
+    'provider',
+    'status',
+    'activityRunStatus',
+    'pendingRuntimeRequest',
+    'pendingBackgroundTasks',
+    'blockedOnThreadWait',
+    'lineage',
+    'relationshipToParent',
+    'settledOverride',
+    'settledAt',
+    'snoozedUntil',
+    'updatedAt',
+    'latestRunCompletedAt',
+    'lastVisitedAt',
+    'archivedAt',
+    'deletedAt',
+})
+
+
+def parse_shell_json_metadata(raw: bytes) -> dict:
+    """Decode /api/orchestration/shell keeping only allowlisted metadata keys."""
+    if not raw:
+        return {}
+
+    def _filter_pairs(pairs: list[tuple[str, object]]) -> dict:
+        out: dict = {}
+        for key, value in pairs:
+            if key not in SHELL_ALLOWLIST_KEYS:
+                continue
+            if key == 'pendingRuntimeRequest':
+                if isinstance(value, dict) and value.get('id'):
+                    out[key] = {'id': sanitize_text(value.get('id'), 128)}
+                else:
+                    out[key] = None
+            elif key == 'pendingBackgroundTasks':
+                out[key] = [True] if isinstance(value, list) and len(value) > 0 else []
+            else:
+                out[key] = value
+        return out
+
+    parsed = json.loads(raw.decode('utf-8'), object_pairs_hook=_filter_pairs)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def http_json_dpop(
     dpop_key: DpopKey,
     method: str,
@@ -431,6 +486,7 @@ def http_json_dpop(
     json_body: dict | None = None,
     form_body: dict[str, str] | None = None,
     timeout: float = HTTP_TIMEOUT_SEC,
+    response_parser=None,
 ) -> dict:
     nonce: str | None = None
     for attempt in range(2):
@@ -450,7 +506,11 @@ def http_json_dpop(
                 form_body=form_body,
                 timeout=timeout,
             )
-            return json.loads(raw.decode('utf-8')) if raw else {}
+            if not raw:
+                return {}
+            if response_parser is not None:
+                return response_parser(raw)
+            return json.loads(raw.decode('utf-8'))
         except HttpError as err:
             next_nonce = err.headers.get('dpop-nonce')
             if (
@@ -463,6 +523,27 @@ def http_json_dpop(
                 continue
             raise
     return {}
+
+
+def http_shell_dpop(
+    dpop_key: DpopKey,
+    url: str,
+    *,
+    access_token: str,
+    token_type: str = 'DPoP',
+    timeout: float = HTTP_TIMEOUT_SEC,
+) -> dict:
+    """Fetch bounded /api/orchestration/shell metadata, dropping non-allowlisted keys at parse time."""
+    return http_json_dpop(
+        dpop_key,
+        'GET',
+        url,
+        access_token=access_token,
+        token_type=token_type,
+        extra_headers={'x-t3-orchestration-protocol': '2'},
+        timeout=timeout,
+        response_parser=parse_shell_json_metadata,
+    )
 
 
 class OAuthStore:
@@ -807,8 +888,13 @@ def read_local_v2_threads(
     t3_home: Path,
     environment_id: str,
     device_label: str,
-) -> list[dict]:
-    """Read only allowlisted metadata scalars from local statev2.sqlite (read-only)."""
+) -> list[dict] | None:
+    """Read only allowlisted metadata scalars from local statev2.sqlite (read-only).
+
+    Returns ``None`` when the database or schema v2 projection cannot be read
+    (e.g. transient lock or missing schema) so callers distinguish read errors
+    from an authoritative empty roster (``[]``).
+    """
     db_path = t3_home / 'userdata' / 'statev2.sqlite'
     if not db_path.is_file():
         return []
@@ -822,13 +908,13 @@ def read_local_v2_threads(
             "AND name='orchestration_v2_projection_threads')"
         ).fetchone()
         if not exists or not exists[0]:
-            return []
+            return None
         schema_row = cur.execute(
             "SELECT last_sequence FROM orchestration_v2_projection_metadata "
             "WHERE projection_name = 'thread-projections' AND schema_version = 2"
         ).fetchone()
         if not schema_row or schema_row[0] is None:
-            return []
+            return None
         rows = cur.execute(
             "SELECT t.thread_id, t.title, json_extract(t.payload_json,'$.branch'), "
             "json_extract(t.payload_json,'$.worktreePath'), "
@@ -870,7 +956,7 @@ def read_local_v2_threads(
             (MAX_SQLITE_CANDIDATES,),
         ).fetchall()
     except sqlite3.Error:
-        return []
+        return None
     finally:
         if conn is not None:
             conn.close()
@@ -1164,6 +1250,7 @@ class FleetCollector:
         self._remote_endpoints: dict[str, str] = {}
         self._remote_shell_threads: dict[str, tuple[float, list[dict]]] = {}
         self._relay_activity_threads: list[dict] = []
+        self._last_local_threads: tuple[float, list[dict]] | None = None
         self._last_relay_error: str | None = None
         self._last_env_poll = 0.0
         self._last_env_success = 0.0
@@ -1433,26 +1520,25 @@ class FleetCollector:
         web_token = self._try_relay_dpop_token(clerk_token, 't3-web', 'environment:status environment:connect')
         now = time.monotonic()
 
-        for env_id, label, discovered_base in targets:
+        def poll_one(target: tuple[str, str, str]) -> None:
+            env_id, label, discovered_base = target
             paired = paired_tokens.get(env_id)
             if paired:
                 http_base = discovered_base or paired.get('http_base_url', '')
                 if http_base and is_allowed_remote_url(http_base, self.allow_insecure_relay):
                     try:
                         shell_url = f'{http_base}/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1'
-                        shell = http_json_dpop(
+                        shell = http_shell_dpop(
                             self.dpop,
-                            'GET',
                             shell_url,
                             access_token=paired['access_token'],
                             token_type=paired.get('token_type') or 'Bearer',
-                            extra_headers={'x-t3-orchestration-protocol': '2'},
                         )
                         threads = extract_shell_threads(shell, env_id, label, device_local=False)
                         with self._lock:
                             self._remote_shell_threads[env_id] = (time.monotonic(), threads)
                             self._env_approval_backoff.pop(env_id, None)
-                        continue
+                        return
                     except HttpError as err:
                         if err.status in (401, 403):
                             with self._lock:
@@ -1460,20 +1546,21 @@ class FleetCollector:
                                     time.monotonic() + APPROVAL_BACKOFF_SEC,
                                     'paired_token_rejected',
                                 )
-                        continue
+                        return
                     except Exception:
-                        continue
+                        return
             if not web_token:
-                continue
+                return
             with self._lock:
                 backoff = self._env_approval_backoff.get(env_id)
             if backoff and backoff[0] > now:
-                continue
+                return
             try:
                 shell = self._fetch_remote_shell(env_id, web_token)
             except HttpError as err:
                 if err.status == 401:
-                    self._env_tokens.pop(env_id, None)
+                    with self._lock:
+                        self._env_tokens.pop(env_id, None)
                     try:
                         shell = self._fetch_remote_shell(env_id, web_token)
                     except HttpError as retry_err:
@@ -1488,34 +1575,40 @@ class FleetCollector:
                                     time.monotonic() + APPROVAL_BACKOFF_SEC,
                                     code or 'approval_required',
                                 )
-                        continue
+                        return
                     except Exception:
-                        continue
+                        return
                 elif err.status == 403:
                     info = err.json_body()
                     code = sanitize_text(
                         info.get('approvalCode') or info.get('code') or info.get('error'),
                         64,
                     )
-                    self._env_tokens.pop(env_id, None)
                     with self._lock:
+                        self._env_tokens.pop(env_id, None)
                         self._env_approval_backoff[env_id] = (
                             time.monotonic() + APPROVAL_BACKOFF_SEC,
                             code or 'approval_required',
                         )
-                    continue
+                    return
                 else:
-                    continue
+                    return
             except Exception:
-                continue
+                return
             threads = extract_shell_threads(shell, env_id, label, device_local=False)
             with self._lock:
                 self._remote_shell_threads[env_id] = (time.monotonic(), threads)
                 self._env_approval_backoff.pop(env_id, None)
 
+        with ThreadPoolExecutor(max_workers=min(6, max(1, len(targets)))) as pool:
+            futures = [pool.submit(poll_one, target) for target in targets]
+            for fut in as_completed(futures):
+                fut.result()
+
     def _fetch_remote_shell(self, env_id: str, web_token: str) -> dict:
-        cached = self._env_tokens.get(env_id)
-        http_base = self._remote_endpoints.get(env_id, '')
+        with self._lock:
+            cached = self._env_tokens.get(env_id)
+            http_base = self._remote_endpoints.get(env_id, '')
         env_token: str | None = None
         token_type = 'DPoP'
         if cached and cached[2] > time.time() + 60 and http_base:
@@ -1559,18 +1652,17 @@ class FleetCollector:
                 raise RuntimeError('remote environment did not issue access token')
             token_type = str(token_resp.get('token_type') or 'DPoP')
             expires_in = float(token_resp.get('expires_in') or 900)
-            self._env_tokens[env_id] = (env_token, token_type, time.time() + max(60.0, expires_in))
+            with self._lock:
+                self._env_tokens[env_id] = (env_token, token_type, time.time() + max(60.0, expires_in))
 
         if not is_allowed_remote_url(http_base, self.allow_insecure_relay):
             raise RuntimeError('insecure remote environment URL rejected')
         shell_url = f'{http_base}/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1'
-        return http_json_dpop(
+        return http_shell_dpop(
             self.dpop,
-            'GET',
             shell_url,
             access_token=env_token,
             token_type=token_type,
-            extra_headers={'x-t3-orchestration-protocol': '2'},
         )
 
     def build_snapshot(self) -> dict | None:
@@ -1581,13 +1673,29 @@ class FleetCollector:
         if not local_env_id:
             return None
 
-        local_threads = (
-            read_local_v2_threads(self.t3_home, local_env_id, local_label)
-            if local_running
-            else []
-        )
         current_ms = now_ms()
         now_mono = time.monotonic()
+
+        local_state = 'online' if local_running else 'offline'
+        local_threads: list[dict] = []
+        local_read_failed = False
+        if local_running:
+            queried = read_local_v2_threads(self.t3_home, local_env_id, local_label)
+            if queried is not None:
+                local_threads = queried
+                with self._lock:
+                    self._last_local_threads = (now_mono, [dict(r) for r in queried])
+            else:
+                with self._lock:
+                    cached_local = self._last_local_threads
+                if cached_local is not None and now_mono - cached_local[0] <= SHELL_FRESH_WINDOW_SEC:
+                    local_threads = [dict(r) for r in cached_local[1]]
+                else:
+                    local_read_failed = True
+                    local_state = 'unknown'
+        else:
+            with self._lock:
+                self._last_local_threads = None
 
         with self._lock:
             env_stale = (
@@ -1610,12 +1718,16 @@ class FleetCollector:
             }
             relay_activities = list(self._relay_activity_threads) if activity_fresh else []
 
+        has_remote_fleet = any(eid != local_env_id for eid in devices_map) or bool(relay_activities)
+        if local_read_failed and not has_remote_fleet:
+            return None
+
         # Always represent local host accurately from live local liveness
         existing_local = devices_map.get(local_env_id, {})
         devices_map[local_env_id] = {
             'id': local_env_id,
             'label': existing_local.get('label') or local_label,
-            'state': 'online' if local_running else 'offline',
+            'state': local_state,
             'local': True,
             'machine': existing_local.get('machine') or (sanitize_text(platform.machine(), 32) or None),
             'checked_at_ms': current_ms,
@@ -1646,6 +1758,8 @@ class FleetCollector:
             env_id = row['environment_id']
             if env_id == local_env_id:
                 continue
+            if env_id in fresh_shell_envs:
+                continue
             dev = devices_map.get(env_id)
             if dev is None:
                 devices_map[env_id] = {
@@ -1660,8 +1774,6 @@ class FleetCollector:
             elif dev.get('state') == 'offline':
                 continue
             key = (env_id, row['thread_id'])
-            if env_id in fresh_shell_envs and key in merged:
-                continue
             copy = dict(row)
             copy['device_label'] = dev['label']
             copy['device_local'] = False
@@ -1672,7 +1784,8 @@ class FleetCollector:
         for dev in devices:
             eid = dev['id']
             if dev.get('local'):
-                dev['feed_state'] = 'local' if dev.get('state') == 'online' else 'offline'
+                state = dev.get('state')
+                dev['feed_state'] = 'local' if state == 'online' else ('offline' if state == 'offline' else None)
             elif dev.get('state') != 'online':
                 dev['feed_state'] = 'offline'
             elif eid in fresh_shell_envs or eid in paired_ids:
@@ -2182,13 +2295,11 @@ def pair_remote_environment(
     shell: dict | None = None
     # 1. Try as a direct scoped Bearer access token (`t3 auth session issue --scope orchestration:read`)
     try:
-        shell = http_json_dpop(
+        shell = http_shell_dpop(
             dpop,
-            'GET',
             shell_url,
             access_token=access_token,
             token_type='Bearer',
-            extra_headers={'x-t3-orchestration-protocol': '2'},
         )
     except HttpError as err:
         if err.status not in (401, 403):
@@ -2216,13 +2327,11 @@ def pair_remote_environment(
         token_type = str(token_resp.get('token_type') or 'DPoP')
         expires_in = float(token_resp.get('expires_in') or 0)
         expires_at = time.time() + expires_in if expires_in > 0 else 0.0
-        shell = http_json_dpop(
+        shell = http_shell_dpop(
             dpop,
-            'GET',
             shell_url,
             access_token=access_token,
             token_type=token_type,
-            extra_headers={'x-t3-orchestration-protocol': '2'},
         )
 
     threads = extract_shell_threads(shell or {}, env_id, label, device_local=False)

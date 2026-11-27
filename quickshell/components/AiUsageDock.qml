@@ -305,7 +305,7 @@ Item {
                 id: windowLabel
 
                 objectName: "usageLabel_" + providerId + "_" + windowRole
-                width: Math.min(136, Math.max(96, Math.ceil(implicitWidth) + 2))
+                width: Math.min(176, Math.max(96, Math.ceil(implicitWidth) + 2))
                 anchors.verticalCenter: parent.verticalCenter
                 text: usageWindow === null
                     ? ""

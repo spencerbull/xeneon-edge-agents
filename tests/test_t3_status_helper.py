@@ -693,3 +693,208 @@ class FleetCollectorTests(unittest.TestCase):
             self.assertAlmostEqual(claude['primary']['utilization'], 0.15, places=3)
             self.assertEqual(claude['today_tokens'], 420000)
             self.assertNotIn('secret@example.com', json.dumps(result))
+
+    def test_parse_shell_json_metadata_drops_disallowed_fields_at_parse_time(self):
+        raw = json.dumps({
+            'projects': [{'id': 'p1', 'title': 'Repo', 'workspaceRoot': '/w', 'secretField': 'DROP_ME'}],
+            'threads': [{
+                'id': 't1',
+                'projectId': 'p1',
+                'title': 'Visible Title',
+                'status': 'running',
+                'latestVisibleMessage': {'id': 'm1', 'role': 'user', 'text': 'PRIVATE_PROMPT_BODY'},
+                'lastError': 'PRIVATE_TRACEBACK',
+                'messages': [{'text': 'NEVER_RETAIN'}],
+                'pendingRuntimeRequest': {'id': 'req-1', 'prompt': 'SECRET_APPROVAL_PROMPT'},
+                'pendingBackgroundTasks': [{'id': 'bg-1', 'description': 'SECRET_BG_CMD'}],
+                'updatedAt': '2026-11-27T18:00:00Z',
+            }],
+        }).encode('utf-8')
+        parsed = self.mod.parse_shell_json_metadata(raw)
+        dumped = json.dumps(parsed)
+        self.assertNotIn('PRIVATE_PROMPT_BODY', dumped)
+        self.assertNotIn('PRIVATE_TRACEBACK', dumped)
+        self.assertNotIn('NEVER_RETAIN', dumped)
+        self.assertNotIn('SECRET_APPROVAL_PROMPT', dumped)
+        self.assertNotIn('SECRET_BG_CMD', dumped)
+        self.assertNotIn('DROP_ME', dumped)
+        self.assertEqual(parsed['threads'][0]['pendingRuntimeRequest'], {'id': 'req-1'})
+        self.assertEqual(parsed['threads'][0]['pendingBackgroundTasks'], [True])
+
+    def test_fresh_shell_excludes_settled_threads_from_relay_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            t3_home = root / 't3'
+            userdata = t3_home / 'userdata'
+            userdata.mkdir(parents=True)
+            (userdata / 'environment-id').write_text('env-local\n')
+            (userdata / 'server-runtime.json').write_text(
+                json.dumps({'version': 1, 'pid': os.getpid(), 'origin': 'http://127.0.0.1:1'})
+            )
+            create_v2_sqlite(userdata / 'statev2.sqlite', [])
+            state_dir = root / 'state'
+            oauth = self.mod.OAuthStore(state_dir, issuer='http://127.0.0.1:1', allow_insecure_issuer=True)
+            dpop = self.mod.DpopKey(state_dir / 'dpop-key.pem')
+            collector = self.mod.FleetCollector(
+                t3_home=t3_home,
+                oauth_store=oauth,
+                dpop_key=dpop,
+                relay_url='http://127.0.0.1:1',
+                allow_insecure_relay=True,
+                expected_local_comm=None,
+            )
+            now_mono = time.monotonic()
+            collector._last_env_success = now_mono
+            collector._last_activity_success = now_mono
+            collector._remote_devices = {
+                'env-taker': {
+                    'id': 'env-taker',
+                    'label': 'taker',
+                    'state': 'online',
+                    'local': False,
+                    'machine': 'laptop',
+                    'checked_at_ms': self.mod.now_ms(),
+                }
+            }
+            # Shell succeeded and filtered out the settled thread -> authoritative empty list
+            collector._remote_shell_threads['env-taker'] = (now_mono, [])
+            # Relay activity still carries the settled thread
+            collector._relay_activity_threads = [{
+                'environment_id': 'env-taker',
+                'device_label': 'taker',
+                'device_local': False,
+                'thread_id': 'thr-settled',
+                'title': 'Already Settled',
+                'project_title': '',
+                'workspace_root': '',
+                'branch': None,
+                'worktree_path': None,
+                'provider': 't3code',
+                'status': 'completed',
+                'settled': False,
+                'snoozed': False,
+                'pending_input': False,
+                'background_work': False,
+                'updated_at': '2026-11-27T18:00:00Z',
+                'latest_run_completed_at': '2026-11-27T18:00:00Z',
+                'last_visited_at': None,
+            }]
+            snapshot = collector.build_snapshot()
+            self.assertIsNotNone(snapshot)
+            self.assertEqual([t['thread_id'] for t in snapshot['threads']], [])
+
+    def test_remote_shell_polling_runs_concurrently_without_starving_fleet(self):
+        class SlowShellHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass
+
+            def do_GET(self):
+                time.sleep(0.25)
+                body = json.dumps({'projects': [], 'threads': []}).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), SlowShellHandler)
+        base_url = f'http://127.0.0.1:{server.server_address[1]}'
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / 'state'
+            oauth = self.mod.OAuthStore(state_dir, issuer=base_url, allow_insecure_issuer=True)
+            dpop = self.mod.DpopKey(state_dir / 'dpop-key.pem')
+            collector = self.mod.FleetCollector(
+                t3_home=root / 't3',
+                oauth_store=oauth,
+                dpop_key=dpop,
+                relay_url=base_url,
+                allow_insecure_relay=True,
+                expected_local_comm=None,
+            )
+            collector._relay_dpop_backoff_until = time.monotonic() + 60.0
+            for idx in range(6):
+                eid = f'env-r{idx}'
+                collector._remote_devices[eid] = {
+                    'id': eid,
+                    'label': f'host-{idx}',
+                    'state': 'online',
+                    'local': False,
+                    'machine': 'laptop',
+                    'checked_at_ms': self.mod.now_ms(),
+                }
+                collector._remote_endpoints[eid] = base_url
+                collector.remote_tokens.put(eid, {
+                    'access_token': f'tok-{idx}',
+                    'token_type': 'Bearer',
+                    'http_base_url': base_url,
+                    'label': f'host-{idx}',
+                    'expires_at': 0.0,
+                })
+            started = time.monotonic()
+            collector._poll_remote_shells('clerk', 'env-local')
+            elapsed = time.monotonic() - started
+            # 6 hosts x 0.25s = 1.5s serially, but ~0.25s in parallel with 6 workers.
+            self.assertLess(elapsed, 0.9)
+            self.assertEqual(len(collector._remote_shell_threads), 6)
+
+    def test_sqlite_lock_error_preserves_last_local_roster_instead_of_clearing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            t3_home = root / 't3'
+            userdata = t3_home / 'userdata'
+            userdata.mkdir(parents=True)
+            (userdata / 'environment-id').write_text('env-local\n')
+            (userdata / 'server-runtime.json').write_text(
+                json.dumps({'version': 1, 'pid': os.getpid(), 'origin': 'http://127.0.0.1:1'})
+            )
+            db_path = userdata / 'statev2.sqlite'
+            create_v2_sqlite(
+                db_path,
+                [{
+                    'id': 'thr-local-1',
+                    'title': 'Active Local Work',
+                    'provider': 'claude',
+                    'run_status': 'running',
+                    'updated_at': '2026-11-27T18:00:00Z',
+                }],
+            )
+            state_dir = root / 'state'
+            oauth = self.mod.OAuthStore(state_dir, issuer='http://127.0.0.1:1', allow_insecure_issuer=True)
+            dpop = self.mod.DpopKey(state_dir / 'dpop-key.pem')
+            collector = self.mod.FleetCollector(
+                t3_home=t3_home,
+                oauth_store=oauth,
+                dpop_key=dpop,
+                relay_url='http://127.0.0.1:1',
+                allow_insecure_relay=True,
+                expected_local_comm=None,
+            )
+            first = collector.build_snapshot()
+            self.assertIsNotNone(first)
+            self.assertEqual([t['thread_id'] for t in first['threads']], ['thr-local-1'])
+
+            # Take an exclusive SQLite lock so read_local_v2_threads fails with sqlite3.OperationalError
+            locker = sqlite3.connect(str(db_path))
+            try:
+                locker.execute('BEGIN EXCLUSIVE')
+                self.assertIsNone(self.mod.read_local_v2_threads(t3_home, 'env-local', 'local'))
+                # Within freshness window: preserves last observed local roster instead of clearing it.
+                during_lock = collector.build_snapshot()
+                self.assertIsNotNone(during_lock)
+                self.assertEqual([t['thread_id'] for t in during_lock['threads']], ['thr-local-1'])
+                # Once stale and no remote fleet exists: fails closed (None) instead of empty online roster.
+                collector._last_local_threads = (
+                    time.monotonic() - self.mod.SHELL_FRESH_WINDOW_SEC - 5.0,
+                    collector._last_local_threads[1],
+                )
+                expired = collector.build_snapshot()
+                self.assertIsNone(expired)
+            finally:
+                locker.rollback()
+                locker.close()
